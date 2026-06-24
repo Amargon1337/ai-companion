@@ -1,0 +1,385 @@
+"""Policy Layer — выбор поведения, а не текста.
+
+Вместо:
+  LLM → генерирует текст
+
+Нужно:
+  State → Policy → Action
+
+Пример:
+  input: user depressed message
+  policy:
+    - do NOT explain
+    - do NOT theorize
+    - do:
+        → reduce cognitive load
+        → ask one concrete question
+        → anchor attention to action
+
+Это начало агентности — система выбирает КАК отвечать, не только ЧТО.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+from typing import Any
+
+from companion.config import DATA_DIR
+from companion.storage.jsonl import append_jsonl, rotate_jsonl
+
+logger = logging.getLogger(__name__)
+
+
+POLICY_LOG_PATH = os.path.join(DATA_DIR, "policy_decisions.jsonl")
+
+
+class UserState(Enum):
+    """Состояние пользователя."""
+    ANXIOUS = "anxious"
+    DEPRESSED = "depressed"
+    CURIOUS = "curious"
+    OVERWHELMED = "overwhelmed"
+    NEUTRAL = "neutral"
+
+
+class ResponseMode(Enum):
+    """Режим ответа."""
+    EXPLAIN = "explain"
+    CONCISE = "concise"
+    ANCHOR = "anchor"
+    EMPATHY = "empathy"
+
+
+@dataclass
+class PolicyConstraints:
+    """Ограничения на поведение."""
+
+    # Что НЕ делать
+    avoid_explanation: bool = False
+    avoid_theorizing: bool = False
+    avoid_questions: bool = False
+    avoid_long_text: bool = False
+
+    # Что делать
+    reduce_cognitive_load: bool = False
+    anchor_to_action: bool = False
+    validate_feelings: bool = False
+    provide_structure: bool = False
+
+    # Лимиты
+    max_questions: int = 1
+
+    # Тональность
+    tone: str = "neutral"  # empathic, analytical, casual, supportive
+
+
+@dataclass
+class PolicyDecision:
+    """Решение о поведении."""
+
+    response_mode: ResponseMode
+    constraints: PolicyConstraints
+    reasoning: str
+    confidence: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "response_mode": self.response_mode.value,
+            "constraints": {
+                "avoid": [k for k, v in vars(self.constraints).items() if k.startswith("avoid_") and v],
+                "do": [k for k, v in vars(self.constraints).items() if not k.startswith("avoid_") and not k.startswith("max_") and not k == "tone" and v],
+                "max_questions": self.constraints.max_questions,
+                "tone": self.constraints.tone,
+            },
+            "reasoning": self.reasoning,
+            "confidence": self.confidence,
+        }
+
+
+class PolicyLayer:
+    """Слой выбора поведения."""
+
+    def __init__(self):
+        # Правила: state → policy
+        self.rules: dict[UserState, list[PolicyDecision]] = self._load_default_rules()
+
+    def _load_default_rules(self) -> dict[UserState, list[PolicyDecision]]:
+        """Загрузить базовые правила."""
+        return {
+            UserState.DEPRESSED: [
+                PolicyDecision(
+                    response_mode=ResponseMode.EMPATHY,
+                    constraints=PolicyConstraints(
+                        avoid_explanation=True,
+                        avoid_theorizing=True,
+                        validate_feelings=True,
+                        reduce_cognitive_load=True,
+                        max_questions=1,
+                        tone="empathic",
+                    ),
+                    reasoning="В депрессии важна валидация без перегрузки информацией",
+                    confidence=0.90,
+                )
+            ],
+
+            UserState.ANXIOUS: [
+                PolicyDecision(
+                    response_mode=ResponseMode.ANCHOR,
+                    constraints=PolicyConstraints(
+                        avoid_theorizing=True,
+                        reduce_cognitive_load=True,
+                        anchor_to_action=True,
+                        provide_structure=True,
+                        max_questions=1,
+                        tone="supportive",
+                    ),
+                    reasoning="При тревоге помогает структура и конкретные действия",
+                    confidence=0.85,
+                )
+            ],
+
+            UserState.OVERWHELMED: [
+                PolicyDecision(
+                    response_mode=ResponseMode.CONCISE,
+                    constraints=PolicyConstraints(
+                        avoid_long_text=True,
+                        avoid_questions=True,
+                        reduce_cognitive_load=True,
+                        provide_structure=True,
+                        max_questions=0,
+                        tone="supportive",
+                    ),
+                    reasoning="При перегрузке — минимум текста, максимум структуры",
+                    confidence=0.88,
+                )
+            ],
+
+            UserState.CURIOUS: [
+                PolicyDecision(
+                    response_mode=ResponseMode.EXPLAIN,
+                    constraints=PolicyConstraints(
+                        max_questions=2,
+                        tone="analytical",
+                    ),
+                    reasoning="При любопытстве можно давать подробные объяснения",
+                    confidence=0.80,
+                )
+            ],
+
+            UserState.NEUTRAL: [
+                PolicyDecision(
+                    response_mode=ResponseMode.CONCISE,
+                    constraints=PolicyConstraints(
+                        max_questions=1,
+                        tone="neutral",
+                    ),
+                    reasoning="Нейтральное состояние — адаптивный ответ",
+                    confidence=0.70,
+                )
+            ],
+        }
+
+    def decide_policy(
+        self,
+        user_state: UserState,
+        message_context: dict[str, Any] | None = None,
+    ) -> PolicyDecision:
+        base_policies = self.rules.get(user_state, self.rules[UserState.NEUTRAL])
+        policy = base_policies[0]
+        self._log_decision(user_state, policy, message_context)
+        return policy
+
+    def _log_decision(
+        self,
+        user_state: UserState,
+        policy: PolicyDecision,
+        context: dict[str, Any] | None,
+    ):
+        """Залогировать решение policy."""
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "user_state": user_state.value,
+            "policy": policy.to_dict(),
+            "context": context or {},
+        }
+
+        append_jsonl(POLICY_LOG_PATH, log_entry)
+        rotate_jsonl(POLICY_LOG_PATH)
+
+    def enforce_constraints(
+        self,
+        response_text: str,
+        constraints: PolicyConstraints,
+    ) -> str:
+        """
+        Проверить и исправить ответ согласно constraints.
+
+        Это post-processing для проверки что LLM следовал правилам.
+        """
+        lines = response_text.strip().split("\n")
+        sentences = []
+
+        for line in lines:
+            if line.strip():
+                # Разбить на предложения (упрощенно)
+                line_sentences = [s.strip() for s in line.split(".") if s.strip()]
+                sentences.extend(line_sentences)
+
+        # Ограничение по количеству вопросов
+        question_count = sum(1 for s in sentences if "?" in s)
+        if question_count > constraints.max_questions:
+            # Удалить лишние вопросы
+            removed = 0
+            filtered = []
+            for s in sentences:
+                if "?" in s:
+                    if removed < (question_count - constraints.max_questions):
+                        removed += 1
+                        continue
+                filtered.append(s)
+            sentences = filtered
+            logger.warning(f"Removed {removed} questions to meet constraint")
+
+        # Собрать обратно
+        result = ". ".join(sentences)
+        if result and not result.endswith((".", "?", "!")):
+            result += "."
+
+        return result
+
+    def detect_user_state(
+        self,
+        message: str,
+        facts: list[Any] | None = None,
+    ) -> UserState:
+        """Определить состояние пользователя из сообщения (heuristic fallback)."""
+        message_lower = message.lower()
+
+        depression_keywords = [
+            "депрессия",
+            "ничего не хочу",
+            "нет сил",
+            "апатия",
+            "бессмысленно",
+            "устал",
+        ]
+        if any(kw in message_lower for kw in depression_keywords):
+            return UserState.DEPRESSED
+
+        anxiety_keywords = [
+            "тревога",
+            "тревожно",
+            "паника",
+            "беспокойство",
+            "волнуюсь",
+            "страх",
+        ]
+        if any(kw in message_lower for kw in anxiety_keywords):
+            return UserState.ANXIOUS
+
+        overwhelmed_keywords = [
+            "не справляюсь",
+            "слишком много",
+            "перегружен",
+            "захлебываюсь",
+            "голова кругом",
+        ]
+        if any(kw in message_lower for kw in overwhelmed_keywords):
+            return UserState.OVERWHELMED
+
+        curious_keywords = [
+            "как работает",
+            "почему",
+            "объясни",
+            "расскажи подробнее",
+            "интересно",
+        ]
+        if any(kw in message_lower for kw in curious_keywords):
+            return UserState.CURIOUS
+
+        return UserState.NEUTRAL
+
+    @staticmethod
+    def from_analyzer_state(state_str: str) -> UserState:
+        """Convert analyzer state string to UserState enum."""
+        mapping = {
+            "ANXIOUS": UserState.ANXIOUS,
+            "DEPRESSED": UserState.DEPRESSED,
+            "CURIOUS": UserState.CURIOUS,
+            "OVERWHELMED": UserState.OVERWHELMED,
+            "NORMAL": UserState.NEUTRAL,
+        }
+        return mapping.get(state_str.upper(), UserState.NEUTRAL)
+
+    def format_prompt_with_policy(
+        self,
+        base_prompt: str,
+        policy: PolicyDecision,
+    ) -> str:
+        """
+        Добавить policy constraints в промпт для LLM.
+
+        Это инструкции для LLM как отвечать.
+        """
+        constraints_lines = []
+
+        constraints_lines.append(f"Response mode: {policy.response_mode.value}")
+        constraints_lines.append("")
+
+        # Что НЕ делать
+        avoid_items = []
+        if policy.constraints.avoid_explanation:
+            avoid_items.append("- НЕ объясняй подробно")
+        if policy.constraints.avoid_theorizing:
+            avoid_items.append("- НЕ строй теории")
+        if policy.constraints.avoid_questions:
+            avoid_items.append("- НЕ задавай вопросов")
+        if policy.constraints.avoid_long_text:
+            avoid_items.append("- НЕ пиши длинно")
+
+        if avoid_items:
+            constraints_lines.append("AVOID:")
+            constraints_lines.extend(avoid_items)
+            constraints_lines.append("")
+
+        # Что делать
+        do_items = []
+        if policy.constraints.reduce_cognitive_load:
+            do_items.append("- Снизь когнитивную нагрузку (простые слова, короткие фразы)")
+        if policy.constraints.anchor_to_action:
+            do_items.append("- Фокус на конкретном действии")
+        if policy.constraints.validate_feelings:
+            do_items.append("- Валидируй чувства")
+        if policy.constraints.provide_structure:
+            do_items.append("- Дай структуру (список, шаги)")
+
+        if do_items:
+            constraints_lines.append("DO:")
+            constraints_lines.extend(do_items)
+            constraints_lines.append("")
+
+        # Лимиты
+        if policy.constraints.max_questions:
+            constraints_lines.append(f"Max questions: {policy.constraints.max_questions}")
+
+        constraints_lines.append(f"Tone: {policy.constraints.tone}")
+        constraints_lines.append("")
+
+        # Собрать промпт
+        policy_section = "\n".join(constraints_lines)
+
+        return f"""{base_prompt}
+
+═══ RESPONSE POLICY ═══
+{policy_section}
+
+Следуй этим правилам строго.
+"""
+
+
+# Global singleton
+policy_layer = PolicyLayer()

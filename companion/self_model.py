@@ -1,0 +1,272 @@
+"""Self-awareness model — бот знает о себе, своих ошибках и ограничениях."""
+from __future__ import annotations
+
+import json
+import os
+from collections import Counter
+from datetime import datetime
+from typing import Any
+
+from companion.config import DATA_DIR
+from companion.storage.jsonl import append_jsonl, rotate_jsonl
+
+SELF_MODEL_PATH = os.path.join(DATA_DIR, "self_model.json")
+ERROR_LOG_PATH = os.path.join(DATA_DIR, "self_errors.jsonl")
+
+
+class SelfModel:
+    """Модель самосознания бота."""
+
+    def __init__(self) -> None:
+        self.data = self._load()
+
+    def _load(self) -> dict[str, Any]:
+        if os.path.exists(SELF_MODEL_PATH):
+            try:
+                with open(SELF_MODEL_PATH, encoding="utf-8") as f:
+                    return json.load(f)
+            except (OSError, json.JSONDecodeError):
+                pass
+        return self._default_model()
+
+    def _default_model(self) -> dict[str, Any]:
+        return {
+            "architecture_version": "2.3",
+            "created_at": datetime.now().isoformat(),
+            "last_updated": datetime.now().isoformat(),
+
+            # Сильные стороны
+            "strengths": [
+                "Долговременная память с консолидацией фактов",
+                "Персонализированный Google Search с учетом контекста",
+                "Защита от personality feedback loop",
+                "ACID consistency между SQLite и JSONL",
+            ],
+
+            # Известные слабости
+            "weaknesses": [
+                "Линейный поиск по фактам O(n) до 10k записей",
+                "Возможность дублирования фактов при близких формулировках",
+                "Отсутствие циклов в fact relations не проверяется",
+                "Embeddings save на каждые 10 документов (I/O overhead)",
+                "Reflection deduplication не реализована",
+            ],
+
+            # Уровни уверенности по доменам (0-1)
+            "confidence_domains": {
+                "architecture_questions": 0.95,
+                "code_analysis": 0.92,
+                "fact_extraction": 0.85,
+                "personality_analysis": 0.78,
+                "psychology_insights": 0.71,
+                "search_grounding": 0.82,
+                "medical_advice": 0.35,  # низкий - не компетентен
+                "local_news_pinsk": 0.40,  # низкий - нет местных данных
+                "legal_advice": 0.30,  # низкий - не юрист
+            },
+
+            # Карта знаний о пользователе (топики)
+            "knowledge_map": {
+                "deep_knowledge": [
+                    "QA и тестирование",
+                    "Python разработка",
+                    "Тревожное расстройство и лечение",
+                    "Морзик (пёс как якорь)",
+                ],
+                "surface_knowledge": [
+                    "Музыкальные предпочтения",
+                    "Детство и школа",
+                    "Семейные отношения",
+                ],
+                "missing_data": [
+                    "Долгосрочные планы и цели",
+                    "Отношения с родителями (детали)",
+                    "Хобби кроме программирования",
+                ]
+            },
+
+        }
+
+    def save(self) -> None:
+        self.data["last_updated"] = datetime.now().isoformat()
+        os.makedirs(os.path.dirname(SELF_MODEL_PATH) or ".", exist_ok=True)
+        with open(SELF_MODEL_PATH, "w", encoding="utf-8") as f:
+            json.dump(self.data, f, ensure_ascii=False, indent=2)
+
+    def log_error(
+        self,
+        error_type: str,
+        query: str,
+        expected: str,
+        actual: str,
+        context: dict | None = None
+    ) -> None:
+        """Логировать собственную ошибку."""
+        error_record = {
+            "type": error_type,
+            "query": query,
+            "expected": expected,
+            "actual": actual,
+            "context": context or {},
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        append_jsonl(ERROR_LOG_PATH, error_record)
+        rotate_jsonl(ERROR_LOG_PATH)
+
+    def get_error_summary(self, days: int = 30) -> dict[str, Any]:
+        """Статистика ошибок за последние N дней."""
+        if not os.path.exists(ERROR_LOG_PATH):
+            return {"total": 0, "by_type": {}, "recent": []}
+
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+
+        errors = []
+        with open(ERROR_LOG_PATH, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    err = json.loads(line.strip())
+                    if err.get("timestamp", "") >= cutoff:
+                        errors.append(err)
+                except json.JSONDecodeError:
+                    pass
+
+        by_type = Counter(e["type"] for e in errors)
+        total = len(errors)
+
+        # Процентное распределение
+        percentages = {
+            k: round(v / total * 100, 1) if total > 0 else 0
+            for k, v in by_type.items()
+        }
+
+        return {
+            "total": total,
+            "by_type": dict(by_type),
+            "percentages": percentages,
+            "recent": errors[-10:],  # последние 10
+        }
+
+    def get_confidence(self, domain: str) -> float:
+        """Получить уровень уверенности по домену."""
+        return self.data["confidence_domains"].get(domain, 0.5)
+
+    def critique_response(
+        self,
+        response: str,
+        query: str,
+        context: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Мета-мониторинг ответа перед отправкой."""
+        critique = {
+            "flags": [],
+            "confidence": 1.0,
+            "warnings": []
+        }
+        # max reduction approach: каждый check может снизить confidence,
+        # но только самое сильное снижение применяется (не кумулятивное)
+        max_reduction = 0.0
+
+        # Проверка 1: Не выдуман ли факт?
+        if any(marker in response for marker in ["возможно", "наверное", "думаю что"]):
+            critique["flags"].append("uncertain_language")
+            max_reduction = max(max_reduction, 0.2)
+
+        # Проверка 2: Есть ли источник для фактических утверждений?
+        if any(trigger in query.lower() for trigger in ["когда", "где", "сколько", "кто"]):
+            if "📎 Источники:" not in response and "Не уверен" not in response:
+                critique["warnings"].append("Фактическое утверждение без источника")
+                max_reduction = max(max_reduction, 0.3)
+
+        # Проверка 3: Не противоречу ли памяти?
+        # (это сложно проверить без доступа к facts, но можно добавить позже)
+
+        # Проверка 4: Адекватность домена
+        for domain, conf in self.data["confidence_domains"].items():
+            if domain.replace("_", " ") in query.lower() and conf < 0.5:
+                critique["warnings"].append(
+                    f"Низкая компетентность в домене '{domain}' ({conf:.0%})"
+                )
+                max_reduction = max(max_reduction, 1.0 - conf)
+
+        critique["confidence"] = 1.0 - max_reduction
+        return critique
+
+    def get_self_description(self) -> str:
+        """Описание самого себя на основе реальных данных."""
+        parts = [
+            f"Я — AI companion bot, версия {self.data['architecture_version']}.",
+            f"Создан {self.data['created_at'][:10]}, последнее обновление {self.data['last_updated'][:10]}.",
+            "",
+            "🔧 Мои сильные стороны:",
+        ]
+
+        for strength in self.data["strengths"]:
+            parts.append(f"  • {strength}")
+
+        parts.append("")
+        parts.append("⚠️ Известные ограничения:")
+
+        for weakness in self.data["weaknesses"][:5]:
+            parts.append(f"  • {weakness}")
+
+        # Ошибки за последние 30 дней
+        err_summary = self.get_error_summary(30)
+        if err_summary["total"] > 0:
+            parts.append("")
+            parts.append(f"📊 За последние 30 дней зафиксировано {err_summary['total']} ошибок:")
+            for err_type, pct in sorted(
+                err_summary["percentages"].items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:3]:
+                parts.append(f"  • {err_type}: {pct}%")
+
+        # Уровни уверенности
+        parts.append("")
+        parts.append("📈 Уровни уверенности по доменам:")
+        conf_sorted = sorted(
+            self.data["confidence_domains"].items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        for domain, conf in conf_sorted[:5]:
+            bar = "█" * int(conf * 10) + "░" * (10 - int(conf * 10))
+            parts.append(f"  {domain}: [{bar}] {conf:.0%}")
+
+        # Карта знаний
+        km = self.data["knowledge_map"]
+        if km["deep_knowledge"]:
+            parts.append("")
+            parts.append("🗺️ Что я знаю о пользователе:")
+            parts.append("  Глубокое понимание: " + ", ".join(km["deep_knowledge"][:3]))
+            if km["surface_knowledge"]:
+                parts.append("  Поверхностное: " + ", ".join(km["surface_knowledge"][:3]))
+            if km["missing_data"]:
+                parts.append("  Пробелы: " + ", ".join(km["missing_data"][:2]))
+
+        return "\n".join(parts)
+
+    def update_knowledge_map(
+        self,
+        topic: str,
+        level: str,  # deep_knowledge | surface_knowledge | missing_data
+    ) -> None:
+        """Обновить карту знаний о пользователе."""
+        km = self.data["knowledge_map"]
+
+        # Удалить из других категорий
+        for key in ["deep_knowledge", "surface_knowledge", "missing_data"]:
+            if topic in km.get(key, []):
+                km[key].remove(topic)
+
+        # Добавить в нужную
+        if level in km:
+            if topic not in km[level]:
+                km[level].append(topic)
+
+        self.save()
+
+# Global singleton
+self_model = SelfModel()

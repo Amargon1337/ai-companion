@@ -1,0 +1,420 @@
+"""Core bot runtime: sessions, LLM routing, compress."""
+from __future__ import annotations
+
+import asyncio
+import logging
+import re as _re
+import time
+from datetime import datetime
+from typing import Any
+
+from aiogram import types
+from aiogram.enums import ChatAction
+
+from companion.background_scheduler import (
+    _last_reflection_time,
+    _REFLECTION_COOLDOWN_SECONDS,
+    background_user_model_reflection,
+    run_background_tasks,
+    safe_task,
+)
+from companion.config import BASE_DIR, SUMMARY_THRESHOLD
+from companion.critique_manager import apply_critique_to_text, run_self_critique
+from companion.grounding_handler import (
+    grounding_answer_only,
+    handle_grounding,
+    should_retry_with_grounding,
+)
+from companion.llm import client as llm
+from companion.llm.analyzer import analyze_message
+from companion.llm.pipeline import run_compress_pipeline
+from companion.llm.sessions import create_default_session
+from companion.memory.retrieval import RetrievalBudgetManager
+from companion.memory.store import MemoryStore
+from companion.models import Fact
+from companion.policy_layer import policy_layer
+from companion.policy_layer import UserState as PolicyUserState
+from companion.reasoning import reasoning_engine
+from companion.runtime_state import RuntimeState
+from companion.services import memory_service, reasoning_service, report_service
+from companion.storage.legacy import LegacyStorage
+
+logger = logging.getLogger(__name__)
+
+# Global singletons
+memory_store = MemoryStore()
+retrieval_mgr = RetrievalBudgetManager()
+
+# In-memory sessions
+user_chats: dict[int, Any] = {}
+user_message_counts: dict[int, int] = {}
+
+# Rate limiter for LLM requests
+_user_request_times: dict[int, list[float]] = {}
+_MAX_REQUESTS_PER_MINUTE = 10
+
+
+async def send_typing(message: types.Message):
+    """Send typing indicator once."""
+    try:
+        await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
+    except Exception:
+        pass
+
+
+async def send_long_message(message: types.Message, text: str) -> None:
+    max_len = 4000
+    while len(text) > max_len:
+        split = max_len
+        m = _re.search(r"[.!?]\s", text[max_len - 200:max_len])
+        if m:
+            split = max_len - 200 + m.end()
+        else:
+            m = _re.search(r"\s", text[max_len - 100:max_len])
+            if m:
+                split = max_len - 100 + m.start()
+        await message.answer(text[:split])
+        text = text[split:].lstrip()
+    if text:
+        await message.answer(text)
+
+
+async def wait_gemini_file_ready(uploaded: Any, timeout: int = 120) -> Any:
+    for _ in range(timeout // 2):
+        if uploaded.state.name != "PROCESSING":
+            return uploaded
+        await asyncio.sleep(2)
+        uploaded = await llm.run_llm(llm.get_file, uploaded.name)
+    raise TimeoutError(f"File {uploaded.name} not ready after {timeout}s")
+
+
+def _query_text(payload: Any) -> str:
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, list) and payload:
+        first = payload[0]
+        if isinstance(first, str):
+            return first
+    return ""
+
+
+def _persist_session(user_id: int) -> None:
+    memory_store.db.save_session(user_id, user_message_counts.get(user_id, 0))
+
+
+async def compress_and_reset(user_id: int) -> str | None:
+    if user_id not in user_chats:
+        return None
+    chat = user_chats[user_id]
+
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            summary = await llm.run_llm(run_compress_pipeline, memory_store, chat, user_id)
+            if summary:
+                user_message_counts[user_id] = 0
+                hist = [
+                    llm.history_item("user", f"[Саммери]\n{summary}"),
+                    llm.history_item("model", "Понял."),
+                ]
+                user_chats[user_id] = await llm.run_llm(
+                    create_default_session, memory_store, retrieval_mgr, hist
+                )
+                _persist_session(user_id)
+                return summary
+            else:
+                logger.warning(f"Compress attempt {attempt + 1}/{max_retries} returned empty summary")
+        except Exception as e:
+            logger.error(f"Compress attempt {attempt + 1}/{max_retries} failed: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2)
+
+    user_message_counts[user_id] = max(0, user_message_counts[user_id] - 25)
+    logger.error(f"Compress failed after {max_retries} attempts, reduced counter to {user_message_counts[user_id]}")
+    return None
+
+
+def _restore_sessions() -> None:
+    """Load persisted session state from SQLite into memory."""
+    if not user_chats:
+        saved = memory_store.db.load_sessions()
+        for uid, count in saved.items():
+            if uid not in user_chats:
+                user_message_counts[uid] = count
+        if saved:
+            logger.info("Restored %d sessions from database", len(saved))
+
+
+async def build_context(message: types.Message, content_payload: Any) -> dict | None:
+    """Unified preprocessing: rate limit, session, retrieval, policy, grounding."""
+    _restore_sessions()
+    uid = message.from_user.id
+    query = _query_text(content_payload)
+    if not check_rate_limit(uid, message):
+        return None
+
+    state = RuntimeState()
+    if isinstance(content_payload, str) and content_payload.strip():
+        state.user_message = content_payload
+
+        # LLM-based analysis replaces mood_lite, importance heuristics, and intent regex
+        analysis = await asyncio.to_thread(analyze_message, content_payload)
+        state.message_importance = analysis["estimated_importance"]
+        state.mood_state = analysis["user_mood"]
+        state.intent = analysis["intent"]
+        state.intent_confidence = analysis["confidence"]
+        state.user_state = analysis["user_state"]
+        state.command = analysis["command"]
+
+        memory_store.log_message(
+            role="user", text=content_payload, importance=analysis["estimated_importance"],
+            mode="default", signals=[], user_id=uid,
+        )
+        state.reasoning_context = await asyncio.to_thread(
+            reasoning_engine.auto_reasoning_context, content_payload, analysis["estimated_importance"]
+        )
+        await asyncio.to_thread(memory_service.auto_add_event_from_message, content_payload, analysis["estimated_importance"])
+
+    intent = state.intent or "memory"
+    conf = state.intent_confidence or 0.6
+    policy_decision = _get_policy_decision(state, query)
+    state.policy_constraints = policy_decision.constraints if policy_decision else None
+    ctx_data = _load_retrieval_context(query, state.reasoning_context)
+
+    if query and intent in ("world", "mixed") and conf >= 0.55:
+        if await handle_grounding(message, query, ctx_data, uid, retrieval_mgr, memory_store):
+            return None
+
+    if uid not in user_chats:
+        await _init_user_session(uid, query)
+    user_message_counts[uid] = user_message_counts.get(uid, 0) + 1
+    run_background_tasks(uid, state, memory_store, user_message_counts)
+    if user_message_counts[uid] >= SUMMARY_THRESHOLD:
+        await message.answer("Сжимаю контекст...")
+        await compress_and_reset(uid)
+
+    return {
+        "uid": uid, "query": query, "state": state, "intent": intent,
+        "policy_decision": policy_decision, "ctx_data": ctx_data,
+    }
+
+
+async def _route_command(message: types.Message, command: str, text: str) -> bool:
+    """Route a command from LLM analysis to the appropriate service."""
+    routing = {
+        "reset_context": reasoning_service.reset_context,
+        "show_facts": memory_service.show_facts,
+        "show_notes": memory_service.show_notes,
+        "export_diary": memory_service.export_diary,
+        "show_timeline": memory_service.show_timeline,
+        "show_context": report_service.show_context,
+        "week_digest": report_service.show_week_digest,
+        "retrospective": report_service.show_retrospective,
+        "selfie": report_service.show_selfie,
+        "show_goals": reasoning_service.show_goals,
+        "show_reasoning": reasoning_service.show_reasoning_state,
+        "self_description": reasoning_service.show_self_description,
+        "knowledge_map": reasoning_service.show_selfmap,
+        "show_todos": reasoning_service.show_todos,
+        "clear_done": reasoning_service.clear_done_todos,
+    }
+
+    handler = routing.get(command)
+    if handler:
+        await handler(message)
+        return True
+
+    if command == "add_goal":
+        payload = _strip_prefix(text, ["моя цель", "я хочу"])
+        await reasoning_service.add_goal_from_text(message, payload if payload else text)
+        return True
+
+    if command == "diary_entry":
+        payload = _strip_prefix(text, ["запиши в дневник", "добавь в дневник", "сохрани в дневник"])
+        await memory_service.add_diary_entry(message, payload if payload else text)
+        return True
+
+    if command == "add_todo":
+        payload = _strip_prefix(text, ["добавь задачу", "создай задачу", "новая задача"])
+        await reasoning_service.add_todo(message, payload if payload else text)
+        return True
+
+    if command == "complete_todo":
+        await reasoning_service.complete_todo(message, text)
+        return True
+
+    if command == "delete_todo":
+        await reasoning_service.delete_todo(message, text)
+        return True
+
+    if command == "monthbook":
+        match = _re.search(r"(20\d{2}-\d{2})", text)
+        await report_service.show_monthbook(message, match.group(1) if match else None)
+        return True
+
+    if command == "show_year":
+        year_match = _re.search(r"\d{4}", text)
+        if year_match:
+            await memory_service.show_year(message, year_match.group())
+            return True
+
+    return False
+
+
+def _strip_prefix(text: str, prefixes: list[str]) -> str:
+    lowered = text.lower().strip()
+    for prefix in prefixes:
+        if lowered.startswith(prefix):
+            return text[len(prefix):].strip(" :-—")
+    return text
+
+
+async def process_llm_request(message: types.Message, content_payload: Any) -> None:
+    ctx = await build_context(message, content_payload)
+    if ctx is None:
+        return
+
+    state = ctx["state"]
+
+    # Route commands via LLM-analyzed intent
+    if state.intent == "command" and state.command:
+        if await _route_command(message, state.command, str(content_payload)):
+            memory_store.log_message(
+                role="assistant",
+                text=f"[Выполнена команда: {state.command}]",
+                importance=4, mode="command", user_id=ctx["uid"],
+            )
+            return
+
+    chat = user_chats[ctx["uid"]]
+    await _generate_and_send_response(
+        message, chat, state, content_payload, ctx["query"],
+        ctx["ctx_data"], ctx["policy_decision"], ctx["uid"],
+    )
+
+
+def check_rate_limit(uid: int, message: types.Message) -> bool:
+    now = time.time()
+    if uid not in _user_request_times:
+        _user_request_times[uid] = []
+    _user_request_times[uid] = [t for t in _user_request_times[uid] if now - t < 60]
+
+    if len(_user_request_times[uid]) >= _MAX_REQUESTS_PER_MINUTE:
+        safe_task(message.answer(
+            "\u23f3 Слишком много запросов. Подожди минуту."
+        ), "rate_limit_message")
+        return False
+
+    _user_request_times[uid].append(now)
+    return True
+
+
+def _get_policy_decision(state: RuntimeState, query: str) -> Any | None:
+    if state.user_message:
+        user_state = policy_layer.from_analyzer_state(state.user_state)
+        policy_decision = policy_layer.decide_policy(
+            user_state=user_state,
+            message_context={"user_message_length": len(state.user_message)}
+        )
+        logger.info(f"Policy decision: mode={policy_decision.response_mode.value} (from analyzer state={state.user_state})")
+        return policy_decision
+    return None
+
+
+def _load_retrieval_context(query: str = "", reasoning_context: dict[str, Any] | None = None):
+    reasoning_context = reasoning_context or reasoning_engine.auto_reasoning_context(query)
+    return {
+        "facts": memory_store.list_facts("active"),
+        "reflections": memory_store.list_reflections(),
+        "summaries": LegacyStorage.load_all_summaries()[-3:],
+        "permanent_notes": LegacyStorage.load_permanent_notes(),
+        "personality": memory_store.build_personality_snapshot_text(),
+        "recent": memory_store.recent_messages(min_importance=6, limit=10),
+        "active_goals": reasoning_context.get("active_goals", []),
+        "causal_links": reasoning_context.get("causal_links", []),
+        "predictions": reasoning_context.get("predictions", []),
+        "world_model_context": reasoning_context.get("world_model_context", ""),
+    }
+
+
+async def _init_user_session(uid, query):
+    latest = LegacyStorage.load_latest_summary()
+    hist = ([llm.history_item("user", f"[Контекст]\n{latest}"), llm.history_item("model", "Понял.")] if latest else [])
+    user_chats[uid] = await llm.run_llm(create_default_session, memory_store, retrieval_mgr, hist, query)
+    _persist_session(uid)
+
+
+async def _generate_and_send_response(message, chat, state, content_payload, query, ctx_data, policy_decision, uid):
+    if isinstance(content_payload, str) and query:
+        bundle = retrieval_mgr.select(
+            query=query, facts=ctx_data["facts"], reflections=ctx_data["reflections"],
+            summaries=ctx_data["summaries"], permanent_notes=ctx_data["permanent_notes"],
+            personality_snapshot=ctx_data["personality"], recent_messages=ctx_data["recent"],
+            active_goals=ctx_data.get("active_goals", []),
+            causal_links=ctx_data.get("causal_links", []),
+            predictions=ctx_data.get("predictions", []),
+            world_model_context=ctx_data.get("world_model_context", ""),
+            mood=state.mood_state,
+        )
+        ctx = bundle.to_prompt_block()
+        user_block = _build_user_prompt_block(content_payload, state.reasoning_context, ctx)
+        if state.policy_constraints and policy_decision:
+            content_payload = policy_layer.format_prompt_with_policy(
+                base_prompt=user_block,
+                policy=policy_decision
+            )
+        else:
+            content_payload = user_block
+
+    await send_typing(message)
+    try:
+        response = await llm.run_llm(chat.send_message, content_payload)
+        text = response.text or ""
+        if state.policy_constraints and policy_decision and text:
+            text = policy_layer.enforce_constraints(text, state.policy_constraints)
+
+        critique = run_self_critique(query, text, ctx_data)
+        state.critique_result = critique
+        if text:
+            text = apply_critique_to_text(text, critique)
+        if critique.get("confidence", 1.0) < 0.55 and query and should_retry_with_grounding(query, critique):
+            grounded = await grounding_answer_only(query, ctx_data, retrieval_mgr)
+            if grounded:
+                text = grounded
+
+        await send_long_message(message, text)
+        if text:
+            memory_store.log_message(role="assistant", text=text[:500], importance=4, mode="default", user_id=uid)
+        state.llm_response = text
+        if state.message_importance >= 7 and text:
+            now = time.time()
+            if now - _last_reflection_time.get(uid, 0) >= _REFLECTION_COOLDOWN_SECONDS:
+                _last_reflection_time[uid] = now
+                safe_task(background_user_model_reflection(state, memory_store), "user_model_reflection")
+    except Exception as e:
+        logger.error(f"LLM error: {e}")
+        await message.answer(f"API ошибка: {e}")
+
+
+def fact_from_permanent_note(note: str) -> Fact:
+    return Fact(
+        fact=note,
+        date=datetime.now().strftime("%Y-%m-%d"),
+        importance=9,
+        confidence=1.0,
+        source="permanent_note",
+        source_type="user",
+        memory_kind="permanent",
+        tags=["permanent"],
+    )
+
+
+def _build_user_prompt_block(content_payload: str, reasoning_context: dict[str, Any], retrieval_context: str) -> str:
+    parts = [f"[Сообщение пользователя]\n{content_payload}"]
+    if reasoning_context.get("causal_trigger"):
+        parts.append("[Режим reasoning]\nПользователь спрашивает о причинах. Используй причинно-следственный анализ, если контекст это поддерживает.")
+    if reasoning_context.get("future_trigger"):
+        parts.append("[Режим reasoning]\nПользователь спрашивает о будущем. Учитывай прогнозы, условия и степень неопределенности.")
+    if retrieval_context:
+        parts.append(f"[Релевантная память для контекста]\n{retrieval_context}")
+    return "\n\n".join(parts)

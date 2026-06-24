@@ -1,0 +1,2421 @@
+================================================================================
+                     COMPLETE REVERSE ENGINEERING & TECHNICAL DOCUMENTATION
+                   AI COMPANION TELEGRAM BOT — PERSONAL MEMORY ARCHITECTURE
+================================================================================
+Generated: 2026-06-23
+Framework: Python 3.11+ / aiogram 3.x / Google Gemini API
+Architecture Version: 2.3 (self-reported by SelfModel)
+Author: Senior Software Architect — Full Audit
+================================================================================
+
+TABLE OF CONTENTS
+────────────────────────────────────────────────────────────────────────────────
+1.  PROJECT OVERVIEW
+2.  HIGH LEVEL ARCHITECTURE
+3.  DIRECTORY STRUCTURE
+4.  MESSAGE PROCESSING PIPELINE
+5.  MEMORY SYSTEM
+6.  STORAGE LAYER
+7.  RETRIEVAL ENGINE
+8.  REASONING ENGINE
+9.  PERSONALITY MODEL
+10. SELF CRITIQUE SYSTEM
+11. GROUNDING SYSTEM
+12. SERVICES
+13. INTENT ROUTER
+14. COMMANDS
+15. NATURAL LANGUAGE COMMANDS
+16. BACKGROUND TASKS
+17. DATABASE SCHEMA
+18. CONFIGURATION
+19. ERROR HANDLING
+20. PERFORMANCE ANALYSIS
+21. SECURITY ANALYSIS
+22. PRODUCTION READINESS
+23. TECHNICAL DEBT
+24. FUTURE IMPROVEMENTS
+25. FINAL SYSTEM MAP
+26. EXECUTIVE SUMMARY (for new developers)
+────────────────────────────────────────────────────────────────────────────────
+
+
+================================================================================
+1. PROJECT OVERVIEW
+================================================================================
+
+1.1 Purpose
+───────────
+This is a personal AI companion Telegram bot designed for a single user (Ivan).
+The bot maintains long-term memory, builds a dynamic personality model, performs
+causal reasoning, makes predictions, manages goals, executes Google-grounded
+web search, and adapts its conversational style through a policy layer.
+
+1.2 Bot Type
+────────────
+- Single-user private Telegram bot
+- Uses aiogram 3.x for Telegram interaction
+- Uses Google Gemini API (gemini-3.1-flash-lite for chat, gemini-2.5-flash for
+  search with grounding) as the LLM backend
+- Memory-backed with SQLite primary store + JSONL append-only audit logs
+- Runs as a long-lived Python process (asyncio event loop)
+
+1.3 Core Capabilities
+─────────────────────
+- Long-term memory via fact extraction, consolidation, reflection generation
+- Personality modeling with interests, values, beliefs, fears, motivations
+- Goal management (CRUD + tracking)
+- Causal reasoning engine (cause-effect links between events)
+- Prediction engine (hypothesis tracking with verification/falsification)
+- World model (active contexts, recent patterns)
+- Google Search with grounding (personalized web search)
+- Intent routing (natural language commands like "запомни...", "моя цель...")
+- Self-critique (confidence scoring, warning flags, uncertainty detection)
+- Policy layer (adaptive response mode based on detected user state)
+- Mood detection (heuristic-based emotional state inference from text)
+- Importance scoring and decay for facts
+- Rate limiting, circuit breakers for background tasks
+- TikTok downloading / voice recognition / document processing / media handling
+- Monthbook generation (monthly autobiographical chapter assembly)
+- Retrospective analysis (30-day change detection)
+- Self-model introspection (bot knows its own strengths, weaknesses, domains)
+
+1.4 Architecture Philosophy
+───────────────────────────
+The architecture follows a "memory-first" design with these principles:
+- NEVER DELETE — facts are archived/inactivated, never removed
+- Dual-write: SQLite (ACID primary) + JSONL (append-only audit trail)
+- Retrieval-augmented generation (RAG) via RetrievalBudgetManager
+- Modular pipeline: compress → extract facts → consolidate → reflect → personality
+- Background processing for non-critical updates (personality, reflections)
+- Circuit breakers prevent cascading failures in background tasks
+- Self-critique with grounding fallback for uncertain factual responses
+
+1.5 Current Maturity Level
+──────────────────────────
+Classification: BETA / EARLY PRODUCTION
+- Core pipeline works and is tested (3 test files, conftest with fixtures)
+- Many dead .pyc caches from removed modules indicate significant refactoring
+- Data corruption in JSONL files (encoding issues visible in beliefs, goals,
+  causal_links — garbled text suggests UTF-8/CP1251 mismatch)
+- Security tokens are HARDCODED in api.env (included in repo!)
+- No separation of concerns between bot_core.py (~561 lines) and services
+- user_model.py has mostly stub implementations
+- Several stale .pyc files from deleted modules (autonomous_reasoning,
+  background_workers, conflict_detection, embeddings, etc.)
+- No CI/CD, no Docker, no health checks, no metrics
+- Single-user hardcoded via ADMIN_IDS
+
+
+================================================================================
+2. HIGH LEVEL ARCHITECTURE
+================================================================================
+
+2.1 Architectural Flow Diagram (Text)
+──────────────────────────────────────
+
+  Telegram
+     │
+     ▼
+  [AuthMiddleware]  ─── blocks non-admin users
+     │
+     ▼
+  [Handlers]  ─── chat.py, media.py, intents.py
+     │  │
+     │  ▼
+     │  [Intent Router] ─── try_handle_intent() in intents.py
+     │       │                  • Natural language command matching
+     │       ▼
+     │  [Services] ─── memory_service, reasoning_service, report_service
+     │       │
+     ▼       ▼
+  [bot_core.py/build_context()]  ─── Unified preprocessing pipeline
+     │
+     ├── Rate Limit Check ─── check_rate_limit()
+     ├── Importance Scoring ─── score_message_importance()
+     ├── Mood Inference ─────── infer_mood_lite()
+     ├── Message Logging ────── memory_store.log_message()
+     ├── Reasoning Context ──── reasoning_engine.auto_reasoning_context()
+     ├── Memory Event Capture ─ memory_service.auto_add_event_from_message()
+     ├── Intent Classification ─ classify_intent() → memory | world | mixed
+     ├── Policy Decision ────── policy_layer.detect_user_state() + decide_policy()
+     ├── Retrieval Context ──── _load_retrieval_context() → RetrievalBudgetManager
+     └── Grounding Check ────── if world/mixed → search_with_grounding()
+           │
+           ▼
+  [Chat Session] ─── Gemini LLM session (create_default_session)
+           │
+           ▼
+  [Response Generation]
+     │
+     ├── RetrievalBundle.to_prompt_block() ─── context assembly
+     ├── Policy prompt formatting ──────────── format_prompt_with_policy()
+     ├── LLM send_message() ────────────────── response.text
+     ├── Self Critique ─────────────────────── _run_self_critique()
+     │    ├── Confidence check
+     │    ├── Warning flag check
+     │    └── Grounding retry if low confidence
+     ├── Policy enforcement ────────────────── enforce_constraints()
+     └── Back to Telegram via send_long_message()
+
+  Background Tasks (fire-and-forget with semaphore & circuit breaker):
+     ├── _background_user_model_reflection() ─── every important interaction
+     └── _background_personality_micro_update() ─ every 10 messages
+
+  Compression Pipeline (triggered every ~50 messages):
+     SUMMARY_PROMPT → extract_facts() → consolidate_facts()
+     → generate_reflections() → generate_personality_snapshot()
+     → apply_importance_decay() → update_master_summary()
+
+
+2.2 Block Descriptions
+──────────────────────
+
+AUTH MIDDLEWARE (main.py:28-35):
+───────────────────────────────
+- Class: AuthMiddleware
+- Checks every incoming message against ADMIN_IDS
+- Rejects non-admin users with "Пошёл нахуй, ты не Иван"
+- Applied as outer_middleware on dp.message
+
+HANDLERS (handlers/):
+────────────────────
+- chat.py: registers 6 slash commands + text handler + TikTok handler
+- media.py: registers voice, document, photo/sticker, video handlers
+- intents.py: regex-based natural language command dispatcher
+
+BOT CORE (bot_core.py):
+──────────────────────
+- Central orchestrator (~561 lines)
+- Manages global singletons: memory_store, retrieval_mgr, user_chats
+- Rate limiting, session management, pipeline orchestration
+- Grounding handler, self-critique, response generation
+
+RETRIEVAL ENGINE (memory/retrieval.py):
+──────────────────────────────────────-
+- RetrievalBudgetManager class
+- select() → ranking, scoring, trimming within char budget
+- Pinned facts guarantee (core_identity, anchor, permanent tags)
+- Mood-aware boosting
+- Summary stack (3-tier: last, keyword-matched, master)
+
+REASONING ENGINE (reasoning.py):
+────────────────────────────────
+- ReasoningEngine singleton
+- Goal management (CRUD + ranking)
+- Causal link tracking (cause→effect with confidence)
+- Prediction tracking (hypothesis→outcome verification)
+- World model (active contexts, patterns)
+- Auto-capture goals and predictions from conversation
+
+LLM LAYER (llm/):
+────────────────
+- client.py: Gemini wrapper (thread-safe via asyncio.to_thread)
+- sessions.py: system instruction builder with RAG
+- pipeline.py: compress pipeline (facts, consolidation, reflections, personality)
+- prompts.py: all system prompts and task templates
+- grounding.py: intent classification (world/memory/mixed)
+- master_summary.py: Tier 3 long-term context maintenance
+
+MEMORY LAYER (memory/):
+──────────────────────-
+- MemoryStore: unified interface for facts, messages, relations, reflections, beliefs
+- Importance scoring & decay
+- Text similarity for dedup (char n-grams)
+- Mood-aware retrieval boosting
+
+STORAGE LAYER (storage/):
+────────────────────────-
+- Dual: SQLite (MemoryDatabase) + JSONL (append_jsonl/read_jsonl/rotate_jsonl)
+- LegacyStorage: flat file I/O (diary, summaries, personality, todos, mood)
+- JSONL rotation at 50MB / 500k lines
+
+SERVICES (services/):
+────────────────────
+- memory_service: facts, notes, diary, timeline, events
+- reasoning_service: goals, todos, context reset
+- report_service: summaries, personality reports, week digests, monthbooks
+
+
+================================================================================
+3. DIRECTORY STRUCTURE
+================================================================================
+
+3.1 Root Level
+───────────────
+C:\Games\
+├── bot.py                          # Entry point: `python bot.py`
+├── api.env                         # API keys (COMMITTED TO REPO — SECURITY RISK)
+├── requirements.txt                # Dependencies
+├── pyproject.toml                  # Ruff + mypy config
+├── .pre-commit-config.yaml         # Pre-commit hooks (ruff, mypy)
+├── .gitignore                      # Ignores data/, monthbook/, api.env, *.pyc
+├── personality.json                # Personality model (interests, beliefs, etc.)
+├── ivan.txt                        # Static persona document (~43 lines)
+├── diary.txt                       # Plaintext diary entries
+├── summaries.txt                   # Historical summaries (51KB)
+├── mood.jsonl                      # Mood log (JSONL)
+├── timeline.jsonl                  # Event timeline (EMPTY)
+├── todo.json                       # To-do list (EMPTY)
+├── settings.local.json             # Claude settings (in .claude/)
+├── AI_COMPANION_MIGRATION_PLAN.md  # 23KB migration plan
+├── AUDIT_FIX_PLAN.md               # 7KB fix plan
+├── AUDIT_FIX_REPORT.md             # 12.7KB audit report
+├── bot.log                         # Runtime log
+├── cc.bat                          # Quick-run batch file
+│
+├── companion/                      # Main package
+├── data/                           # Database + JSONL storage
+├── tests/                          # Test suite
+├── monthbook/                      # Generated monthbooks (EMPTY)
+├── .claude/                        # Claude IDE settings
+├── .vscode/                        # VSCode settings
+├── __pycache__/                    # Root cache
+
+3.2 companion/ Package
+───────────────────────
+companion/
+├── __init__.py          # Package marker, __version__ = "2.0.0"
+├── main.py              # Application entry — Bot startup, AuthMiddleware, signal handling
+├── config.py            # All paths, env vars, constants, safety settings
+├── bot_core.py          # Core orchestrator — sessions, pipeline, grounding, self-critique
+├── models.py            # Data classes: Fact, FactRelation, MessageRecord, Reflection, ContextBundle
+├── mood_lite.py         # Heuristic mood inference (anxiety/anger/sadness/energy)
+├── intents.py           # Natural language intent router (regex-based)
+├── reasoning.py         # ReasoningEngine — goals, causal links, predictions, world model
+├── self_model.py        # SelfModel — bot's self-awareness, confidence domains, knowledge map
+├── user_model.py        # UserModel — holistic user model (mostly stub)
+├── policy_layer.py      # PolicyLayer — adaptive response mode based on user state
+├── runtime_state.py     # RuntimeState dataclass for passing data between modules
+├── documents.py         # Document upload processing (PDF, DOCX, text, etc.)
+│
+├── handlers/            # Telegram message handlers
+│   ├── __init__.py      # register_handlers(), setup_bot_commands()
+│   ├── chat.py          # Slash commands + text handler + TikTok handler
+│   └── media.py         # Voice, photo, video, document, sticker handlers
+│
+├── llm/                 # LLM integration
+│   ├── __init__.py      # Re-exports from client.py
+│   ├── client.py        # Gemini API wrapper (sync + async wrappers, retry logic)
+│   ├── grounding.py     # Intent classification for search grounding
+│   ├── sessions.py      # Chat session creation with RAG system prompt
+│   ├── pipeline.py      # Memory pipeline: compress → facts → reflect → personality
+│   ├── prompts.py       # All system prompts and LLM task templates
+│   └── master_summary.py # Tier 3 master summary maintenance
+│
+├── memory/              # Memory storage and retrieval
+│   ├── __init__.py      # Exports MemoryStore
+│   ├── store.py         # MemoryStore — unified interface for facts, messages, etc.
+│   ├── retrieval.py     # RetrievalBudgetManager — ranked context within token budget
+│   ├── importance.py    # Importance scoring, decay, retrieval scoring
+│   └── text_sim.py      # Character n-gram similarity for dedup
+│
+├── services/            # Service layer
+│   ├── __init__.py      # Package marker
+│   ├── memory_service.py # Facts, notes, diary, timeline, events
+│   ├── reasoning_service.py # Goals, todos, context reset, self-description
+│   └── report_service.py # Summaries, personality reports, week digests, monthbooks
+│
+└── storage/             # Storage backends
+    ├── __init__.py      # Exports LegacyStorage, MemoryDatabase, append_jsonl, read_jsonl
+    ├── jsonl.py         # Append-only JSONL with rotation
+    ├── legacy.py        # LegacyStorage — flat file I/O for all legacy formats
+    └── sqlite_db.py     # MemoryDatabase — SQLite backend
+
+3.3 data/ Directory
+────────────────────
+data/
+├── companion.db         # SQLite database (~1.15MB) — primary structured store
+├── messages.jsonl       # Message log (942KB) — append-only audit trail
+├── beliefs.jsonl        # Beliefs (99KB) — extracted beliefs about user
+├── causal_links.jsonl   # Causal links (80KB) — cause-effect relationships
+├── goals.jsonl          # Goals (37KB) — user goals
+├── predictions.jsonl    # Predictions (55KB) — future predictions
+├── policy_decisions.jsonl # Policy decisions (84KB) — all policy layer decisions
+├── user_model_updates.jsonl # User model reflections (3KB) — interaction reflections
+├── user_model.json      # User model (734B) — holistic user model state
+├── facts.jsonl          # Extracted facts (298B) — from compression
+
+3.4 tests/ Directory
+─────────────────────
+tests/
+├── __init__.py          # Empty
+├── conftest.py          # Fixtures: mock_llm_oneshot, mock_llm_parse, memory_store, retrieval_mgr, sample_facts
+├── test_pipeline.py     # Tests for run_compress_pipeline (4 tests)
+└── test_retrieval.py    # Tests for RetrievalBudgetManager.select() (6 tests)
+
+3.5 Dead Code (__pycache__ remnants with no matching .py files)
+────────────────────────────────────────────────────────────────
+The following modules have .pyc cache files but NO matching .py source files,
+indicating they were deleted during refactoring:
+- companion.autonomous_reasoning
+- companion.background_workers
+- companion.conflict_detection
+- companion.conflict_memory
+- companion.ground_truth
+- companion.handlers (root-level, not companion/handlers/)
+- companion.identity_anchors
+- companion.mood_inference (replaced by mood_lite.py)
+- companion.reality_compression
+- companion.memory.embeddings
+- companion.handlers.analytics
+- companion.handlers.diagnostics
+- companion.handlers.memory
+- companion.handlers.reasoning
+
+These represent significant functionality that was either removed or refactored
+into other modules. The presence of these cache files is harmless but indicates
+incomplete cleanup.
+
+
+================================================================================
+4. MESSAGE PROCESSING PIPELINE
+================================================================================
+
+4.1 Complete Lifecycle — Step by Step
+──────────────────────────────────────
+
+STEP 1: TELEGRAM UPDATE
+   File: companion/main.py
+   Function: run()
+   └─ dp.start_polling(bot, handle_as_tasks=True)
+
+STEP 2: AUTH MIDDLEWARE
+   File: companion/main.py:28-35
+   Class: AuthMiddleware.__call__()
+   └─ Checks event.from_user.id in ADMIN_IDS
+   └─ If NOT admin → "Пошёл нахуй, ты не Иван. Доступ закрыт." → RETURN
+
+STEP 3: HANDLER DISPATCH
+   Priority order (from companion/handlers/chat.py):
+   1. /start command → cmd_start()
+   2. /help command → cmd_help()
+   3. /summary or /summarize command → cmd_summary() → report_service.show_summary()
+   4. /personality command → cmd_personality() → report_service.show_personality()
+   5. /remember command → cmd_remember() → memory_service.remember_text()
+   6. /search command → cmd_search() → web search with grounding
+   7. Text messages (F.text & ~F.text.startswith("/") & ~F.text.contains("tiktok.com"))
+      → text_handler()
+   8. TikTok URLs (F.text & F.text.contains("tiktok.com"))
+      → tiktok_handler() → yt-dlp download → Gemini vision → process_llm_request()
+
+STEP 4: TEXT HANDLER (chat.py:113-122)
+   Function: text_handler()
+   1. Check LegacyStorage.parse_remember_command() — "запомни ..." prefix
+   2. If match → memory_service.remember_text() → RETURN
+   3. Check try_handle_intent() — NL intent router (intents.py)
+   4. If any intent matched → RETURN
+   5. If no intent → core.process_llm_request(message, text)
+
+STEP 5: process_llm_request() (bot_core.py:242-250)
+   └─ Calls build_context() to prepare all data
+
+STEP 6: build_context() (bot_core.py:196-239) — THE CENTRAL ORCHESTRATOR
+   a. Extract query from payload
+   b. check_rate_limit() — max 10 req/min per user
+   c. Create RuntimeState
+   d. score_message_importance() — heuristic 1-10
+   e. infer_mood_lite() — anxiety/anger/sadness/energy
+   f. memory_store.log_message() — save message to SQLite + JSONL
+   g. reasoning_engine.auto_reasoning_context() — update world model, capture goals/predictions
+   h. memory_service.auto_add_event_from_message() — if importance >= 8
+   i. classify_intent() — memory | world | mixed
+   j. _get_policy_decision() — detect user state + decide response policy
+   k. _load_retrieval_context() — gather facts, reflections, summaries, etc.
+   l. If intent is "world" or "mixed" with confidence >= 0.55:
+      → _handle_grounding() → search_with_grounding() → send → RETURN
+   m. Session management: create or reuse user_chats[uid]
+   n. Increment message counter
+   o. Background tasks: every 10 messages → _background_personality_micro_update()
+   p. If counter >= SUMMARY_THRESHOLD (50) → compress_and_reset()
+   q. Return context dict
+
+STEP 7: _generate_and_send_response() (bot_core.py:331-379)
+   a. RetrievalBudgetManager.select() — build ranked context bundle
+   b. ContextBundle.to_prompt_block() — format as text block
+   c. _build_user_prompt_block() — add reasoning hints if causal/future query
+   d. policy_layer.format_prompt_with_policy() — if policy constraints exist
+   e. send_typing() — Telegram typing indicator
+   f. chat.send_message(content_payload) — LLM call (with timeout + retry)
+   g. policy_layer.enforce_constraints() — post-process for question limits
+   h. self_model.critique_response() — self-critique
+   i. _apply_critique_to_text() — augment response with uncertainty markers
+   j. If confidence < 0.55 and factual query → _grounding_answer_only()
+   k. send_long_message() — split by sentence boundaries if > 4000 chars
+   l. memory_store.log_message(assistant) — save response
+   m. If importance >= 7 and cooldown passed → _background_user_model_reflection()
+
+4.2 Branching Points
+─────────────────────
+1. AUTH → non-admin users rejected immediately
+2. COMMAND vs TEXT vs TIKTOK → router based on message properties
+3. INTENT MATCH → if NL command matched, service handles and RETURNS
+4. GROUNDING → if world/mixed intent, search with grounding and RETURNS
+5. COMPRESSION → if counter >= 50, compress and reset context
+6. SELF-CRITIQUE → low confidence triggers grounding fallback
+7. MEDIA TYPES → voice/document/photo/video have dedicated handlers
+
+4.3 Exception Handling
+──────────────────────
+- LLM errors → caught in process_llm_request() → "API ошибка: {e}"
+- Grounding errors → "⚠️ Google Search недоступен. Отвечаю из личной памяти..."
+- Media errors → caught per-handler → "Ошибка: {e}"
+- JSON parse errors → logged, empty default returned
+- Background task errors → logged, circuit breaker, self_model.log_error()
+- Compress failures → retry 2x, reduce counter by 25, log error
+- Foreign key / DB errors → SQLite constraints
+
+4.4 Fallback Mechanisms
+───────────────────────
+- No session → create_default_session() with history reconstruction from SQLite
+- Empty LLM response → retry in compress, error message to user
+- Grounding fails → fall back to normal chat response
+- Self-critique low confidence → grounding retry
+- Personality load fails → EMPTY_PERSONALITY dict
+- JSON parse fails → try markdown code block extraction → empty fallback
+- Document unreadable → upload raw to Gemini
+- File encoding detection → try utf-8, utf-8-sig, cp1251, latin-1
+
+
+================================================================================
+5. MEMORY SYSTEM
+================================================================================
+
+5.1 Memory Types Overview
+─────────────────────────
+The system has a sophisticated, multi-layered memory architecture with the
+following types:
+
+TYPE           | STORAGE       | LIFETIME     | HOW CREATED
+───────────────|───────────────|──────────────|──────────────────────────
+Facts          | SQLite+JSONL  | Permanent*   | extract_facts() at compress
+Messages       | SQLite+JSONL  | Permanent    | log_message() on every msg
+Reflections    | SQLite+JSONL  | Permanent    | generate_reflections()
+Beliefs        | SQLite+JSONL  | Permanent    | personality pipeline
+Relations      | SQLite+JSONL  | Permanent    | consolidate_facts()
+Personality    | personality.json | Permanent  | generate_personality_snapshot()
+User Model     | user_model.json | Permanent  | reflect_after_interaction()
+Self Model     | self_model.json | Permanent  | SelfModel (hardcoded)
+Goals          | goals.jsonl   | Permanent    | user command / auto-capture
+Causal Links   | causal_links.jsonl | Permanent | ReasoningEngine
+Predictions    | predictions.jsonl | Permanent | auto-capture / manual
+World Model    | world_model.json | Runtime     | ReasoningEngine
+Diary          | diary.txt     | Permanent    | user command
+Summaries      | summaries.txt | Permanent    | compress pipeline
+Master Summary | master_summary.txt | Permanent | update_master_summary()
+Timeline       | timeline.jsonl | Permanent   | auto_add_event_from_message()
+Mood           | mood.jsonl    | 14-day window| LegacyStorage.save_mood()
+Todo           | todo.json     | Permanent    | user command
+Monthbook      | monthbook/    | Generated    | report_service
+* facts decay via status changes: active → inactive → archived (never deleted)
+
+5.2 Detailed Memory Types
+─────────────────────────
+
+5.2.1 FACTS (memory/store.py, models.py:20-48)
+───────────────────────────────────────────────
+Structure: Fact dataclass
+  - id: str = "fact_YYYYMMDD_XXXXXXXX"
+  - fact: str — text of the fact
+  - date: str — YYYY-MM-DD
+  - created_at: str — ISO datetime
+  - memory_kind: "permanent" | "state" | "event"
+  - importance: int 1-10
+  - confidence: float 0.0-1.0
+  - source: str — e.g., "summary_20260623"
+  - source_type: str — "compress" | "user" | "auto_event"
+  - tags: list[str] — ["anchor", "core_identity", "pinned", "permanent", ...]
+  - status: "active" | "superseded" | "inactive" | "archived"
+  - valid_from: str
+  - schema_version: int
+
+Creation: 
+  - extract_facts() at compress (llm/pipeline.py:24-86)
+  - fact_from_permanent_note() for /remember
+  - auto_add_event_from_message() for high-importance events
+  - LLM parses conversation summary + recent messages → JSON array
+
+Status Lifecycle:
+  - active → (supersedes relation) → superseded
+  - active → (age > 90d, importance ≤ 3) → inactive
+  - active → (age > 180d, importance ≤ 4) → archived
+  - permanent facts NEVER decay
+
+5.2.2 MESSAGES (models.py:76-99)
+─────────────────────────────────
+Structure: MessageRecord dataclass
+  - id: str = "msg_YYYYMMDD_XXXXXXXX"
+  - role: "user" | "assistant"
+  - text: str — message content (assistant responses truncated to 500 chars)
+  - importance: int 1-10
+  - mode: str — "default" | "search" | "compress"
+  - signals: list[str] — ["long", "memory_query", "emphasis", "named_entity"]
+  - ts: str — ISO datetime
+  - user_id: int | None
+
+Logging:
+  - Every user message → log_message() in build_context()
+  - Every assistant response → log_message() in _generate_and_send_response()
+  - Dual write: SQLite + JSONL
+
+5.2.3 REFLECTIONS (models.py:102-125)
+──────────────────────────────────────
+Structure: Reflection dataclass
+  - id: str = "refl_YYYYMMDD_XXXXXXXX"
+  - insight: str — generalized observation
+  - based_on: list[str] — fact IDs that informed this reflection
+  - period: str — "YYYY-MM"
+  - importance: int 1-10
+  - confidence: float 0.0-1.0
+  - status: "active" | "superseded" | "inactive" | "archived"
+
+Creation:
+  - generate_reflections() every REFLECTION_EVERY_N (4) compress cycles
+  - LLM analyzes facts + summary for the period
+
+5.2.4 BELIEFS (memory/store.py:147-162)
+────────────────────────────────────────
+Structure: dict
+  - id: str = "belief_XXXXXXXXXX"
+  - belief: str — extracted belief
+  - based_on: list[str] — sources
+  - importance: int (default 6)
+  - status: "active"
+  - created_at: str — ISO datetime
+
+Creation:
+  - generate_personality_snapshot() syncs beliefs from personality model
+
+5.2.5 PERSONALITY (memory/store.py:164-199)
+────────────────────────────────────────────
+Structure: dict (EMPTY_PERSONALITY template)
+  - interests: dict[str, int] — topic → weight 1-10
+  - beliefs: list[str]
+  - values: list[str]
+  - fears: list[str]
+  - motivation: list[str]
+  - relationships: dict
+  - habits: dict
+  - addictions: dict
+  - strengths: list[str]
+  - weaknesses: list[str]
+  - last_updated: str | None
+  - changes: list[dict] — max 20 recent changes
+
+Creation:
+  - generate_personality_snapshot() at each compress
+  - _background_personality_micro_update() every 10 messages (interest tracking)
+
+Update Strategy:
+  - Interests: average of old/new weights
+  - Lists: union without duplicates (case-insensitive dedup)
+  - Dicts: merge with update
+  - Changes: append (max 20)
+
+5.2.6 USER MODEL (user_model.py)
+─────────────────────────────────
+Structure: dict
+  - identity: dict — who_they_are, who_they_think_they_are, etc.
+  - beliefs: dict[str, dict]
+  - patterns: dict — actions, mistakes, coping_mechanisms, life_cycles
+  - emotional_timeline: dict — triggers, baseline, variance
+  - contradictions: list
+  - total_interactions: int
+  - model_confidence: float
+
+NOTE: This is mostly a STUB. The reflect_after_interaction() method only does
+keyword matching ("я есть", "я хочу", etc.) and never actually updates the
+model's identity/patterns/emotional_timeline fields. Model confidence stays at
+0.3 permanently.
+
+5.2.7 SELF MODEL (self_model.py)
+─────────────────────────────────
+Structure: dict
+  - architecture_version: str = "2.3"
+  - strengths: list[str] — 4 hardcoded items
+  - weaknesses: list[str] — 5 hardcoded items
+  - confidence_domains: dict[str, float] — 9 domains with confidence 0.3-0.95
+  - knowledge_map: dict — deep_knowledge, surface_knowledge, missing_data
+
+Features:
+  - get_confidence(domain): float
+  - critique_response(): self-critique
+  - get_self_description(): formatted text for /whoami
+  - update_knowledge_map(): upgrade/downgrade topics based on fact extraction
+  - log_error(): error tracking to self_errors.jsonl
+  - get_error_summary(): 30-day error statistics
+
+5.2.8 GOALS (reasoning.py:20-69)
+─────────────────────────────────
+Structure: Goal class
+  - goal_id, title, priority (1-10), status (active/paused/completed/abandoned)
+  - description, blockers, next_actions, resources, obstacles
+  - progress_markers: list[dict]
+  - created_at, updated_at
+
+Storage: goals.jsonl (append-only)
+Auto-capture: via maybe_capture_goal() when user says "моя цель..."
+
+5.2.9 CAUSAL LINKS (reasoning.py:72-109)
+─────────────────────────────────────────
+Structure: CausalLink class
+  - link_id, cause, effect, confidence (0-1)
+  - evidence: list[str], mechanism: str, observed_count: int
+
+Storage: causal_links.jsonl (append-only)
+Query: get_causal_chain() — DFS traversal for cause-effect chains
+
+5.2.10 PREDICTIONS (reasoning.py:112-149)
+──────────────────────────────────────────
+Structure: Prediction class
+  - prediction_id, hypothesis, confidence (0-1)
+  - timeframe: str, conditions: list[str], based_on: list[str]
+  - outcome: "pending" | "verified" | "falsified"
+
+Storage: predictions.jsonl (append-only)
+Auto-capture: via maybe_capture_prediction() for future-oriented queries
+
+5.2.11 WORLD MODEL (reasoning.py:152-183)
+──────────────────────────────────────────
+Structure: dict
+  - current_state: dict
+  - recent_patterns: dict
+  - active_contexts: list[str] — max 8 recent contexts
+  - last_updated: str
+
+Storage: world_model.json (JSON, overwritten)
+Throttled: saves max once per 10 seconds
+
+5.2.12 MASTER SUMMARY (llm/master_summary.py)
+──────────────────────────────────────────────
+Structure: plain text, max 2000 chars
+Format:
+  [Личность]
+  [История]
+  [Отношения]
+  [Паттерны]
+  [Актуальное состояние]
+
+Update: after each compress, via LLM merge of current master + new summary
+First creation: first compress summary saved as-is
+
+
+================================================================================
+6. STORAGE LAYER
+================================================================================
+
+6.1 SQLite Database
+────────────────────
+File: data/companion.db (~1.15MB)
+Backend: companion/storage/sqlite_db.py — MemoryDatabase class
+
+Tables:
+  1. facts — primary fact storage
+  2. fact_relations — cause-effect/supersedes/confirms/contradicts relationships
+  3. messages — all user/assistant messages
+  4. reflections — generalized insights about user
+  5. beliefs — extracted beliefs
+  6. meta — key-value store (e.g., compress_count)
+
+Each table has:
+  - Primary key on id (TEXT)
+  - INSERT OR IGNORE strategy (no updates except status changes)
+  - JSON-encoded list fields (tags, signals, based_on)
+
+6.2 JSONL Files
+────────────────
+All JSONL files use append-only format with periodic rotation.
+
+Rotation: companion/storage/jsonl.py:rotate_jsonl()
+  - Triggers at 50MB or 500k lines
+  - Shifts backups: file.ext → file.1.ext → file.2.ext → delete file.3.ext
+  - Keep = 2 backup generations
+
+JSONL Files:
+  File                       | Size     | Lines | Purpose
+  ───────────────────────────|──────────|───────|─────────────────────────
+  data/messages.jsonl        | 942 KB   | 518   | All messages (audit trail)
+  data/beliefs.jsonl         | 99 KB    | 340   | Extracted beliefs
+  data/causal_links.jsonl    | 80 KB    | 217   | Cause-effect relationships
+  data/goals.jsonl           | 37 KB    | 103   | User goals
+  data/predictions.jsonl     | 55 KB    | 132   | Future predictions
+  data/policy_decisions.jsonl| 84 KB    | 195   | Policy layer decisions
+  data/user_model_updates.jsonl| 3 KB   | 9     | User model reflections
+  data/facts.jsonl           | 298 B    | 1     | Extracted facts
+
+IMPORTANT: Data corruption detected! Many JSONL files contain garbled text
+(UTF-8 encoded CP1251?) — beliefs, causal_links, goals, predictions, and
+messages.jsonl all show mojibake (� characters). This suggests an encoding
+mismatch when the data was written, likely at initial data creation or during
+a migration. This severely degrades retrieval quality.
+
+6.3 Flat Files
+───────────────
+File                   | Size   | Purpose
+───────────────────────|────────|─────────────────────────────────
+personality.json       | 7.5 KB | Personality model (interests, beliefs, values, etc.)
+ivan.txt               | 8.8 KB | Static persona background
+summaries.txt          | 51 KB  | Historical summaries (appended)
+diary.txt              | 965 B  | Diary entries (appended)
+todo.json              | 0 B    | To-do list (EMPTY)
+timeline.jsonl         | 0 B    | Event timeline (EMPTY)
+mood.jsonl             | 370 B  | Mood entries
+master_summary.txt     | ?      | Master summary (not in git)
+
+6.4 Dual-Write Architecture
+────────────────────────────
+The system uses a DUAL-WRITE strategy:
+1. SQLite is written FIRST (ACID guarantee)
+2. JSONL is written SECOND (append-only audit log)
+3. On startup, _migrate_jsonl_if_empty() checks if SQLite is empty and loads
+   from JSONL if so (one-time migration)
+
+This means:
+- SQLite is the primary operational store
+- JSONL provides append-only audit trail and crash recovery
+- Both are written for every operation (log_message, add_fact, add_reflection)
+- JSONL rotation preserves backup history
+
+
+================================================================================
+7. RETRIEVAL ENGINE
+================================================================================
+
+7.1 RetrievalBudgetManager (memory/retrieval.py)
+─────────────────────────────────────────────────
+Class: RetrievalBudgetManager
+Configuration:
+  - RETRIEVAL_CHAR_BUDGET = 4,000 chars
+  - RETRIEVAL_MAX_FACTS = 25
+  - RETRIEVAL_MAX_REFLECTIONS = 5
+
+7.2 select() Algorithm
+───────────────────────
+Input: query, facts[], reflections[], summaries[], permanent_notes, 
+       personality_snapshot, recent_messages, active_goals, causal_links,
+       predictions, world_model_context
+
+Step 1: FILTER ACTIVE FACTS
+  - Exclude inactive facts; optionally include archived
+
+Step 2: EXTRACT PINNED FACTS (extract_pinned_facts)
+  - Tags: "pinned", "core_identity", "anchor"
+  - memory_kind == "permanent"
+  - importance >= 9
+  - Limited to top 5 by importance (sorted)
+  - These bypass relevance scoring — always included
+
+Step 3: COMPUTE MOOD (once per query)
+  - infer_mood_lite() if query >= 3 words
+  - Used for mood-aware boosting
+
+Step 4: SCORE REGULAR FACTS
+  - _ranked_score(f) = retrieval_score(f, query) + mood_to_retrieval_boost(mood, f)
+  - retrieval_score() combines:
+    - Importance (weight 0.4)
+    - Recency (weight 0.25) — exponential decay with half-life (45d state, 120d event)
+    - Relevance (weight 0.35) — keyword overlap + tag match
+  - mood_to_retrieval_boost() adds 0.0-0.3 based on mood state:
+    - High anxiety → anchor/coping facts +0.3
+    - High sadness → positive facts +0.25
+    - High anger → trigger/solution facts +0.2
+    - Low energy → energy management facts +0.2
+
+Step 5: MERGE PINNED + RANKED REGULAR
+  - available_slots = max_facts - len(pinned)
+  - ranked_facts = pinned + ranked_regular[:available_slots]
+
+Step 6: RANK REFLECTIONS
+  - Active reflections only
+  - Sort by: importance/10 + (0.5 if query in insight)
+  - Limit to max_reflections (5)
+
+Step 7: ASSEMBLE SUMMARY STACK (3-tier)
+  - Tier 1: Last summary (always, truncated to 1500 chars)
+  - Tier 2: Up to 3 keyword-matched summaries (truncated to 1200 chars)
+  - Tier 3: Master summary (added in sessions.py, not retrieval)
+
+Step 8: ADD RECENT IMPORTANT MESSAGES
+  - Last 7 user messages with importance >= 6
+  - Formatted as "[{ts}] {text[:200]}"
+
+Step 9: BUILD CONTEXT BUNDLE
+  - ContextBundle dataclass with all fields
+  - Each field trimmed:
+    - permanent_notes[:800]
+    - world_model_context[:1200]
+    - active_goals[:5], causal_links[:5], predictions[:5]
+
+Step 10: TRIM TO BUDGET (char_budget = 4000)
+  - While prompt_block > budget:
+    - Pop facts from end (lowest ranked)
+    - Pop summaries from end
+    - Pop reflections from end
+
+7.3 Scoring Function (memory/importance.py:57-92)
+──────────────────────────────────────────────────
+retrieval_score() formula:
+  score = 0.4 * (importance/10) + 0.25 * decay_factor + 0.35 * relevance
+
+Where:
+  - decay_factor = exp(-0.693 * days / half_life) for non-permanent
+  - permanent = 1.0 (no decay)
+  - state half_life = 45 days
+  - event half_life = 120 days
+  - relevance = keyword overlap (0.3-1.0) + tag hit bonus
+
+7.4 to_prompt_block() (models.py:142-169)
+──────────────────────────────────────────
+Assembles ContextBundle into formatted text block with sections:
+  [Снимок личности]
+  [Постоянная память]
+  [Недавние реплики]
+  [Активные цели]
+  [Причинно-следственный контекст]
+  [Прогнозы и ожидания]
+  [Модель мира]
+  [Выводы о пользователе]
+  [Релевантные факты] ← format: "• [{memory_kind}|{importance}/10] {fact}"
+  [Контекст саммари]
+
+
+================================================================================
+8. REASONING ENGINE
+================================================================================
+
+8.1 ReasoningEngine (companion/reasoning.py)
+────────────────────────────────────────────
+Singleton: reasoning_engine (line 561)
+
+8.1.1 Goals Subsystem
+──────────────────────
+Data: Goal class with title, priority, status, description, blockers, etc.
+Storage: goals.jsonl (append-only, rewrite on update)
+Operations:
+  - add_goal(goal) — append to JSONL
+  - list_goals(status) — read all, filter, sort (active first, then priority)
+  - update_goal(goal_id, updates) — rewrite entire file (!)
+  - get_goal_snapshot(query) — ranked goal context for retrieval
+  - build_situation_model(goal_id) — formatted goal detail for user display
+
+Auto-capture (maybe_capture_goal):
+  - Triggered by patterns: "моя цель...", "цель...", "хочу..."
+  - Dedup: checks if same title already exists
+  - Only for importance >= 6
+
+8.1.2 Causal Links Subsystem
+─────────────────────────────
+Data: CausalLink class with cause, effect, confidence, evidence, mechanism
+Storage: causal_links.jsonl (append-only)
+Operations:
+  - add_causal_link(link)
+  - list_causal_links(min_confidence) — filter + sort by confidence
+  - get_causal_chain(start, max_depth) — DFS traversal for cause-effect chains
+  - analyze_causality(event) — formatted output for user
+  - get_relevant_causal_context(query) — keyword match for retrieval
+
+8.1.3 Predictions Subsystem
+────────────────────────────
+Data: Prediction class with hypothesis, confidence, timeframe, outcome
+Storage: predictions.jsonl (append-only)
+Operations:
+  - add_prediction(prediction)
+  - list_predictions(outcome) — filter + sort by created_at
+  - get_prediction_context(query) — keyword match for retrieval
+  - get_predictions_summary() — stats for user display
+
+Auto-capture (maybe_capture_prediction):
+  - Triggered by future-oriented markers: "будет", "получится", "сможет", etc.
+  - Dedup by hypothesis text
+  - Only for importance >= 6
+
+8.1.4 World Model Subsystem
+────────────────────────────
+Data: dict with current_state, recent_patterns, active_contexts, last_updated
+Storage: world_model.json (overwrite, throttled to 10s)
+Operations:
+  - update_world_model_from_message(text, importance)
+    - Adds context if importance >= 7 or reasoning trigger
+    - Max 8 active contexts
+  - get_world_model_context(query) — keyword match for retrieval
+
+8.1.5 auto_reasoning_context() (line 305)
+──────────────────────────────────────────
+Called from build_context() for every user message:
+  1. update_world_model_from_message()
+  2. maybe_capture_goal() if importance >= 6
+  3. maybe_capture_prediction() if importance >= 6
+  4. Return dict with:
+     - active_goals, causal_links, predictions, world_model_context
+     - causal_trigger: bool (is this a "why" question?)
+     - future_trigger: bool (is this a future question?)
+     - captured_goal, captured_prediction: str or empty
+
+8.1.6 Query Trigger Detection
+──────────────────────────────
+- _is_causal_query(): "почему", "из-за чего", "что привело", "причина"
+- _is_future_query(): "будет", "получится", "сможет", "что дальше", etc.
+- _is_reasoning_trigger(): "цель", "почему", "будет", "план", etc.
+
+
+================================================================================
+9. PERSONALITY MODEL
+================================================================================
+
+9.1 Personality Snapshot (memory/store.py:181-199)
+──────────────────────────────────────────────────
+Built from personality.json via build_personality_snapshot_text():
+  - [Снимок личности]
+  - values: ;  (max 8)
+  - fears: ;  (max 8)
+  - strengths: ;  (max 8)
+  - weaknesses: ;  (max 8)
+  - interests: topic(weight), ... (top 10)
+  - beliefs: ;  (max 10)
+  - recent_changes: ... (last 5)
+
+9.2 Personality Generation Pipeline (llm/pipeline.py:173-206)
+──────────────────────────────────────────────────────────────
+Function: generate_personality_snapshot()
+Trigger: every compress
+Input:
+  - Current personality (EMPTY sent to LLM to avoid feedback loop!)
+  - Top 40 facts by importance
+  - Top 10 reflections
+  - Top 15 beliefs
+  - Latest summary (2000 chars)
+
+LLM Task: PERSONALITY_PIPELINE_PROMPT — generates full personality JSON
+
+Merge Strategy (_merge_personality):
+  - Interests: average old/new weights
+  - Beliefs, values, fears, etc.: union without duplicates
+  - Relationships, habits, addictions: dict merge
+  - Changes: append (max 20)
+
+9.3 Micro-Update (bot_core.py:418-467)
+───────────────────────────────────────
+Function: _background_personality_micro_update()
+Trigger: every 10 messages (fire-and-forget)
+Process:
+  1. Load current personality
+  2. Get last 10 messages
+  3. Count keyword frequencies for 20 predefined topics
+  4. Update interest weights
+  5. If importance >= 7, append change entry (max 20)
+  6. Save back to personality.json
+
+9.4 Interest Topics Tracked
+───────────────────────────
+"qa", "тестирование", "работа", "код", "python", "аня", "морзик",
+"семья", "друзья", "тревога", "паника", "лекарства", "терапия",
+"музыка", "игры", "фильмы", "книги", "спорт", "тренировки", "здоровье"
+
+9.5 User Model (user_model.py — mostly stub)
+─────────────────────────────────────────────
+The UserModel class has a rich data structure but minimal implementation:
+- reflect_after_interaction() only does keyword matching (no LLM)
+- Identity fields remain empty ("who_they_are": "")
+- Patterns and emotional_timeline are never populated
+- model_confidence stays at 0.3
+- This is a DESIGN INTENTION stub ready for future implementation
+
+9.6 Static Persona (ivan.txt)
+──────────────────────────────
+~43 lines of structured text with sections:
+  - CORE IDENTITY & DIGITAL CAMOUFLAGE
+  - PHYSICAL PROFILE & AESTHETICS
+  - CLINICAL STATUS & PHARMACOLOGY
+  - COGNITIVE & BEHAVIORAL PATTERNS
+  - LIFE CONTEXT & FAMILY HISTORY
+  - RECURRING FAILURE MODES
+  - COPING MECHANISMS & THEIR FUNCTIONS
+  - INTERNAL DUAL SYSTEM (ANYA)
+  - HARDWARE LIMITATIONS
+
+This is appended to every Gemini system instruction as static context.
+NOTE: Contains highly sensitive personal/medical information.
+
+
+================================================================================
+10. SELF CRITIQUE SYSTEM
+================================================================================
+
+10.1 Overview
+─────────────
+The self-critique system evaluates LLM responses before sending to the user.
+It is implemented in two locations:
+  1. self_model.py — SelfModel.critique_response() (the critic)
+  2. bot_core.py — _run_self_critique() + _apply_critique_to_text() (runtime)
+
+10.2 Critique Algorithm (self_model.py:156-194)
+────────────────────────────────────────────────
+Input: response, query, context (facts_count, has_causal, has_predictions)
+
+Checks performed:
+  1. UNCERTAIN LANGUAGE — if response contains "возможно", "наверное", "думаю что"
+     → flag: "uncertain_language"
+     → max reduction: 0.2
+
+  2. FACTUAL ASSERTION WITHOUT SOURCE — if query has factual triggers (когда, где,
+     сколько, кто) and response has no sources and no "Не уверен"
+     → warning: "Фактическое утверждение без источника"
+     → max reduction: 0.3
+
+  3. DOMAIN COMPETENCE — if query contains a domain name and bot's confidence
+     for that domain is < 0.5
+     → warning: "Низкая компетентность в домене '{domain}' ({conf:.0%})"
+     → max reduction: 1.0 - confidence
+
+Confidence formula: 1.0 - max_reduction (MAXIMUM reduction, not cumulative)
+Initial confidence: 1.0
+
+10.3 Runtime Integration (bot_core.py:494-536)
+───────────────────────────────────────────────
+_run_self_critique():
+  - Wraps self_model.critique_response() with try/except
+  - Falls back to {"flags": [], "confidence": 1.0, "warnings": []}
+
+_apply_critique_to_text():
+  1. If confidence >= 0.75 AND no warnings → return text as-is
+  2. If "uncertain_language" in flags AND warnings → append warnings
+  3. If confidence < 0.55 → prefix: "Не до конца уверен, но по текущему контексту: "
+  4. If confidence 0.55-0.75 → prefix: "Похоже, что: "
+  5. Only adds prefix if text doesn't already start with uncertainty markers
+  6. Appends warning suffix: "\n\n⚠️ Уровень уверенности снижен: ..."
+
+10.4 Grounding Retry (bot_core.py:530-561)
+──────────────────────────────────────────
+_should_retry_with_grounding():
+  - Checks if query matches factual pattern: /^(?:когда|где|кто|сколько|какая|какой)\b/
+  - OR if any warning contains "источник"
+  - Returns True → triggers _grounding_answer_only()
+
+_grounding_answer_only():
+  - Builds full retrieval context
+  - Calls search_with_grounding()
+  - Returns grounded answer with "🔍" prefix
+  - If fails, returns empty string (original response preserved)
+
+
+================================================================================
+11. GROUNDING SYSTEM
+================================================================================
+
+11.1 Intent Classification (llm/grounding.py)
+──────────────────────────────────────────────
+Function: classify_intent(text) → (QueryIntent, confidence)
+
+WORLD_PATTERNS (world-knowledge queries):
+  новост, что нового, курс, цена, когда вышл, последн* верс,
+  актуальн, сегодня в мире, gemini, openai, релиз,
+  что происходит в, погода, курс доллара, курс евро
+
+MEMORY_PATTERNS (personal-memory queries):
+  помнишь, что ты знаешь, что ты помнишь, мы говорили,
+  рассказывал, напомни, про меня, моя жизнь, мои,
+  иван, аня, морзик, полин, алин, запомни
+
+Algorithm:
+  - Count world_hits and memory_hits separately
+  - Both > 0 → "mixed" intent
+  - world_hits > 0 → "world" intent
+  - memory_hits > 0 → "memory" intent
+  - Questions starting with "что такое", "кто такой", etc. → "world"
+  - Default → "memory"
+
+11.2 Grounding Activation (bot_core.py:224-226)
+────────────────────────────────────────────────
+In build_context():
+  - If intent in ("world", "mixed") AND confidence >= 0.55:
+    → _handle_grounding() → search_with_grounding() → send → RETURN
+  
+This SHORT-CIRCUITS normal processing for world queries.
+
+11.3 Search with Grounding (llm/client.py:138-172)
+───────────────────────────────────────────────────
+Function: search_with_grounding(query, context) → (text, sources_str)
+
+Model: SEARCH_MODEL = "gemini-2.5-flash"
+Features:
+  - Uses Google Search tool (GoogleSearch)
+  - Temperature: 0.4 (lower = more factual)
+  - System instruction includes user context (if available)
+  - Returns (response_text, formatted_sources)
+
+Source Formatting (format_grounding_sources):
+  - Extracts grounding_chunks from Gemini response metadata
+  - Deduplicates by URI
+  - Formats: "• {title}\n  {uri}"
+
+11.4 Forced Search (/search command, chat.py:78-111)
+─────────────────────────────────────────────────────
+The /search command bypasses intent classification and directly:
+  1. Builds full retrieval context
+  2. Calls search_with_grounding()
+  3. Logs as mode="search"
+
+
+================================================================================
+12. SERVICES
+================================================================================
+
+12.1 memory_service (services/memory_service.py)
+─────────────────────────────────────────────────
+Responsibility: Memory and timeline operations for user-facing features
+
+Public Methods:
+  - remember_text(message, note)
+    → Saves permanent note, adds fact, resets user session
+    → Called from: text_handler (запомни…), /remember command
+  
+  - show_facts(message, query)
+    → Lists active facts (last 20 or search results)
+    → Called from: NL intent "что ты обо мне помнишь"
+  
+  - show_notes(message)
+    → Shows permanent notes
+    → Called from: NL intent "покажи постоянные"
+  
+  - add_diary_entry(message, text)
+    → Appends diary entry
+    → Called from: NL intent "запиши в дневник"
+  
+  - export_diary(message)
+    → Sends diary.txt as document
+    → Called from: NL intent "экспортируй дневник"
+  
+  - show_timeline(message)
+    → Shows all timeline events
+    → Called from: NL intent "покажи хронологию"
+  
+  - show_year(message, year)
+    → Shows events for specific year
+    → Called from: NL intent "что было в 2024"
+  
+  - auto_add_event_from_message(text, importance)
+    → Auto-detects events from high-importance messages
+    → Called from: build_context() for every user message
+    → Condition: importance >= 8, length >= 20, event markers present
+
+12.2 reasoning_service (services/reasoning_service.py)
+───────────────────────────────────────────────────────
+Responsibility: Reasoning, goal management, task management
+
+Public Methods:
+  - reset_context(message)
+    → Clears user_chats and user_message_counts
+    → Called from: NL intent "сбрось контекст"
+  
+  - show_goals(message)
+    → Lists all goals with status emoji + priority bar
+    → Called from: NL intent "какие у меня цели"
+  
+  - add_goal_from_text(message, text)
+    → Extracts title, creates Goal, adds to reasoning_engine
+    → Called from: NL intent "моя цель — ..."
+  
+  - show_reasoning_state(message)
+    → Shows active goals, causal links, world model contexts
+    → Called from: NL intent "какая у тебя модель моей ситуации"
+  
+  - show_todos(message)
+    → Lists all to-do items
+    → Called from: NL intent "покажи задачи"
+  
+  - add_todo(message, text)
+    → Adds to-do item
+    → Called from: NL intent "добавь задачу"
+  
+  - complete_todo(message, text)
+    → Marks to-do as done
+    → Called from: NL intent "отметь 1 готовой"
+  
+  - delete_todo(message, text)
+    → Removes to-do
+    → Called from: NL intent "удали задачу"
+  
+  - clear_done_todos(message)
+    → Removes all completed todos
+    → Called from: NL intent "очисти выполненные"
+  
+  - show_self_description(message)
+    → SelfModel.get_self_description()
+    → Called from: NL intent "кто ты"
+  
+  - show_selfmap(message)
+    → SelfModel knowledge_map
+    → Called from: NL intent "что ты хорошо про меня понимаешь"
+
+12.3 report_service (services/report_service.py)
+─────────────────────────────────────────────────
+Responsibility: Report generation and profiles
+
+Public Methods:
+  - show_summary(message)
+    → Triggers compress or shows latest summary
+    → Called from: /summary command
+  
+  - show_personality(message)
+    → Sends personality to LLM for psych report
+    → Called from: /personality command
+  
+  - show_selfie(message)
+    → Collects all data, sends to LLM for psychological portrait
+    → Called from: NL intent "сделай психопортрет"
+  
+  - show_week_digest(message)
+    → Week diary → LLM digest
+    → Called from: NL intent "дайджест недели"
+  
+  - show_monthbook(message, ym)
+    → Builds/loads monthly autobiographical chapter via LLM
+    → Called from: NL intent "собери главу за"
+  
+  - show_retrospective(message, days)
+    → Collects data, sends to LLM for change analysis
+    → Called from: NL intent "что изменилось за месяц"
+  
+  - show_context(message)
+    → Shows latest summary
+    → Called from: NL intent "покажи контекст"
+
+
+================================================================================
+13. INTENT ROUTER
+================================================================================
+
+13.1 Intent System Overview
+───────────────────────────
+File: companion/intents.py
+Function: try_handle_intent(message, text) → bool
+Called from: chat.py text_handler() BEFORE core.process_llm_request()
+If any intent matches → service handles → RETURNS True (consumes message)
+
+13.2 Complete Intent Pattern Table
+───────────────────────────────────
+All patterns are case-insensitive regex:
+
+#  PATTERN(S)                          → ACTION
+──┼─────────────────────────────────────┼──────────────────────────────
+1 │ "^сбрось (контекст|чат)"           │ reset_context()
+  │ "^давай начнем заново"             │
+──┼─────────────────────────────────────┼──────────────────────────────
+2 │ "^что ты обо мне помнишь\.?$"      │ show_facts()
+  │ "^какие факты ты знаешь\.?$"       │
+  │ "^что ты помнишь\.?$"              │
+──┼─────────────────────────────────────┼──────────────────────────────
+3 │ "покажи постоянн"                   │ show_notes()
+  │ "покажи заметк"                     │
+  │ "постоянная память"                │
+──┼─────────────────────────────────────┼──────────────────────────────
+4 │ "экспортируй дневник"               │ export_diary()
+  │ "выгрузи дневник"                   │
+  │ "отправь дневник"                  │
+──┼─────────────────────────────────────┼──────────────────────────────
+5 │ "покажи хронологию"                 │ show_timeline()
+  │ "покажи события"                    │
+  │ "моя хронология"                   │
+──┼─────────────────────────────────────┼──────────────────────────────
+6 │ "что было в \d{4}"                  │ show_year(parsed_year)
+  │ "покажи \d{4} год"                  │
+  │ "события за \d{4}"                 │
+──┼─────────────────────────────────────┼──────────────────────────────
+7 │ "^(покажи|дай|верни|какой) контекст"│ show_context()
+  │ "^что было недавно"                 │
+  │ "^дай последний контекст"          │
+──┼─────────────────────────────────────┼──────────────────────────────
+8 │ "сделай сводку недели"              │ show_week_digest()
+  │ "дайджест недели"                  │
+  │ "что было за неделю"               │
+──┼─────────────────────────────────────┼──────────────────────────────
+9 │ "что изменилось за месяц"           │ show_retrospective()
+  │ "сделай ретроспектив"              │
+  │ "ретроспектив"                     │
+──┼─────────────────────────────────────┼──────────────────────────────
+10│ "собери главу за"                   │ show_monthbook(ym)
+  │ "monthbook"                         │
+  │ "глава за "                        │
+──┼─────────────────────────────────────┼──────────────────────────────
+11│ "сделай психопортрет"               │ show_selfie()
+  │ "сделай селфи-анализ"              │
+  │ "selfie"                            │
+──┼─────────────────────────────────────┼──────────────────────────────
+12│ "какие у меня цели"                 │ show_goals()
+  │ "покажи мои цели"                  │
+  │ "мои цели"                          │
+──┼─────────────────────────────────────┼──────────────────────────────
+13│ "^моя цель"                         │ add_goal_from_text()
+  │ "^я хочу (достичь|добиться|...)"   │ (20+ verbs)
+──┼─────────────────────────────────────┼──────────────────────────────
+14│ "какая у тебя модель моей ситуации" │ show_reasoning_state()
+  │ "о чем ты сейчас думаешь"          │
+  │ "снимок разума"                    │
+──┼─────────────────────────────────────┼──────────────────────────────
+15│ "кто ты"                            │ show_self_description()
+  │ "что ты такое"                     │
+──┼─────────────────────────────────────┼──────────────────────────────
+16│ "что ты хорошо про меня понимаешь"  │ show_selfmap()
+  │ "где у тебя пробелы"              │
+  │ "карта знаний"                     │
+──┼─────────────────────────────────────┼──────────────────────────────
+17│ "покажи задачи"                     │ show_todos()
+  │ "мой todo"                          │
+  │ "список задач"                     │
+──┼─────────────────────────────────────┼──────────────────────────────
+18│ "добавь задачу"                     │ add_todo(stripped_text)
+  │ "создай задачу"                    │
+  │ "новая задача"                     │
+──┼─────────────────────────────────────┼──────────────────────────────
+19│ "^отметь ((\d+) (готовой|...))"     │ complete_todo(extracted_idx)
+  │ "заверши задачу (\d+)"             │
+  │ "сделай выполненной задачу (\d+)"  │
+──┼─────────────────────────────────────┼──────────────────────────────
+20│ "удали задачу"                      │ delete_todo(extracted_idx)
+  │ "удали todo"                        │
+  │ "убери задачу"                     │
+──┼─────────────────────────────────────┼──────────────────────────────
+21│ "очисти выполненные"                │ clear_done_todos()
+  │ "убери выполненные"                │
+──┼─────────────────────────────────────┼──────────────────────────────
+22│ "запиши в дневник"                  │ add_diary_entry(stripped_text)
+  │ "добавь в дневник"                 │
+  │ "сохрани в дневник"                │
+
+13.3 Pattern Conflict Risks
+───────────────────────────
+- "мои цели" (intent 12) overlaps with "моя цель" (intent 13)
+  → "мои цели" matched by intent 12 first (shows goals, not adds)
+  → "моя цель" goes to intent 13 (adds goal)
+- "кто ты" (intent 15) — generic question, might fire on any "who" question
+- "покажи контекст" (intent 7) — ambiguous if user asks about context context
+- "ретроспектив" (intent 9) — partial match, might fire on unrelated text
+- "monthbook" (intent 10) — English word, false positive risk in Russian text
+
+13.4 _strip_prefix Logic
+─────────────────────────
+Used for: add_todo, add_diary_entry
+Removes the matched prefix from text to extract the payload.
+Example: "добавь задачу купить молоко" → "купить молоко"
+
+
+================================================================================
+14. COMMANDS
+================================================================================
+
+Slash commands registered via setup_bot_commands() in handlers/__init__.py:
+
+COMMAND       | FILE               | FUNCTION          | PURPOSE
+──────────────|────────────────────|───────────────────|──────────────────────────────
+/start        | handlers/chat.py   | cmd_start         | Welcome + keyboard setup
+/help         | handlers/chat.py   | cmd_help          | Full command reference
+/search       | handlers/chat.py   | cmd_search        | Forced web search with grounding
+/summary      | handlers/chat.py   | cmd_summary       | Manual compress + summary
+/personality  | handlers/chat.py   | cmd_personality   | Personality report via LLM
+/remember     | handlers/chat.py   | cmd_remember      | Save permanent note
+/summarize    | handlers/chat.py   | cmd_summary       | Alias for /summary
+
+Additionally, /search triggers the same code path as intent-based world queries
+but bypasses intent classification entirely.
+
+
+================================================================================
+15. NATURAL LANGUAGE COMMANDS
+================================================================================
+
+Full list of NL commands understood by the bot (non-exhaustive examples):
+
+"запомни ..."
+"сбрось контекст" / "сбрось чат"
+"давай начнем заново"
+"что ты обо мне помнишь"
+"какие факты ты знаешь"
+"что ты помнишь"
+"покажи постоянные заметки"
+"покажи заметки"
+"постоянная память"
+"экспортируй дневник"
+"выгрузи дневник"
+"покажи хронологию"
+"покажи события"
+"моя хронология"
+"что было в 2024"
+"покажи 2024 год"
+"покажи контекст"
+"что было недавно"
+"дай последний контекст"
+"сделай сводку недели"
+"дайджест недели"
+"что было за неделю"
+"что изменилось за месяц"
+"сделай ретроспективу"
+"собери главу за 2024-06"
+"monthbook 2024-06"
+"сделай психопортрет"
+"сделай селфи-анализ"
+"selfie"
+"какие у меня цели"
+"покажи мои цели"
+"моя цель — найти работу"
+"я хочу научиться программировать"
+"какая у тебя модель моей ситуации"
+"о чем ты сейчас думаешь"
+"снимок разума"
+"кто ты"
+"что ты такое"
+"что ты хорошо про меня понимаешь"
+"где у тебя пробелы"
+"карта знаний"
+"покажи задачи"
+"мой todo"
+"добавь задачу купить лекарства"
+"отметь 1 готовой"
+"заверши задачу 1"
+"удали задачу 1"
+"очисти выполненные"
+"запиши в дневник сегодня было..."
+"добавь в дневник ..."
+"сохрани в дневник ..."
+
+
+================================================================================
+16. BACKGROUND TASKS
+================================================================================
+
+16.1 Task Execution Model
+─────────────────────────
+File: bot_core.py
+- All background tasks use safe_task() wrapper
+- Wrapped in asyncio.create_task() with _background_semaphore (max 5 concurrent)
+- Circuit breaker: 5 consecutive failures → 10 minute cooldown
+- Errors logged + reported via self_model.log_error()
+
+16.2 Task Registry
+──────────────────
+
+TASK 1: _background_user_model_reflection()
+───────────────────────────────────────────
+File: bot_core.py:383-416
+Trigger: After response, if message_importance >= 7 and cooldown >= 60s
+Action:
+  1. Gets last 10 active facts
+  2. Calls user_model.reflect_after_interaction()
+  3. Logs discoveries/confirmations/falsifications
+Risk: Stub implementation — does nothing meaningful
+Impact: Minimal (currently non-functional)
+
+TASK 2: _background_personality_micro_update()
+──────────────────────────────────────────────
+File: bot_core.py:418-467
+Trigger: Every 10 messages (counter % 10 == 0)
+Action:
+  1. Load personality.json
+  2. Get last 10 messages
+  3. Count 20 topic keywords
+  4. Update interest weights
+  5. If importance >= 7, add change entry
+  6. Save personality.json
+Risk: File write lock (no advisory locking), partial write possible
+Impact: Medium — loses personality updates if crash during write
+
+
+================================================================================
+17. DATABASE SCHEMA
+================================================================================
+
+SQLite database at data/companion.db
+
+TABLE: facts
+────────────────────────────────────────────────────────────────────
+Column          | Type    | Default    | Notes
+────────────────────────────────────────────────────────────────────
+id              | TEXT PK |            | Format: fact_YYYYMMDD_XXXXXXXX
+fact            | TEXT    | NOT NULL   |
+date            | TEXT    |            | YYYY-MM-DD
+created_at      | TEXT    |            | ISO datetime
+memory_kind     | TEXT    | 'event'    | permanent|state|event
+importance      | INTEGER | 5          | 1-10
+confidence      | REAL    | 0.8        | 0.0-1.0
+source          | TEXT    |            | e.g., "summary_20260623"
+source_type     | TEXT    |            | compress|user|auto_event
+tags            | TEXT    | '[]'       | JSON array
+status          | TEXT    | 'active'   | active|superseded|inactive|archived
+valid_from      | TEXT    |            |
+valid_until     | TEXT    |            |
+schema_version  | INTEGER | 1          |
+
+Indexes: idx_facts_status, idx_facts_importance, idx_facts_date
+
+TABLE: fact_relations
+────────────────────────────────────────────────────────────────────
+Column          | Type    | Default    | Notes
+────────────────────────────────────────────────────────────────────
+id              | TEXT PK |            | Format: rel_YYYYMMDD_XXXXXXXX
+from_id         | TEXT    | NOT NULL   | FK → facts.id
+to_id           | TEXT    | NOT NULL   | FK → facts.id
+relation        | TEXT    | NOT NULL   | supersedes|contradicts|confirms|related_to
+created_at      | TEXT    |            |
+reason          | TEXT    |            |
+confidence      | REAL    | 0.8        |
+
+No foreign key enforcement (no PRAGMA foreign_keys = ON)
+No indexes on from_id/to_id
+
+TABLE: messages
+────────────────────────────────────────────────────────────────────
+Column          | Type    | Default    | Notes
+────────────────────────────────────────────────────────────────────
+id              | TEXT PK |            | Format: msg_YYYYMMDD_XXXXXXXX
+ts              | TEXT    |            | ISO datetime
+role            | TEXT    |            | user|assistant
+text            | TEXT    |            |
+importance      | INTEGER | 5          | 1-10
+mode            | TEXT    | 'default'  | default|search|compress
+signals         | TEXT    | '[]'       | JSON array
+user_id         | INTEGER |            | Telegram user ID
+
+Indexes: idx_messages_ts, idx_messages_importance
+
+TABLE: reflections
+────────────────────────────────────────────────────────────────────
+Column          | Type    | Default    | Notes
+────────────────────────────────────────────────────────────────────
+id              | TEXT PK |            | Format: refl_YYYYMMDD_XXXXXXXX
+insight         | TEXT    | NOT NULL   |
+based_on        | TEXT    | '[]'       | JSON array of fact IDs
+period          | TEXT    |            | YYYY-MM
+importance      | INTEGER | 7          | 1-10
+confidence      | REAL    | 0.8        |
+status          | TEXT    | 'active'   |
+created_at      | TEXT    |            |
+
+TABLE: beliefs
+────────────────────────────────────────────────────────────────────
+Column          | Type    | Default    | Notes
+────────────────────────────────────────────────────────────────────
+id              | TEXT PK |            |
+belief          | TEXT    | NOT NULL   |
+based_on        | TEXT    | '[]'       | JSON array
+importance      | INTEGER | 6          |
+status          | TEXT    | 'active'   |
+created_at      | TEXT    |            |
+
+TABLE: meta
+────────────────────────────────────────────────────────────────────
+Column          | Type    | Default    | Notes
+────────────────────────────────────────────────────────────────────
+key             | TEXT PK |            | e.g., "compress_count"
+value           | TEXT    |            | e.g., "1"
+
+DESIGN ISSUES:
+- No FOREIGN KEY constraints enforced (PRAGMA foreign_keys not set)
+- based_on/tags/signals stored as JSON strings (no normalization)
+- No compound indexes for common query patterns
+- fact_relations lacks indexes on from_id/to_id — O(n) for relation lookups
+- No CHECK constraints on importance (1-10), confidence (0-1), status values
+
+
+================================================================================
+18. CONFIGURATION
+================================================================================
+
+18.1 Environment Variables (api.env)
+────────────────────────────────────
+Variable        | Required | Default    | Description
+───────────────────────────────────────────|──────────────────────────
+API_TOKEN       | YES      | —          | Telegram Bot API token
+GOOGLE_API_KEY  | YES      | —          | Google Gemini API key
+ADMIN_IDS       | YES      | —          | Comma-separated Telegram user IDs
+LOG_PATH        | No       | bot.log    | Log file path
+LOG_LEVEL       | No       | INFO       | Log level
+LLM_TIMEOUT     | No       | 120        | LLM call timeout in seconds
+LLM_RETRIES     | No       | 3          | LLM call retry count
+LLM_RETRY_DELAY | No       | 4          | Base retry delay in seconds
+SAFETY_*        | No       | BLOCK_NONE | Per-category safety thresholds
+
+18.2 Hardcoded Constants (config.py)
+─────────────────────────────────────
+Constant                    | Value          | Description
+────────────────────────────|────────────────|──────────────────────────
+MODEL_NAME                  | gemini-3.1-flash-lite | Chat model
+SEARCH_MODEL                | gemini-2.5-flash      | Search model
+SUMMARY_THRESHOLD           | 50              | Messages before compress
+REFLECTION_EVERY_N          | 4               | Compress cycles between reflections
+MAX_DOCUMENT_CHARS          | 120,000         | Max document text length
+RETRIEVAL_CHAR_BUDGET       | 4,000           | Max retrieval context chars
+RETRIEVAL_MAX_FACTS         | 25              | Max facts in context
+RETRIEVAL_MAX_REFLECTIONS   | 5               | Max reflections in context
+
+18.3 Safety Settings
+─────────────────────
+All categories default to BLOCK_NONE (Gemini content filtering disabled).
+Overridable via env: SAFETY_HARASSMENT, SAFETY_HATE_SPEECH, SAFETY_SEXUAL,
+SAFETY_DANGEROUS.
+
+18.4 SECURITY NOTE — API Keys Hardcoded in Repository
+──────────────────────────────────────────────────────
+The file api.env contains LIVE API TOKENS:
+  API_TOKEN = "8390550519:AAHeZy09ijk9DNZvASw41vUkvjSpu9eh05M"
+  GOOGLE_API_KEY = "AIzaSyBnZ7dvI2ZyjIBbN9H2CicUwl3jV1H7mX8"
+
+These tokens are committed to the git repository and accessible to anyone
+with access. This is a CRITICAL security vulnerability. Both tokens should
+be revoked and rotated immediately.
+
+
+================================================================================
+19. ERROR HANDLING
+================================================================================
+
+19.1 Try/Except Coverage
+─────────────────────────
+File                  | Exception Points
+──────────────────────|─────────────────────────────────────────────────
+main.py               | signal.add_signal_handler NotImplementedError
+main.py               | KeyboardInterrupt in main()
+config.py             | Missing env vars → ValueError
+bot_core.py:114-117   | send_typing() — silent pass
+bot_core.py:148       | wait_gemini_file_ready() — TimeoutError → raise
+bot_core.py:168-193   | compress_and_reset() — retry with backoff
+bot_core.py:377-379   | LLM response error → user message
+bot_core.py:413-415   | Background reflection → circuit breaker
+bot_core.py:465-467   | Background personality update → circuit breaker
+bot_core.py:505-507   | Self-critique → fallback default
+bot_core.py:559-561   | Grounding retry → empty string
+intents.py            | No explicit try/except (relies on caller)
+chat.py:110-111       | /search error → user message
+chat.py:137-141       | TikTok error → user message
+media.py:45-52        | Voice error → user message
+media.py:76-77        | Media error → user message
+media.py:91-95        | Video error → user message
+llm/client.py:213-222 | run_llm retry loop — TimeoutError and Exception
+llm/pipeline.py       | JSON parse errors → log + empty return
+llm/pipeline.py:292-294| Compress pipeline → log + None
+llm/master_summary.py:85-87 | Master summary update → log + silent fail
+memory/store.py       | Personality load → default EMPTY_PERSONALITY
+storage/legacy.py     | All static methods handle missing files
+storage/jsonl.py:45-46| Rotation line count → silent pass on error
+storage/sqlite_db.py  | INSERT OR IGNORE — silent on duplicate keys
+
+19.2 Fallback Strategies
+────────────────────────
+1. LLM fails → retry 3x with exponential backoff (2^attempt * 4s base)
+2. Compress fails → retry 2x, reduce counter by 25, don't reset session
+3. Grounding fails → fallback to normal chat response
+4. Grounding retry fails → empty string → original response preserved
+5. JSON parse fails → try markdown code block → empty default
+6. Personality load fails → EMPTY_PERSONALITY dict
+7. File encoding detection → try utf-8 → utf-8-sig → cp1251 → latin-1
+8. Background task fails → circuit breaker (5 failures → 10min cooldown)
+9. SQLite duplicate → INSERT OR IGNORE
+
+19.3 Single Points of Failure
+──────────────────────────────
+1. Gemini API outage → complete bot unavailability (no fallback LLM)
+2. api.env missing → ValueError at import, crash on startup
+3. SQLite corruption → complete data loss (no replica)
+4. Personality.json corrupt → EMPTY_PERSONALITY (acceptable)
+5. Background task pileup → semaphore(5) limit, but no timeout on queue
+6. send_long_message() → no error handling if piece of the message fails
+
+
+================================================================================
+20. PERFORMANCE ANALYSIS
+================================================================================
+
+20.1 O(n) Operations
+─────────────────────
+1. MemoryStore.search_facts() — O(n) linear scan over ALL active facts
+   - File: memory/store.py:92-104
+   - For each query, scans every active fact for substring match
+   - With 10K+ facts, this becomes slow
+
+2. MemoryStore.find_similar_fact() — O(n) with text_overlap()
+   - File: memory/store.py:117-127
+   - Computes character n-grams for EVERY active fact
+   - text_overlap() builds n-gram sets per comparison
+
+3. MemoryStore.facts_for_period() — O(n) full scan
+   - File: memory/store.py:203-209
+   - No SQL WHERE clause — loads ALL facts, filters in Python
+
+4. MemoryStore.apply_importance_decay() — O(n) full scan
+   - File: memory/store.py:219-232
+   - Iterates all active facts, checks age
+
+5. ReasoningEngine.list_goals() — O(n) full file read
+   - File: reasoning.py:342-361
+   - Reads entire goals.jsonl, parses every line, sorts
+
+6. ReasoningEngine.list_causal_links() — O(n) full file read
+   - Same pattern as goals
+
+7. ReasoningEngine.list_predictions() — O(n) full file read
+   - Same pattern
+
+8. RetrievalBudgetManager.select() — O(n log n) sort
+   - File: memory/retrieval.py:58-73
+   - Sorts all active facts by score
+
+20.2 O(n²) Operations
+──────────────────────
+1. generate_personality_snapshot() with _merge_personality()
+   - Dedup logic iterates all items in each list for normalization
+   - Union operation is O(n*m) for lists with normalization
+
+2. CONSOLIDATION_PROMPT processing
+   - LLM processes full fact list, but LLM call itself is constant time
+   - Prompt size grows with fact count
+
+20.3 Heavy Database Queries
+────────────────────────────
+1. list_messages() — "SELECT * FROM messages WHERE importance>=? ORDER BY ts DESC"
+   - No LIMIT by default in the SQL query (limit applied via Python)
+   - ORDER BY ts DESC with no index on ts (only index on ts is for column, not used in ORDER BY)
+   - Wait, there IS an index idx_messages_ts — so this is fine
+
+2. list_facts() — "SELECT * FROM facts WHERE status=? ORDER BY date DESC, created_at DESC"
+   - Uses idx_facts_status index, but ORDER BY date + created_at may be slow
+
+3. No index on fact_relations.from_id or to_id
+   - get_causal_chain() does DFS — each level does full table scan
+
+20.4 Potential Memory Leaks
+────────────────────────────
+1. user_chats dict — never bounded, grows with each unique user (but single-user)
+   - File: bot_core.py:37
+
+2. user_message_counts — same pattern
+
+3. _user_request_times — cleaned every 60s but stores all timestamps
+   - File: bot_core.py:46,258
+
+4. _background_task_failures — unbounded keys
+   - File: bot_core.py:50
+
+5. personality.json cache — MemoryStore._personality_cache
+   - File: memory/store.py:32
+   - Cached forever, never invalidated (manual reload)
+   - PRO: no repeated reads
+   - CON: stale data until reload
+
+6. JSONL files — append-only, rotation only at 50MB/500k lines
+   - messages.jsonl currently 942KB / 518 lines — fine
+   - But will grow unbounded between rotations
+
+20.5 Threading / Async Concerns
+────────────────────────────────
+- All LLM calls use asyncio.to_thread() — synchronous Gemini client in thread pool
+- No asyncio timeout on to_thread itself (run_llm wraps with asyncio.wait_for)
+- Background tasks use asyncio.create_task() with no await — fire-and-forget
+- No task result tracking — errors "disappear" into the event loop
+
+
+================================================================================
+21. SECURITY ANALYSIS
+================================================================================
+
+21.1 CRITICAL: API Keys in Repository
+─────────────────────────────────────
+File: api.env (included, not gitignored)
+Impact: LEAKED Telegram Bot API token + Google Gemini API key
+Fix: Revoke both tokens immediately, add api.env to .gitignore
+
+21.2 Race Conditions
+─────────────────────
+1. personality.json read/write without locking
+   - _background_personality_micro_update() reads → modifies → writes
+   - Meanwhile, generate_personality_snapshot() (in compress) does the same
+   - Two concurrent writes can corrupt the file
+
+2. todo.json read/write without locking
+   - todo operations read → modify → write on todo.json
+   - No file locking → concurrent operations lose data
+
+3. JSONL append is atomic per write but:
+   - Dual-write (SQLite + JSONL) is not transactional
+   - If SQLite succeeds but JSONL fails → inconsistency
+
+4. MemoryStore._personality_cache
+   - Read in load_personality(), written in save_personality()
+   - Not thread-safe (but LLM runs in thread pool)
+   - Python GIL mitigates, but still a design risk
+
+21.3 Shared State (Global Singletons)
+──────────────────────────────────────
+All global singletons are mutable:
+  - memory_store (MemoryStore)
+  - retrieval_mgr (RetrievalBudgetManager)
+  - user_chats (dict[int, Any])
+  - reasoning_engine (ReasoningEngine)
+  - user_model (UserModel)
+  - self_model (SelfModel)
+  - policy_layer (PolicyLayer)
+
+All background tasks access these shared objects without synchronization.
+Python's GIL provides basic protection, but logical races exist.
+
+21.4 Data Corruption Risks
+───────────────────────────
+1. JSONL files show mojibake (encoding corruption in existing data)
+   - beliefs.jsonl, causal_links.jsonl, goals.jsonl, predictions.jsonl,
+     messages.jsonl all show garbled text (UTF-8 encoded CP1251?)
+   - This is pre-existing data damage, not active corruption
+
+2. SQLite + JSONL dual-write drift:
+   - No mechanism to reconcile differences
+   - If one write fails, stores diverge permanently
+
+3. Personality.json partial write:
+   - Not atomic (json.dump to open file)
+   - Crash during write → truncated/broken JSON
+
+21.5 Prompt Injection Risks
+───────────────────────────
+1. User message → directly into LLM prompt
+   - File: bot_core.py:350, llm/prompts.py prompts
+   - SYSTEM_INSTRUCTION says "Разговаривай цинично..." — injection attempt
+   - LLM could be tricked via user message
+
+2. Document text → directly into LLM prompt
+   - documents.py:91 — file content sent to LLM as-is
+   - Injected instructions in uploaded documents would be executed
+
+3. ivan.txt content → system instruction
+   - Static persona appended to every system instruction
+   - If modified, could inject instructions
+
+4. Memory facts → system instruction (via retrieval)
+   - RAG context includes facts extracted from user messages
+   - Potential for self-reinforcing injection loops
+
+21.6 Storage Risks
+───────────────────
+1. No encryption at rest for sensitive data
+   - ivan.txt contains medical/psychological data
+   - personality.json, beliefs.jsonl contain personal analysis
+   - SQLite database is plaintext
+
+2. No access control beyond Telegram AuthMiddleware
+   - Anyone with file system access can read all data
+
+3. Logging of sensitive data
+   - bot.log may contain message content and API keys
+   - self_errors.jsonl logs error contexts
+
+21.7 Denial of Service
+──────────────────────
+1. Large document upload → MAX_DOCUMENT_CHARS (120K) limit exists
+   - But Gemini file upload bypasses this for binary files
+2. No attachment size limit on Telegram side
+3. Background task semaphore (max 5) prevents OOM, but:
+   - Tasks are never cancelled/timeouted
+   - If all 5 slots blocked, new tasks pile up
+
+
+================================================================================
+22. PRODUCTION READINESS
+================================================================================
+
+22.1 Overall Score: 3.5 / 10
+──────────────────────────────
+Breakdown:
+  - Functionality: 7/10 (core features work)
+  - Security: 2/10 (API keys committed, no encryption)
+  - Reliability: 4/10 (no health checks, no monitoring, race conditions)
+  - Scalability: 1/10 (single-user, in-memory state, no horizontal scaling)
+  - Maintainability: 4/10 (bot_core.py is 561-line God file, dead code)
+  - Test Coverage: 3/10 (10 tests, no integration tests, mocks everything)
+  - Documentation: 2/10 (only auto-generated docs in code comments)
+  - Observability: 3/10 (basic logging, no metrics, no tracing)
+  - Data Integrity: 3/10 (dual-write drift, no recovery, encoding corruption)
+  - Operations: 2/10 (no Docker, no startup script, no monitoring)
+
+22.2 Critical Issues Blocking Production
+─────────────────────────────────────────
+1. API keys in repository — must be revoked and rotated
+2. Single-user architecture — not designed for multi-tenant
+3. In-memory session state (user_chats) — lost on restart
+4. No database backups or replication
+5. Data corruption in JSONL files
+6. Race conditions on file writes
+7. No rate limiting on media uploads
+8. No error budget or SLAs
+9. Background tasks have no timeout — can block forever
+10. No graceful degradation during API outage
+
+22.3 Positive Aspects
+─────────────────────
+1. Dual-write strategy provides audit trail
+2. Circuit breakers prevent cascading failures
+3. Retry logic with exponential backoff for LLM calls
+4. Semaphore limits background tasks (prevents OOM)
+5. Modular retrieval engine with budget management
+6. Self-critique system adds quality control
+7. Compression pipeline prevents context overflow
+8. Never-delete philosophy prevents data loss
+
+
+================================================================================
+23. TECHNICAL DEBT
+================================================================================
+
+SEVERITY: CRITICAL
+───────────────────
+FILE: api.env
+DESCRIPTION: Live API tokens committed to repository
+IMPACT: Anyone with repo access can use Telegram bot and Gemini API
+FIX: Revoke both tokens NOW. Add api.env to .gitignore. Use env vars.
+
+FILE: data/*.jsonl (all files)
+DESCRIPTION: Data corruption — text stored with wrong encoding (mojibake)
+IMPACT: Retrieval quality degraded, causal/goal/prediction matching broken
+FIX: Re-migrate data with correct encoding, validate UTF-8 on write
+
+FILE: companion/bot_core.py
+DESCRIPTION: Single ~561-line file handles orchestration, grounding, critique,
+             background tasks, rate limiting, session management
+IMPACT: Violates Single Responsibility Principle, hard to test, hard to maintain
+FIX: Split into separate modules (grounding_handler, critique_manager, etc.)
+
+FILE: companion/self_model.py:156-194
+DESCRIPTION: critique_response() only checks uncertainty + source + domain.
+             Never checks if response CONTRADICTS stored facts.
+IMPACT: Bot can state factually incorrect information per memory
+FIX: Add fact-contradiction check using retrieval context
+
+SEVERITY: HIGH
+────────────────
+FILE: companion/storage/jsonl.py
+DESCRIPTION: rotate_jsonl() uses shutil.move which is not atomic on Windows
+IMPACT: Data loss risk during rotation if crash occurs mid-move
+FIX: Use temp file + atomic rename pattern
+
+FILE: companion/storage/legacy.py
+DESCRIPTION: All file operations lack advisory locking
+IMPACT: Concurrent writes can corrupt personality.json, diary.txt, summaries.txt
+FIX: Use file locking (portalocker) or write to temp + rename
+
+FILE: companion/user_model.py
+DESCRIPTION: Stub implementation — reflect_after_interaction() never updates
+             actual model fields
+IMPACT: User model data structure exists but is always empty
+FIX: Implement actual LLM-based reflection or remove dead code
+
+FILE: companion/reasoning.py:363-382
+DESCRIPTION: update_goal() rewrites ENTIRE goals.jsonl file for single update
+IMPACT: O(n) write for O(1) operation, race condition with concurrent appends
+FIX: Use SQLite for goals or implement append-only with versioning
+
+FILE: companion/memory/store.py:203-209
+DESCRIPTION: facts_for_period() loads ALL facts, filters in Python
+IMPACT: O(n) memory and CPU for what should be a SQL WHERE clause
+FIX: Use SQL query with date filter
+
+FILE: companion/memory/retrieval.py:136-141
+DESCRIPTION: Budget trimming loops iterate bundle.to_prompt_block() each iteration
+IMPACT: to_prompt_block() called 3x per trim — O(n²) prompt building
+FIX: Compute length once before trim loop
+
+FILE: companion/llm/grounding.py
+DESCRIPTION: Intent classification is regex-only, no semantic understanding
+IMPACT: "Расскажи про Новости" could be classified as "world" or "memory"
+FIX: Use LLM for intent classification
+
+SEVERITY: MEDIUM
+─────────────────
+FILE: companion/*/__init__.py
+DESCRIPTION: Numerous .pyc files from deleted modules remain
+IMPACT: Confusing for developers, implies dead code exists
+FIX: Clean __pycache__ directories
+
+FILE: companion/memory/importance.py:57-92
+DESCRIPTION: retrieval_score() re-parses tags for every fact (list comprehension)
+IMPACT: Minor performance overhead on every select()
+FIX: Pre-parse tags once
+
+FILE: companion/config.py:107-110
+DESCRIPTION: MODEL_NAME = "gemini-3.1-flash-lite" — this model may not exist
+IMPACT: Startup failure if model name is wrong
+FIX: Verify model name against available models
+
+FILE: companion/main.py:59-63
+DESCRIPTION: signal handling silently catches NotImplementedError (Windows)
+IMPACT: On Windows, graceful shutdown is silently disabled
+FIX: Use Windows-compatible signal handling
+
+FILE: companion/handlers/chat.py:124-141
+DESCRIPTION: TikTok handler imports yt-dlp inside function (not top-level)
+IMPACT: Import error only surfaces on first TikTok message
+FIX: Import at top of file
+
+FILE: companion/media.py:20-21
+DESCRIPTION: Voice handler imports speech_recognition and pydub inside function
+IMPACT: Import error only surfaces on first voice message
+FIX: Import at top of file
+
+SEVERITY: LOW
+──────────────
+FILE: companion/storage/sqlite_db.py
+DESCRIPTION: No PRAGMA foreign_keys = ON
+IMPACT: Orphaned fact_relations rows
+FIX: Enable foreign key enforcement
+
+FILE: companion/storage/sqlite_db.py:128
+DESCRIPTION: mapper() call inside loop uses bound method as variable
+IMPACT: Minor code smell, works correctly
+FIX: Use explicit function calls
+
+FILE: companion/llm/client.py:70-84
+DESCRIPTION: parse_json_array() has nested import inside function
+IMPACT: PEP 8 violation, works but ugly
+FIX: Move imports to top
+
+FILE: companion/memory/store.py:92-104
+DESCRIPTION: search_facts() does substring matching — no stemming/lemmatization
+IMPACT: "тестировщик" won't match "тестирование"
+FIX: Use stemmed or normalized text comparison
+
+================================================================================
+24. FUTURE IMPROVEMENTS
+================================================================================
+
+24.1 Quick Wins (1-2 days each)
+────────────────────────────────
+1. Fix api.env .gitignore — add to .gitignore NOW, revoke tokens
+2. Clean __pycache__ directories — remove orphaned .pyc files
+3. Move inline imports to top of files (yt-dlp, speech_recognition, pydub)
+4. Add PRAGMA foreign_keys = ON to SQLite connection
+5. Add input validation for importance (1-10), confidence (0-1)
+6. Document handshake: add README.md with setup instructions
+7. Add startup health check (verify DB, API keys, model access)
+8. Pre-compute retrieval_score tag parsing once, not per-fact
+
+24.2 Medium Improvements (1-2 weeks)
+─────────────────────────────────────
+1. Split bot_core.py into focused modules:
+   - grounding_handler.py (grounding logic)
+   - critique_manager.py (self-critique)
+   - background_scheduler.py (background tasks)
+   - response_builder.py (response assembly)
+
+2. Implement proper file locking:
+   - Use portalocker or temp-file-rename pattern for all file writes
+
+3. Fix user_model.py:
+   - Either implement actual LLM-based reflection
+   - Or remove the stub and associated code paths
+
+4. Add compound SQLite indexes:
+   - fact_relations(from_id), fact_relations(to_id)
+   - messages(ts, importance) for common query
+
+5. Add monitoring:
+   - Request latency tracking
+   - Error rate metrics
+   - Memory usage tracking
+   - LLM response time histogram
+
+6. Add proper shutdown:
+   - Wait for background tasks to complete
+   - Flush all caches
+   - Save in-memory session state to resume after restart
+
+7. Add data integrity checker:
+   - Compare SQLite vs JSONL records
+   - Validate field types and ranges
+   - Report inconsistencies
+
+24.3 Major Architectural Changes (1-3 months)
+──────────────────────────────────────────────
+1. Multi-user support:
+   - Replace in-memory user_chats dict with persistent storage
+   - Add user_id to all data operations
+   - Implement per-user isolation
+
+2. Database migration:
+   - Move goals, predictions, causal_links to SQLite (remove JSONL reads)
+   - Add proper foreign keys
+   - Add migration framework
+
+3. Embedding-based retrieval:
+   - Replace keyword overlap with vector embeddings
+   - Use Gemini embedding API or local model
+   - Add approximate nearest neighbor search (ANN)
+
+4. Replace file-based config with proper config management:
+   - Remove api.env from codebase
+   - Use environment variables or secrets manager
+   - Add config validation at startup
+
+5. Async LLM client:
+   - Replace synchronous Gemini client with true async
+   - Remove asyncio.to_thread() bottleneck
+   - Add streaming response support
+
+6. Add proper CI/CD:
+   - GitHub Actions: lint, type-check, test
+   - Docker image with health checks
+   - Automated deployment
+
+7. Implement agentic capabilities:
+   - LLM function calling for memory operations
+   - Tool-use for external APIs
+   - Multi-step reasoning with verification
+
+8. Add Web UI:
+   - Simple admin dashboard for monitoring
+   - Data visualization for memory/personality evolution
+   - Manual memory editing interface
+
+
+================================================================================
+25. FINAL SYSTEM MAP
+================================================================================
+
+25.1 Complete ASCII Architecture Map
+─────────────────────────────────────
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           TELEGRAM BOT API                                  │
+│                            (aiogram 3.x)                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  AUTH MIDDLEWARE                        [companion/main.py:AuthMiddleware]  │
+│  └─ Checks event.from_user.id in ADMIN_IDS                                  │
+│  └─ Blocks non-admin with "Пошёл нахуй"                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  HANDLER DISPATCH                                                           │
+│  ┌────────────────┐   ┌────────────────┐   ┌────────────────┐              │
+│  │ chat.py        │   │ media.py       │   │ intents.py     │              │
+│  │ ─ /start       │   │ ─ voice        │   │ ─ 22 NL        │              │
+│  │ ─ /help        │   │ ─ document     │   │   patterns     │              │
+│  │ ─ /search      │   │ ─ photo/sticker│   │ ─ regex router │              │
+│  │ ─ /summary     │   │ ─ video        │   │ ─ service      │              │
+│  │ ─ /personality │   │ ─ tiktok       │   │   dispatch     │              │
+│  │ ─ /remember    │   └────────────────┘   └────────────────┘              │
+│  │ ─ text_handler │                                                         │
+│  └────────────────┘                                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  BOT CORE — build_context() & process_llm_request() [bot_core.py]          │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ PREPROCESSING PIPELINE                                              │   │
+│  │  1. rate_limit check ────────────────────────────────────────────── │   │
+│  │  2. RuntimeState() ──────────────────────────────────────────────── │   │
+│  │  3. score_message_importance() ──── [memory/importance.py]          │   │
+│  │  4. infer_mood_lite() ───────────── [mood_lite.py]                  │   │
+│  │  5. log_message() ───────────────── [memory/store.py → SQLite+JSONL]│   │
+│  │  6. auto_reasoning_context() ────── [reasoning.py]                  │   │
+│  │  7. auto_add_event_from_message() ─ [services/memory_service.py]    │   │
+│  │  8. classify_intent() ───────────── [llm/grounding.py]              │   │
+│  │  9. detect_user_state() ─────────── [policy_layer.py]               │   │
+│  │ 10. decide_policy() ─────────────── [policy_layer.py]               │   │
+│  │ 11. _load_retrieval_context() ───── [retrieval.py]                  │   │
+│  │ 12. GROUNDING CHECK ──→ search_with_grounding() if world/mixed      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ RESPONSE GENERATION                                                 │   │
+│  │  1. RetrievalBudgetManager.select() ──── [memory/retrieval.py]       │   │
+│  │  2. ContextBundle.to_prompt_block() ──── [models.py]                 │   │
+│  │  3. _build_user_prompt_block() ──── with reasoning hints             │   │
+│  │  4. format_prompt_with_policy() ──── if policy constraints           │   │
+│  │  5. Gemini chat.send_message() ───── with timeout + retry            │   │
+│  │  6. enforce_constraints() ────────── post-process                    │   │
+│  │  7. SelfModel.critique_response() ── [self_model.py]                 │   │
+│  │  8. _apply_critique_to_text() ────── uncertainty markers             │   │
+│  │  9. GROUNDING RETRY ──────────────── if low confidence               │   │
+│  │ 10. send_long_message() ──────────── split at sentence boundaries    │   │
+│  │ 11. log_message(assistant) ───────── save response                   │   │
+│  │ 12. Background reflection ────────── if importance >= 7              │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
+         │
+         ├──────────────────────────────────────────────────────────────────┐
+         │                                                                  │
+         ▼                                                                  ▼
+┌──────────────────────────────────┐  ┌──────────────────────────────────────┐
+│  CHAT SESSION [llm/sessions.py]  │  │  BACKGROUND TASKS [bot_core.py]     │
+│  ┌─ build_system_instruction()   │  │  ┌─────────────────────────────┐    │
+│  │  ─ SYSTEM_INSTRUCTION prompt  │  │  │ personality_micro_update   │    │
+│  │  ─ Master Summary (Tier 3)    │  │  │   (every 10 messages)      │    │
+│  │  ─ Retrieval Context Bundle   │  │  └─────────────────────────────┘    │
+│  │  ─ ivan.txt (static persona)  │  │  ┌─────────────────────────────┐    │
+│  │  ─ Temperature: 0.7           │  │  │ user_model_reflection       │    │
+│  └─ create_default_session()     │  │  │   (importance >= 7)         │    │
+│  ┌─ _reconstruct_recent_history()│  │  └─────────────────────────────┘    │
+│  │  ─ from SQLite (max 30 msgs)  │  │                                      │
+│  └───────────────────────────────┘  │  Both use:                          │
+│                                      │  ─ safe_task() wrapper             │
+│                                      │  ─ Semaphore(5)                    │
+│                                      │  ─ Circuit breaker (5 fails)       │
+│                                      │  ─ self_model.log_error()          │
+└──────────────────────────────────┘  └──────────────────────────────────────┘
+
+         ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  LLM LAYER [llm/]                                                          │
+│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐               │
+│  │ client.py      │  │ prompts.py     │  │ pipeline.py    │               │
+│  │ ─ Gemini API   │  │ ─ SYSTEM_INSTR │  │ ─ extract_facts│               │
+│  │ ─ run_llm()    │  │ ─ SUMMARY_PROMP│  │ ─ consolidate  │               │
+│  │ ─ retry 3x     │  │ ─ FACT_EXTRACT │  │ ─ reflect      │               │
+│  │ ─ exp backoff  │  │ ─ CONSOLIDATE  │  │ ─ personality  │               │
+│  │ ─ search_with_ │  │ ─ REFLECTION   │  │ ─ decay        │               │
+│  │   grounding()  │  │ ─ PERSONALITY  │  │ ─ knowledge_map│               │
+│  │ ─ parse_json() │  │ ─ RETROSPECTIVE│  └────────────────┘               │
+│  └────────────────┘  └────────────────┘  ┌────────────────┐               │
+│  ┌────────────────┐  ┌────────────────┐  │ master_summary │               │
+│  │ sessions.py    │  │ grounding.py   │  │ .py            │               │
+│  │ ─ build_system │  │ ─ classify_    │  │ ─ Tier 3       │               │
+│  │   instruction  │  │   intent()     │  │ ─ LLM merge    │               │
+│  │ ─ RAG assembly │  │ ─ world/memory │  └────────────────┘               │
+│  └────────────────┘  └────────────────┘                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+         ▼                    ▼                    ▼
+┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│ MEMORY LAYER     │  │ STORAGE LAYER    │  │ DATABASE         │
+│ [memory/]        │  │ [storage/]       │  │ [data/]          │
+│                  │  │                  │  │                  │
+│ store.py         │  │ sqlite_db.py     │  │ companion.db     │
+│ ─ MemoryStore    │  │ ─ MemoryDatabase │  │ ─ 6 tables       │
+│ ─ CRUD facts/    │  │ ─ 6 tables       │  │ ─ 1.15MB         │
+│   msgs/refls     │  │ ─ ACID           │  │                  │
+│ ─ personality    │  │                  │  │ *.jsonl          │
+│ ─ compress_count │  │ legacy.py        │  │ ─ messages       │
+│                  │  │ ─ LegacyStorage  │  │ ─ beliefs        │
+│ retrieval.py     │  │ ─ file I/O       │  │ ─ goals          │
+│ ─ RetrievalBudget│  │ ─ all flat files │  │ ─ causal_links   │
+│   Manager        │  │                  │  │ ─ predictions    │
+│ ─ scoring/ranking│  │ jsonl.py         │  │ ─ policy_decisions│
+│ ─ pinned facts   │  │ ─ read/append    │  │                  │
+│ ─ mood boost     │  │ ─ rotate 50MB   │  │ *.json / *.txt   │
+│                  │  │ ─ keep 2 backup  │  │ ─ personality    │
+│ importance.py    │  │                  │  │ ─ user_model     │
+│ ─ scoring/decay  │  │                  │  │ ─ master_summary │
+│ ─ retrieval_score│  │                  │  │ ─ ivan.txt       │
+│                  │  │                  │  │ ─ diary.txt      │
+│ text_sim.py      │  │                  │  │ ─ summaries.txt  │
+│ ─ char n-grams   │  │                  │  └──────────────────┘
+│ ─ dedup          │  │                  │
+└──────────────────┘  └──────────────────┘
+
+         ▼                    ▼                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  SERVICE LAYER [services/]                                                  │
+│  ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────┐  │
+│  │ memory_service.py    │  │ reasoning_service.py │  │ report_service   │  │
+│  │ ─ remember_text      │  │ ─ reset_context      │  │ .py             │  │
+│  │ ─ show_facts/notes   │  │ ─ show_goals         │  │ ─ show_summary   │  │
+│  │ ─ add_diary_entry    │  │ ─ add_goal_from_text │  │ ─ show_personality│  │
+│  │ ─ export_diary       │  │ ─ show_reasoning     │  │ ─ show_selfie    │  │
+│  │ ─ show_timeline/year │  │ ─ show_todos         │  │ ─ show_week      │  │
+│  │ ─ auto_add_event     │  │ ─ add/complete/      │  │   _digest        │  │
+│  │                      │  │   delete/clear todo  │  │ ─ show_monthbook │  │
+│  │                      │  │ ─ show_selfmap/      │  │ ─ show_retrospect│  │
+│  │                      │  │   self_description   │  │ ─ show_context   │  │
+│  └──────────────────────┘  └──────────────────────┘  └──────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+         ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  COMPRESSION PIPELINE [llm/pipeline.py + llm/master_summary.py]            │
+│  Trigger: every SUMMARY_THRESHOLD (50) user messages                       │
+│                                                                             │
+│  chat.send_message(SUMMARY_PROMPT)                                          │
+│       │                                                                     │
+│       ▼                                                                     │
+│  extract_facts() ──── LLM parses summary + recent messages → Fact[]         │
+│       │                                                                     │
+│       ▼                                                                     │
+│  consolidate_facts() ── LLM finds relations between new and existing facts  │
+│       │                                                                     │
+│       ▼                                                                     │
+│  generate_reflections() ── every 4th compress → Reflection[]                │
+│       │                                                                     │
+│       ▼                                                                     │
+│  generate_personality_snapshot() ── full personality merge                  │
+│       │                                                                     │
+│       ▼                                                                     │
+│  apply_importance_decay() ── age-based status changes                       │
+│       │                                                                     │
+│       ▼                                                                     │
+│  update_knowledge_map() ── topic-level tracking                             │
+│       │                                                                     │
+│       ▼                                                                     │
+│  update_master_summary() ── Tier 3 merge                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+DATA FLOW:
+  Telegram Message → JSONL (append) ←→ SQLite (ACID) ←→ MemoryStore (cache)
+                                                              │
+           Personality ←─── personality.json ←─── MemoryStore._personality_cache
+                                                              │
+           Static Persona ←─── ivan.txt ←─── LegacyStorage.load_memory()
+                                                              │
+           Summaries ←─── summaries.txt ←─── LegacyStorage.load_all_summaries()
+                                                              │
+           Diary ←─── diary.txt ←─── LegacyStorage
+                                                              │
+           Master Summary ←─── master_summary.txt ←─── LegacyStorage
+
+
+================================================================================
+26. EXECUTIVE SUMMARY
+================================================================================
+
+WHAT IS THIS PROJECT?
+─────────────────────
+A single-user Telegram chatbot that acts as a personal AI companion with
+long-term memory and personality modeling. It uses Google Gemini for LLM
+capabilities and stores everything in SQLite + JSONL files.
+
+KEY TECHNOLOGIES:
+  - Python 3.11+ / asyncio
+  - aiogram 3.x (Telegram Bot framework)
+  - Google Gemini API (genai SDK)
+  - SQLite (primary store)
+  - JSONL (audit trail)
+  - yt-dlp, pydub, SpeechRecognition, pypdf, python-docx (optional)
+
+ARCHITECTURE HIGHLIGHTS:
+  - Memory-first design: facts extracted from conversations every ~50 messages
+  - Dual-write: SQLite (ACID) + JSONL (append-only) for every operation
+  - Retrieval-Augmented Generation (RAG) with budget management (4000 chars)
+  - Self-critique system with confidence scoring and automatic fallback
+  - Policy layer adapts response style based on detected user state
+  - Background tasks with circuit breakers and semaphore limits
+  - JSONL rotation at 50MB / 500k lines
+
+CRITICAL ISSUES TO FIX FIRST:
+  1. REMOVE api.env FROM GIT (contains live API tokens) — REVOKE TOKENS
+  2. Fix JSONL encoding corruption (mojibake in all storage files)
+  3. Split bot_core.py into focused modules (561-line God file)
+  4. Add file locking for personality.json writes (race condition)
+  5. Implement actual UserModel reflection (currently stub)
+  6. Add database indexes for fact_relations
+
+WHERE TO START:
+  - Entry point: bot.py → companion.main.main() → companion.main.run()
+  - Core orchestration: companion/bot_core.py (build_context → process_llm_request)
+  - Memory system: companion/memory/store.py + companion/memory/retrieval.py
+  - LLM integration: companion/llm/client.py + companion/llm/sessions.py
+  - Storage: companion/storage/sqlite_db.py + companion/storage/legacy.py
+
+QUICK COMMANDS FOR NEW DEVELOPERS:
+  python bot.py           # Start the bot (Windows)
+  python -m pytest tests/ # Run tests (10 tests)
+  cd data && sqlite3 companion.db .schema  # View database schema
+
+================================================================================
+END OF DOCUMENT
+================================================================================

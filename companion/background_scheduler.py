@@ -1,0 +1,170 @@
+"""Background task scheduler — circuit breaker, reflection, personality micro-update."""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from datetime import datetime
+from typing import Any
+
+from companion.user_model import user_model
+
+logger = logging.getLogger(__name__)
+
+# Rate limiter for user_model reflection (prevent burst overload)
+_last_reflection_time: dict[int, float] = {}
+_REFLECTION_COOLDOWN_SECONDS = 60  # 1 minute between reflections
+
+# Circuit breaker for background tasks (prevent log spam on persistent failures)
+_background_task_failures: dict[str, int] = {}
+_background_task_cooldown_until: dict[str, float] = {}
+_MAX_CONSECUTIVE_FAILURES = 5
+_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 600  # 10 minutes
+
+# Semaphore for background tasks (prevent OOM from task pileup)
+_background_semaphore = asyncio.Semaphore(5)
+
+
+async def _run_background_task(coro, task_name: str = "background"):
+    async with _background_semaphore:
+        try:
+            await coro
+        except Exception as e:
+            logger.error(f"Background task '{task_name}' failed: {e}")
+
+
+def safe_task(coro, task_name: str = "background"):
+    """Fire-and-forget with semaphore, exception logging to logger + self_errors.jsonl."""
+    async def _wrapped():
+        async with _background_semaphore:
+            try:
+                await coro
+            except Exception as e:
+                logger.exception("Background task '%s' failed: %s", task_name, e)
+                try:
+                    from companion.self_model import self_model
+                    self_model.log_error(
+                        error_type=f"background_task.{task_name}",
+                        query=task_name,
+                        expected="success",
+                        actual=str(e),
+                    )
+                except Exception:
+                    pass
+    return asyncio.create_task(_wrapped())
+
+
+def _check_circuit_breaker(task_name: str) -> bool:
+    now = time.time()
+    cooldown = _background_task_cooldown_until.get(task_name)
+    if cooldown and now < cooldown:
+        logger.debug(f"Circuit breaker active for {task_name}, skipping")
+        return False
+    return True
+
+
+def _record_success(task_name: str) -> None:
+    _background_task_failures[task_name] = 0
+
+
+def _record_failure(task_name: str) -> None:
+    _background_task_failures[task_name] = _background_task_failures.get(task_name, 0) + 1
+    if _background_task_failures[task_name] >= _MAX_CONSECUTIVE_FAILURES:
+        cooldown_until = time.time() + _CIRCUIT_BREAKER_COOLDOWN_SECONDS
+        _background_task_cooldown_until[task_name] = cooldown_until
+        logger.warning(
+            f"Circuit breaker triggered for {task_name} after {_MAX_CONSECUTIVE_FAILURES} failures. "
+            f"Cooling down for {_CIRCUIT_BREAKER_COOLDOWN_SECONDS}s"
+        )
+
+
+async def background_user_model_reflection(state, store) -> None:
+    """Фоновое обновление user model через reflection."""
+    task_name = "user_model_reflection"
+
+    if not _check_circuit_breaker(task_name):
+        return
+
+    try:
+        recent_facts = store.list_facts("active")[-10:]
+
+        reflection = await user_model.reflect_after_interaction(
+            user_message=state.user_message,
+            bot_response=state.llm_response,
+            facts_extracted=recent_facts,
+            mood_state=state.mood_state,
+        )
+
+        if reflection:
+            discoveries = len(reflection.get("discoveries", []))
+            confirmations = len(reflection.get("confirmations", []))
+            falsifications = len(reflection.get("falsifications", []))
+
+            if discoveries > 0 or confirmations > 0 or falsifications > 0:
+                logger.info(
+                    f"User model reflection: {discoveries} discoveries, "
+                    f"{confirmations} confirmations, {falsifications} falsifications"
+                )
+
+        _record_success(task_name)
+
+    except Exception as e:
+        logger.error(f"User model reflection error: {e}")
+        _record_failure(task_name)
+
+
+async def background_personality_micro_update(state, store) -> None:
+    task_name = "personality_micro_update"
+
+    if not _check_circuit_breaker(task_name):
+        return
+
+    try:
+        current = store.load_personality()
+
+        recent = store.recent_messages(min_importance=0, limit=10)
+        user_messages = [m.text for m in recent if m.role == "user"]
+
+        if not user_messages:
+            return
+
+        interests = current.get("interests", {})
+        all_text = " ".join(user_messages).lower()
+
+        topics = [
+            "qa", "тестирование", "работа", "код", "python",
+            "аня", "морзик", "семья", "друзья",
+            "тревога", "паника", "лекарства", "терапия",
+            "музыка", "игры", "фильмы", "книги",
+            "спорт", "тренировки", "здоровье"
+        ]
+
+        for topic in topics:
+            count = all_text.count(topic)
+            if count > 0:
+                interests[topic] = interests.get(topic, 0) + count
+
+        current["interests"] = interests
+
+        if state.message_importance >= 7:
+            changes = current.get("changes", [])
+            changes.append({
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "observation": state.user_message[:150]
+            })
+            current["changes"] = changes[-20:]
+
+        current["last_updated"] = datetime.now().isoformat()
+        store.save_personality(current)
+
+        logger.info("Personality micro-update completed")
+        _record_success(task_name)
+
+    except Exception as e:
+        logger.error(f"Personality micro-update error: {e}")
+        _record_failure(task_name)
+
+
+def run_background_tasks(uid: int, state, store, user_message_counts: dict[int, int]) -> None:
+    if user_message_counts.get(uid, 0) % 10 == 0:
+        safe_task(background_personality_micro_update(state, store), "personality_micro_update")

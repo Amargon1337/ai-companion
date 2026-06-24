@@ -1,0 +1,9 @@
+aiogram
+google-genai
+python-dotenv
+pydub
+SpeechRecognition
+yt-dlp
+pypdf
+python-docx
+# SQLite встроен в Python 3 — отдельный пакет не нужен

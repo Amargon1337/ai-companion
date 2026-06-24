@@ -1,0 +1,62 @@
+AI COMPANION — Security Fixes & Refactoring Work Report
+=======================================================
+
+Date: 2026-06-24
+
+PHASE 1: Security & Cleanup
+----------------------------
+1. .gitignore — Verified `api.env` is listed (line 1). No commits exist yet,
+   so credentials are not tracked.
+
+2. Dead Code Removal — Deleted 8 `__pycache__` directories and 52 orphaned
+   `.pyc` files including remnants of deleted modules:
+   - autonomous_reasoning, conflict_detection, conflict_memory
+   - ground_truth, identity_anchors, mood_inference
+   - reality_compression, background_workers, analytics, diagnostics, etc.
+
+3. Inline Imports Fixed:
+   - `companion/handlers/chat.py`: Moved `import yt_dlp` to top of file
+   - `companion/handlers/media.py`: Moved `import speech_recognition` and
+     `from pydub import AudioSegment` to top of file
+
+PHASE 2: Data Integrity & Concurrency
+--------------------------------------
+1. SQLite Foreign Keys — Added `PRAGMA foreign_keys = ON;` in
+   `companion/storage/sqlite_db.py:_conn()` to enforce referential integrity.
+
+2. Atomic File Writes:
+   - Added `_atomic_write()` and `_atomic_write_json()` helpers to
+     `companion/storage/legacy.py` — write to temp file, then os.replace()
+   - Converted: save_master_summary, save_monthbook, save_todos
+   - Fixed `companion/memory/store.py:save_personality()` — uses same
+     atomic temp-file pattern for personality.json
+
+3. Mojibake Fix — Created `scripts/fix_jsonl_encoding.py`
+   - Scanned 8 .jsonl files in data/, fixed 7 with encoding corruption
+   - Files fixed: beliefs.jsonl, causal_links.jsonl, goals.jsonl,
+     messages.jsonl, policy_decisions.jsonl, predictions.jsonl,
+     user_model_updates.jsonl
+
+PHASE 3: Refactoring bot_core.py (God Object)
+----------------------------------------------
+Reduced from 561 lines → 267 lines (52% reduction)
+
+Extracted modules:
+  - `companion/grounding_handler.py` (64 lines)
+    handle_grounding(), grounding_answer_only(), should_retry_with_grounding()
+
+  - `companion/critique_manager.py` (38 lines)
+    run_self_critique(), apply_critique_to_text()
+
+  - `companion/background_scheduler.py` (129 lines)
+    safe_task(), circuit breaker, background_user_model_reflection(),
+    background_personality_micro_update(), run_background_tasks()
+
+All wiring updated in bot_core.py — process_llm_request pipeline intact.
+
+TEST RESULTS
+-------------
+All 10 tests PASSED after each phase:
+  Phase 1: 10/10 passed
+  Phase 2: 10/10 passed
+  Phase 3: 10/10 passed
