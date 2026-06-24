@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from companion.config import DATA_DIR
+from companion.memory.text_sim import text_overlap
 from companion.storage.jsonl import append_jsonl, rotate_jsonl
 
 GOALS_PATH = os.path.join(DATA_DIR, "goals.jsonl")
@@ -305,7 +306,13 @@ class ReasoningEngine:
     def auto_reasoning_context(self, query: str, importance: int = 5) -> dict[str, Any]:
         self.update_world_model_from_message(query, importance)
         maybe_goal = self.maybe_capture_goal(query) if importance >= 6 else None
-        maybe_prediction = self.maybe_capture_prediction(query) if importance >= 6 else None
+        if importance >= 6:
+            from companion.llm.analyzer import analyze_message
+            _analysis = analyze_message(query)
+            _capture = _analysis.get("intent", "chat_casual") not in ("world", "memory", "command", "mixed")
+        else:
+            _capture = False
+        maybe_prediction = self.maybe_capture_prediction(query) if _capture else None
         return {
             "active_goals": self.get_goal_snapshot(query),
             "causal_links": self.get_relevant_causal_context(query),
@@ -335,7 +342,19 @@ class ReasoningEngine:
     # ═══ Goals ═══
 
     def add_goal(self, goal: Goal) -> None:
-        """Добавить цель."""
+        """Добавить цель. Если похожая уже есть — обновить её (priority, status, updated_at)."""
+        existing = self.list_goals("active")
+        for ex in existing:
+            if text_overlap(ex.title, goal.title) > 0.55:
+                updates = {}
+                if goal.priority != ex.priority:
+                    updates["priority"] = goal.priority
+                if goal.description and goal.description != ex.description:
+                    updates["description"] = goal.description
+                if updates:
+                    updates["status"] = "active"
+                    self.update_goal(ex.goal_id, updates)
+                return
         append_jsonl(GOALS_PATH, goal.to_dict())
         rotate_jsonl(GOALS_PATH)
 
