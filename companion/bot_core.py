@@ -276,15 +276,19 @@ async def process_llm_request(message: types.Message, content_payload: Any) -> N
 
     state = ctx["state"]
 
-    # Route commands via LLM-analyzed intent
-    if state.intent == "command" and state.command:
-        if await _route_command(message, state.command, str(content_payload)):
-            memory_store.log_message(
-                role="assistant",
-                text=f"[Выполнена команда: {state.command}]",
-                importance=4, mode="command", user_id=ctx["uid"],
-            )
-            return
+    # Route commands via LLM-analyzed intent (only when confidence >= 0.65)
+    if state.intent == "command" and state.command and state.intent_confidence >= 0.65:
+        command = state.command
+        try:
+            if await _route_command(message, command, str(content_payload)):
+                memory_store.log_message(
+                    role="assistant",
+                    text=f"[Выполнена команда: {command}]",
+                    importance=4, mode="command", user_id=ctx["uid"],
+                )
+                return
+        finally:
+            state.command = None
 
     chat = user_chats[ctx["uid"]]
     await _generate_and_send_response(
@@ -369,7 +373,12 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
     await send_typing(message)
     try:
         response = await llm.run_llm(chat.send_message, content_payload)
-        text = response.text or ""
+        text = _extract_response_text(response)
+        if not text:
+            await message.answer("API вернул пустой ответ без текста.")
+            state.llm_response = ""
+            return
+
         if state.policy_constraints and policy_decision and text:
             text = policy_layer.enforce_constraints(text, state.policy_constraints)
 
@@ -394,6 +403,15 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
     except Exception as e:
         logger.error(f"LLM error: {e}")
         await message.answer(f"API ошибка: {e}")
+
+
+def _extract_response_text(response: Any) -> str:
+    try:
+        text = getattr(response, "text", None)
+    except Exception as e:
+        logger.warning("Failed to extract Gemini response text: %s", e)
+        return ""
+    return text if isinstance(text, str) else ""
 
 
 def fact_from_permanent_note(note: str) -> Fact:

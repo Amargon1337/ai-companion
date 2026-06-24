@@ -9,6 +9,7 @@ import uuid
 from aiogram import F, types
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import ReplyKeyboardRemove
 
 from companion import bot_core as core
 from companion.config import BASE_DIR
@@ -54,15 +55,17 @@ def register(dp, bot) -> None:
 
     @dp.message(Command("start"))
     async def cmd_start(message: types.Message):
-        await message.answer(
+        msg = await message.answer(
             "Companion online. Пиши обычным текстом — память, reasoning и поиск работают в фоне.\n\n"
             "Быстрые команды: /search, /summary, /personality, /remember.",
-            reply_markup=get_main_keyboard(),
+            reply_markup=ReplyKeyboardRemove(),
         )
+        await msg.edit_reply_markup(reply_markup=get_main_keyboard())
 
     @dp.message(Command("help"))
     async def cmd_help(message: types.Message):
-        await message.answer(HELP_TEXT, parse_mode="HTML", reply_markup=get_main_keyboard())
+        msg = await message.answer(HELP_TEXT, parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+        await msg.edit_reply_markup(reply_markup=get_main_keyboard())
 
     @dp.message(Command("summary", "summarize"))
     async def cmd_summary(message: types.Message):
@@ -124,7 +127,8 @@ def register(dp, bot) -> None:
         elif action == "personality":
             await report_service.show_personality(callback.message)
         elif action == "help":
-            await callback.message.answer(HELP_TEXT, parse_mode="HTML", reply_markup=get_main_keyboard())
+            msg = await callback.message.answer(HELP_TEXT, parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+            await msg.edit_reply_markup(reply_markup=get_main_keyboard())
 
     @dp.message(F.text & ~F.text.startswith("/") & ~F.text.contains("tiktok.com"))
     async def text_handler(message: types.Message):

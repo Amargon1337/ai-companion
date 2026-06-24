@@ -13,7 +13,7 @@ ANALYSIS_PROMPT = """Проанализируй сообщение пользо�
 Поля JSON:
 - intent: тип намерения (world — факты/новости/внешний мир, memory — личные данные/воспоминания, mixed — смешанный, command — команда боту, chat_casual — обычная беседа)
 - confidence: уверенность в интенте (0.0-1.0)
-- user_mood: объект {anxiety, anger, sadness, energy} каждое 0.0-1.0
+- user_mood: объект {{anxiety, anger, sadness, energy}} каждое 0.0-1.0
 - user_state: ANXIOUS | DEPRESSED | CURIOUS | OVERWHELMED | NORMAL
 - estimated_importance: 1-10
 - command: если intent=command, укажи точное название команды (reset_context, show_facts, show_notes, export_diary, show_timeline, show_year, show_context, week_digest, retrospective, monthbook, selfie, show_goals, add_goal, show_reasoning, self_description, knowledge_map, show_todos, add_todo, complete_todo, delete_todo, clear_done, diary_entry). Если не команда — пустая строка.
