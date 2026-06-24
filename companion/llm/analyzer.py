@@ -78,7 +78,7 @@ def _default_analysis() -> dict:
     return {
         "intent": "chat_casual",
         "confidence": 0.5,
-        "user_mood": None,
+        "user_mood": {"anxiety": 0.0, "anger": 0.0, "sadness": 0.0, "energy": 0.5},
         "user_state": "NORMAL",
         "estimated_importance": 5,
         "command": "",

@@ -32,13 +32,13 @@ async def show_personality(message: types.Message) -> None:
     store = core.memory_store
     personality = store.load_personality()
     summary = LegacyStorage.load_latest_summary()
-    await core.process_llm_request(
-        message,
-        PERSONALITY_REPORT_PROMPT.format(
-            personality=json.dumps(personality, ensure_ascii=False),
-            summary=summary,
-        ),
+    prompt = PERSONALITY_REPORT_PROMPT.format(
+        personality=json.dumps(personality, ensure_ascii=False),
+        summary=summary,
     )
+    await core.send_typing(message)
+    text = await llm.run_llm(llm.oneshot, prompt)
+    await core.send_long_message(message, text)
 
 
 async def show_selfie(message: types.Message) -> None:

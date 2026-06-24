@@ -21,7 +21,7 @@ def mood_to_retrieval_boost(mood: dict[str, float] | None, fact: str) -> float:
     Returns:
         boost score (0.0 - 0.3)
     """
-    if not mood:
+    if not isinstance(mood, dict):
         return 0.0
 
     boost = 0.0
