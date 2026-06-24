@@ -53,6 +53,34 @@ user_message_counts: dict[int, int] = {}
 _user_request_times: dict[int, list[float]] = {}
 _MAX_REQUESTS_PER_MINUTE = 10
 
+# Temportal sync: tracks last user activity timestamp
+last_activity: dict[int, float] = {}
+
+
+async def proactive_ping_loop(bot):
+    """Every 30 min: ping users inactive >12h during daytime."""
+    from datetime import datetime
+    while True:
+        try:
+            await asyncio.sleep(1800)
+            now = time.time()
+            now_dt = datetime.now()
+            hour = now_dt.hour
+            if not (10 <= hour < 23):
+                continue
+            for uid, last_ts in list(last_activity.items()):
+                if now - last_ts > 43200:  # 12 hours
+                    try:
+                        await bot.send_message(
+                            uid,
+                            "Ты там живой? 12 часов молчишь. Код сам себя не напишет, или опять в депресняк улетел?"
+                        )
+                    except Exception:
+                        pass
+                    last_activity[uid] = now
+        except Exception:
+            logger.exception("proactive_ping_loop crashed, restarting...")
+
 
 async def send_typing(message: types.Message):
     """Send typing indicator once."""
@@ -349,6 +377,18 @@ async def _init_user_session(uid, query):
 
 
 async def _generate_and_send_response(message, chat, state, content_payload, query, ctx_data, policy_decision, uid):
+    # Vibe sync: inject time & rule tag into text payloads
+    if isinstance(content_payload, str):
+        from datetime import datetime as _dt
+        now_str = _dt.now().strftime("%H:%M")
+        word_count = len(content_payload.split())
+        rule = (
+            "Отвечай максимально кратко, сухо, 1-2 предложения, без философии."
+            if word_count < 5
+            else "Пользователь написал лонгрид. Отвечай развернуто, поддержи философский диалог."
+        )
+        content_payload = f"[Системное время: {now_str}. Правило: {rule}] {content_payload}"
+
     if isinstance(content_payload, str) and query:
         bundle = retrieval_mgr.select(
             query=query, facts=ctx_data["facts"], reflections=ctx_data["reflections"],

@@ -69,6 +69,10 @@ async def run() -> None:
         except NotImplementedError:
             pass
 
+    # Start proactive ping loop (background)
+    from companion.bot_core import proactive_ping_loop
+    asyncio.create_task(proactive_ping_loop(bot))
+
     try:
         await dp.start_polling(bot, handle_as_tasks=True)
     finally:
