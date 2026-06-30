@@ -105,6 +105,7 @@ if not os.path.exists(IVAN_PATH):
     _bootstrap_log(f"Created {IVAN_PATH} (empty)")
 
 MODEL_NAME = "gemini-3.1-flash-lite"
+FINAL_RESPONSE_MODEL = "gemma-4-31b-it"
 # Для поиска с Google Search grounding используем Gemini 2.5 Flash
 # Поддерживает grounding и работает на бесплатном тарифе (июнь 2026)
 SEARCH_MODEL = "gemini-2.5-flash"

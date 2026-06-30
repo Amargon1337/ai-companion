@@ -176,6 +176,12 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
     """Unified preprocessing: rate limit, session, retrieval, policy, grounding."""
     _restore_sessions()
     uid = message.from_user.id
+
+    force_flash = False
+    if isinstance(content_payload, str) and content_payload.startswith("!"):
+        force_flash = True
+        content_payload = content_payload[1:].strip()
+
     query = _query_text(content_payload)
     if not check_rate_limit(uid, message):
         return None
@@ -226,6 +232,7 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
     return {
         "uid": uid, "query": query, "state": state, "intent": intent,
         "policy_decision": policy_decision, "ctx_data": ctx_data,
+        "force_flash": force_flash, "content_payload": content_payload,
     }
 
 
@@ -332,7 +339,7 @@ async def process_llm_request(message: types.Message, content_payload: Any) -> N
     if state.intent == "command" and state.command and state.intent_confidence >= 0.92:
         command = state.command
         try:
-            if await _route_command(message, command, str(content_payload)):
+            if await _route_command(message, command, str(ctx["content_payload"])):
                 memory_store.log_message(
                     role="assistant",
                     text=f"[Выполнена команда: {command}]",
@@ -343,7 +350,7 @@ async def process_llm_request(message: types.Message, content_payload: Any) -> N
             state.command = None
 
     # Handle explicit search request
-    if is_explicit_search_request(content_payload):
+    if is_explicit_search_request(ctx["content_payload"]):
         from companion.grounding_handler import handle_grounding
         if await handle_grounding(
             message=message,
@@ -357,8 +364,9 @@ async def process_llm_request(message: types.Message, content_payload: Any) -> N
 
     chat = user_chats[ctx["uid"]]
     await _generate_and_send_response(
-        message, chat, state, content_payload, ctx["query"],
+        message, chat, state, ctx["content_payload"], ctx["query"],
         ctx["ctx_data"], ctx["policy_decision"], ctx["uid"],
+        force_flash=ctx.get("force_flash", False)
     )
 
 
@@ -415,7 +423,7 @@ async def _init_user_session(uid, query):
     _persist_session(uid)
 
 
-async def _generate_and_send_response(message, chat, state, content_payload, query, ctx_data, policy_decision, uid):
+async def _generate_and_send_response(message, chat, state, content_payload, query, ctx_data, policy_decision, uid, force_flash: bool = False):
     if isinstance(content_payload, str) and query:
         bundle = retrieval_mgr.select(
             query=query, facts=ctx_data["facts"], reflections=ctx_data["reflections"],
@@ -438,9 +446,62 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
         else:
             content_payload = user_block
 
-    await send_typing(message)
+    desired_model = "gemini-3.1-flash-lite" if force_flash else "gemma-4-31b-it"
+    current_model = getattr(chat, "model", None)
+    if current_model != desired_model:
+        logger.info(f"[ROUTER] Recreating chat session: switching model from {current_model} to {desired_model}")
+        history = chat.get_history()
+        from companion.llm.sessions import build_system_instruction
+        chat = llm.client.chats.create(
+            model=desired_model,
+            history=history,
+            config=llm.make_config(
+                system_instruction=build_system_instruction(memory_store, retrieval_mgr, query),
+                temperature=0.7,
+            )
+        )
+        user_chats[uid] = chat
+
     try:
-        response = await llm.run_llm(chat.send_message, content_payload)
+        async def typing_loop():
+            try:
+                while True:
+                    await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
+                    await asyncio.sleep(4)
+            except asyncio.CancelledError:
+                pass
+            except Exception as ex:
+                logger.debug(f"Typing loop error: {ex}")
+
+        typing_task = asyncio.create_task(typing_loop())
+
+        try:
+            try:
+                response = await llm.run_llm(chat.send_message, content_payload, timeout=250)
+            except Exception as e:
+                if not force_flash:
+                    logger.warning(f"[ROUTER] [WARN] Gemma failed, falling back to Flash-lite: {e}")
+                    history = chat.get_history()
+                    from companion.llm.sessions import build_system_instruction
+                    chat = llm.client.chats.create(
+                        model="gemini-3.1-flash-lite",
+                        history=history,
+                        config=llm.make_config(
+                            system_instruction=build_system_instruction(memory_store, retrieval_mgr, query),
+                            temperature=0.7,
+                        )
+                    )
+                    user_chats[uid] = chat
+                    response = await llm.run_llm(chat.send_message, content_payload, timeout=250)
+                else:
+                    raise e
+        finally:
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
+
         text = _extract_response_text(response)
         if not text:
             await message.answer("API вернул пустой ответ без текста.")

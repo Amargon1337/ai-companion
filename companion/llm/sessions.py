@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from companion.config import MODEL_NAME
+from companion.config import MODEL_NAME, FINAL_RESPONSE_MODEL
 from companion.llm import client as llm
 from companion.llm.prompts import SYSTEM_INSTRUCTION
 from companion.memory.retrieval import RetrievalBudgetManager
@@ -68,7 +68,7 @@ def create_default_session(
         history = _reconstruct_recent_history(store)
 
     return llm.client.chats.create(
-        model=MODEL_NAME,
+        model=FINAL_RESPONSE_MODEL,
         history=history,
         config=llm.make_config(
             system_instruction=build_system_instruction(store, retrieval, query),

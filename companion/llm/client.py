@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 client = genai.Client(
     api_key=GOOGLE_API_KEY,
     http_options=google_types.HttpOptions(
-        timeout=LLM_TIMEOUT * 1000
+        timeout=max(250, LLM_TIMEOUT) * 1000
     )
 )
 
@@ -211,7 +211,7 @@ def _get_aio_client():
         _aio_client = genai.Client(
             api_key=GOOGLE_API_KEY,
             http_options=types.HttpOptions(
-                timeout=LLM_TIMEOUT * 1000
+                timeout=max(250, LLM_TIMEOUT) * 1000
             )
         )
     return _aio_client
