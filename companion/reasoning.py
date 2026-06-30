@@ -278,41 +278,9 @@ class ReasoningEngine:
             return goal
         return None
 
-    def maybe_capture_prediction(self, text: str) -> Prediction | None:
-        if not self._is_future_query(text):
-            return None
-        clean = text.strip().lower()
-        for prefix in ["интересно, ", "а что если ", "а вдруг ", "а "]:
-            if clean.startswith(prefix):
-                clean = clean[len(prefix):]
-        hypothesis = clean[:80]
-        if len(hypothesis) < 10:
-            return None
-        pending = self.list_predictions("pending")[:30]
-        for p in pending:
-            if p.hypothesis.lower() == hypothesis.lower():
-                return None
-            if p.hypothesis.lower().startswith(hypothesis.lower()):
-                return None
-        prediction = Prediction(
-            hypothesis=hypothesis,
-            confidence=0.55,
-            timeframe="near future",
-            based_on=["auto_future_query"],
-        )
-        self.add_prediction(prediction)
-        return prediction
-
     def auto_reasoning_context(self, query: str, importance: int = 5) -> dict[str, Any]:
         self.update_world_model_from_message(query, importance)
         maybe_goal = self.maybe_capture_goal(query) if importance >= 6 else None
-        if importance >= 6:
-            from companion.llm.analyzer import analyze_message
-            _analysis = analyze_message(query)
-            _capture = _analysis.get("intent", "chat_casual") not in ("world", "memory", "command", "mixed")
-        else:
-            _capture = False
-        maybe_prediction = self.maybe_capture_prediction(query) if _capture else None
         return {
             "active_goals": self.get_goal_snapshot(query),
             "causal_links": self.get_relevant_causal_context(query),
@@ -321,7 +289,7 @@ class ReasoningEngine:
             "causal_trigger": self._is_causal_query(query),
             "future_trigger": self._is_future_query(query),
             "captured_goal": maybe_goal.title if maybe_goal else "",
-            "captured_prediction": maybe_prediction.hypothesis if maybe_prediction else "",
+            "captured_prediction": "",
         }
 
     @staticmethod

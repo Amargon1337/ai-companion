@@ -28,7 +28,7 @@ def extract_facts(
 ) -> list[Fact]:
     known = store.get_active_fact_texts()[-40:]
     msgs = store.recent_messages(min_importance=5, limit=15)
-    msg_text = "\n".join(f"- [{m.importance}/10] {m.text[:300]}" for m in msgs)
+    msg_text = "\n".join(f"- [{m.id}] [{m.importance}/10] {m.text[:300]}" for m in msgs)
 
     prompt = FACT_EXTRACTION_PROMPT.format(
         known_facts="\n".join(f"- {f}" for f in known) or "нет",
@@ -71,6 +71,8 @@ def extract_facts(
             if "core_identity" not in tags:
                 tags.append("core_identity")
 
+        evidence_list = [str(e) for e in item.get("evidence_messages", [])]
+
         fact = Fact(
             fact=text,
             date=datetime.now().strftime("%Y-%m-%d"),
@@ -80,6 +82,7 @@ def extract_facts(
             source_type="compress",
             memory_kind=item.get("memory_kind", "event"),
             tags=tags,
+            evidence=evidence_list,
         )
         store.add_fact(fact)
         created.append(fact)
@@ -129,6 +132,42 @@ def consolidate_facts(store: MemoryStore, new_facts: list[Fact]) -> None:
                 confidence=float(rel.get("confidence", 0.8)),
             )
         )
+
+def extract_causal_links(store: MemoryStore, new_facts: list[Fact], summary: str) -> None:
+    if not new_facts:
+        return
+    from companion.llm.prompts import CAUSAL_EXTRACTION_PROMPT
+    from companion.reasoning import CausalLink, reasoning_engine
+    
+    msgs = store.recent_messages(min_importance=5, limit=15)
+    msg_text = "\n".join(f"- [{m.id}] [{m.importance}/10] {m.text[:300]}" for m in msgs)
+    
+    prompt = CAUSAL_EXTRACTION_PROMPT.format(
+        new_facts=json.dumps(
+            [{"id": f.id, "fact": f.fact} for f in new_facts],
+            ensure_ascii=False
+        ),
+        summary=summary,
+        messages=msg_text or "нет"
+    )
+    
+    try:
+        raw = llm.parse_json_array(llm.oneshot(prompt))
+    except Exception as e:
+        logger.error(f"Causal link extraction failed: {e}")
+        return
+        
+    for item in raw:
+        if not isinstance(item, dict) or not item.get("cause") or not item.get("effect"):
+            continue
+        link = CausalLink(
+            cause=str(item["cause"]).strip(),
+            effect=str(item["effect"]).strip(),
+            confidence=float(item.get("confidence", 0.75)),
+            evidence=[str(e) for e in item.get("evidence", [])],
+            mechanism=str(item.get("mechanism", ""))
+        )
+        reasoning_engine.add_causal_link(link)
 
 def generate_reflections(
     store: MemoryStore, summary: str, period: str | None = None
@@ -268,6 +307,7 @@ def run_compress_pipeline(
 
         new_facts = extract_facts(store, summary)
         consolidate_facts(store, new_facts)
+        extract_causal_links(store, new_facts, summary)
 
         compress_n = store.increment_compress_count()
         if compress_n % REFLECTION_EVERY_N == 0:

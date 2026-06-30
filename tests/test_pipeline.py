@@ -8,8 +8,8 @@ import pytest
 from companion.llm.pipeline import run_compress_pipeline
 
 
-_LLM_ONESHOT_RETURN = '[{"fact": "test fact", "importance": 5, "confidence": 0.8, "tags": [], "memory_kind": "event"}]'
-_LLM_PARSE_RETURN = [{"fact": "test fact", "importance": 5, "confidence": 0.8, "tags": [], "memory_kind": "event"}]
+_LLM_ONESHOT_RETURN = '[{"fact": "test fact", "importance": 5, "confidence": 0.8, "tags": [], "memory_kind": "event", "evidence_messages": ["msg_1"]}]'
+_LLM_PARSE_RETURN = [{"fact": "test fact", "importance": 5, "confidence": 0.8, "tags": [], "memory_kind": "event", "evidence_messages": ["msg_1"]}]
 _LLM_PARSE_OBJ_RETURN = {"interests": {}}
 
 

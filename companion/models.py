@@ -30,6 +30,7 @@ class Fact:
     valid_from: str | None = None
     id: str = ""
     created_at: str = ""
+    evidence: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.id:

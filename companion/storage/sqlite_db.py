@@ -48,7 +48,8 @@ class MemoryDatabase:
           status TEXT DEFAULT 'active',
           valid_from TEXT,
           valid_until TEXT,
-          schema_version INTEGER DEFAULT 1
+          schema_version INTEGER DEFAULT 1,
+          evidence TEXT DEFAULT '[]'
         );
         CREATE INDEX IF NOT EXISTS idx_facts_status ON facts(status);
         CREATE INDEX IF NOT EXISTS idx_facts_importance ON facts(importance);
@@ -110,6 +111,13 @@ class MemoryDatabase:
         );
         """
       )
+      try:
+        cursor = conn.execute("PRAGMA table_info(facts)")
+        cols = [row[1] for row in cursor.fetchall()]
+        if "evidence" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN evidence TEXT DEFAULT '[]'")
+      except sqlite3.OperationalError:
+        pass
 
   def _migrate_jsonl_if_empty(self) -> None:
     from companion.config import (
@@ -148,6 +156,7 @@ class MemoryDatabase:
         json.dumps(row.get("tags", []), ensure_ascii=False),
         row.get("status", "active"), row.get("valid_from"),
         row.get("valid_until"), row.get("schema_version", 1),
+        json.dumps(row.get("evidence", []), ensure_ascii=False),
       )
       for row in rows
     ]
@@ -155,7 +164,7 @@ class MemoryDatabase:
       conn.executemany(
         """
         INSERT OR IGNORE INTO facts VALUES
-        (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         tuples,
       )
@@ -236,7 +245,7 @@ class MemoryDatabase:
       conn.execute(
         """
         INSERT OR IGNORE INTO facts VALUES
-        (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
           row["id"], row["fact"], row.get("date"), row.get("created_at"),
@@ -245,6 +254,7 @@ class MemoryDatabase:
           json.dumps(row.get("tags", []), ensure_ascii=False),
           row.get("status", "active"), row.get("valid_from"),
           row.get("valid_until"), row.get("schema_version", 1),
+          json.dumps(row.get("evidence", []), ensure_ascii=False),
         ),
       )
 
@@ -330,6 +340,7 @@ class MemoryDatabase:
   def _row_fact(self, row: sqlite3.Row) -> dict[str, Any]:
     d = dict(row)
     d["tags"] = json.loads(d.get("tags") or "[]")
+    d["evidence"] = json.loads(d.get("evidence") or "[]")
     return d
 
   def list_messages(
