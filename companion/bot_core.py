@@ -424,6 +424,7 @@ async def _init_user_session(uid, query):
 
 
 async def _generate_and_send_response(message, chat, state, content_payload, query, ctx_data, policy_decision, uid, force_flash: bool = False):
+    bundle = None
     if isinstance(content_payload, str) and query:
         bundle = retrieval_mgr.select(
             query=query, facts=ctx_data["facts"], reflections=ctx_data["reflections"],
@@ -521,9 +522,26 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
                 text = grounded
 
         await send_long_message(message, text)
+        msg_rec = None
         if text:
-            memory_store.log_message(role="assistant", text=text[:500], importance=4, mode="default", user_id=uid)
+            msg_rec = memory_store.log_message(role="assistant", text=text[:500], importance=4, mode="default", user_id=uid)
         state.llm_response = text
+
+        if bundle and msg_rec and text:
+            try:
+                fs, fu, gs, gu, rs, ru = _analyze_context_utilization(text, bundle)
+                memory_store.db.insert_retrieval_metrics(
+                    message_id=msg_rec.id,
+                    facts_sent=fs,
+                    facts_used=fu,
+                    goals_sent=gs,
+                    goals_used=gu,
+                    reflections_sent=rs,
+                    reflections_used=ru
+                )
+            except Exception as e:
+                logger.error(f"Failed to record retrieval metrics: {e}")
+
         if state.message_importance >= 7 and text:
             now = time.time()
             if now - _last_reflection_time.get(uid, 0) >= _REFLECTION_COOLDOWN_SECONDS:
@@ -532,6 +550,50 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
     except Exception as e:
         logger.error(f"LLM error: {e}")
         await message.answer(f"API ошибка: {e}")
+
+
+def _analyze_context_utilization(response_text: str, bundle: Any) -> tuple[int, int, int, int, int, int]:
+    facts_sent = len(bundle.facts) if bundle.facts else 0
+    reflections_sent = len(bundle.reflections) if bundle.reflections else 0
+    goals_sent = len(bundle.active_goals) if bundle.active_goals else 0
+
+    facts_used = 0
+    reflections_used = 0
+    goals_used = 0
+
+    resp_lower = response_text.lower()
+
+    if bundle.facts:
+        for f in bundle.facts:
+            f_text = f.fact.lower()
+            words = [w for w in _re.findall(r'[а-яа-яa-z0-9]+', f_text) if len(w) > 3]
+            if not words:
+                continue
+            matches = sum(1 for w in words if w in resp_lower)
+            if matches / len(words) >= 0.5:
+                facts_used += 1
+
+    if bundle.reflections:
+        for r in bundle.reflections:
+            r_text = r.insight.lower()
+            words = [w for w in _re.findall(r'[а-яа-яa-z0-9]+', r_text) if len(w) > 3]
+            if not words:
+                continue
+            matches = sum(1 for w in words if w in resp_lower)
+            if matches / len(words) >= 0.5:
+                reflections_used += 1
+
+    if bundle.active_goals:
+        for g in bundle.active_goals:
+            g_clean = _re.sub(r'^•\s*\[\d+/\d+\]\s*', '', g).lower()
+            words = [w for w in _re.findall(r'[а-яа-яa-z0-9]+', g_clean) if len(w) > 3]
+            if not words:
+                continue
+            matches = sum(1 for w in words if w in resp_lower)
+            if matches / len(words) >= 0.5:
+                goals_used += 1
+
+    return facts_sent, facts_used, goals_sent, goals_used, reflections_sent, reflections_used
 
 
 def _extract_response_text(response: Any) -> str:

@@ -11,19 +11,13 @@ from datetime import datetime
 from typing import Any
 
 from companion.config import (
-    BELIEFS_PATH,
     EMPTY_PERSONALITY,
-    FACT_RELATIONS_PATH,
-    FACTS_PATH,
-    MESSAGES_PATH,
     PERSONALITY_PATH,
-    REFLECTIONS_PATH,
 )
 from companion.memory.importance import days_since
 from companion.memory.text_sim import text_overlap
 from companion.memory.vector_index import VectorIndex
 from companion.models import Fact, FactRelation, MessageRecord, Reflection
-from companion.storage.jsonl import append_jsonl, rotate_jsonl
 from companion.storage.sqlite_db import MemoryDatabase
 
 logger = logging.getLogger(__name__)
@@ -65,8 +59,6 @@ class MemoryStore:
             user_id=user_id,
         )
         d = msg.to_dict()
-        append_jsonl(MESSAGES_PATH, d)
-        rotate_jsonl(MESSAGES_PATH)
         self.db._insert_message(d)
         return msg
 
@@ -81,8 +73,6 @@ class MemoryStore:
     def add_fact(self, fact: Fact) -> Fact:
         d = fact.to_dict()
         self.db._insert_fact(d)
-        append_jsonl(FACTS_PATH, d)
-        rotate_jsonl(FACTS_PATH)
         self.vector.compute_and_cache(fact.fact, content_type="fact")
         return fact
 
@@ -131,8 +121,6 @@ class MemoryStore:
 
     def add_relation(self, rel: FactRelation) -> None:
         d = rel.to_dict()
-        append_jsonl(FACT_RELATIONS_PATH, d)
-        rotate_jsonl(FACT_RELATIONS_PATH)
         self.db._insert_relation(d)
         if rel.relation == "supersedes":
             self.db.update_fact_status(rel.to_id, "superseded")
@@ -160,8 +148,6 @@ class MemoryStore:
 
     def add_reflection(self, reflection: Reflection) -> Reflection:
         d = reflection.to_dict()
-        append_jsonl(REFLECTIONS_PATH, d)
-        rotate_jsonl(REFLECTIONS_PATH)
         self.db._insert_reflection(d)
         return reflection
 
@@ -180,8 +166,6 @@ class MemoryStore:
             "status": "active",
             "created_at": datetime.now().isoformat(),
         }
-        append_jsonl(BELIEFS_PATH, d)
-        rotate_jsonl(BELIEFS_PATH)
         self.db._insert_belief(d)
         self.vector.compute_and_cache(belief, content_type="belief")
 

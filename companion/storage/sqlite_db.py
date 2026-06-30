@@ -8,15 +8,12 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
 
-from companion.storage.jsonl import read_jsonl
-
 
 class MemoryDatabase:
   def __init__(self, path: str | None = None) -> None:
     from companion.config import SQLITE_PATH as _SQLITE_PATH
     self.path = path if path is not None else _SQLITE_PATH
     self._init_schema()
-    self._migrate_jsonl_if_empty()
 
   @contextmanager
   def _conn(self) -> Generator[sqlite3.Connection, None, None]:
@@ -109,6 +106,17 @@ class MemoryDatabase:
           last_active TEXT,
           created_at TEXT DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS retrieval_metrics (
+          message_id TEXT PRIMARY KEY,
+          timestamp TEXT,
+          facts_sent INTEGER,
+          facts_used INTEGER,
+          goals_sent INTEGER,
+          goals_used INTEGER,
+          reflections_sent INTEGER,
+          reflections_used INTEGER
+        );
         """
       )
       try:
@@ -119,31 +127,7 @@ class MemoryDatabase:
       except sqlite3.OperationalError:
         pass
 
-  def _migrate_jsonl_if_empty(self) -> None:
-    from companion.config import (
-      BELIEFS_PATH,
-      FACT_RELATIONS_PATH,
-      FACTS_PATH,
-      MESSAGES_PATH,
-      REFLECTIONS_PATH,
-    )
 
-    with self._conn() as conn:
-      count = conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
-      if count > 0:
-        return
-
-    for path, table, batch_mapper in (
-      (FACTS_PATH, "facts", self.batch_insert_facts),
-      (FACT_RELATIONS_PATH, "fact_relations", self.batch_insert_relations),
-      (MESSAGES_PATH, "messages", self.batch_insert_messages),
-      (REFLECTIONS_PATH, "reflections", self.batch_insert_reflections),
-      (BELIEFS_PATH, "beliefs", self.batch_insert_beliefs),
-    ):
-      if os.path.exists(path):
-        rows = list(read_jsonl(path))
-        if rows:
-          batch_mapper(rows)
 
   def batch_insert_facts(self, rows: list[dict[str, Any]]) -> None:
     if not rows:
@@ -427,3 +411,33 @@ class MemoryDatabase:
           "SELECT COUNT(*) FROM facts WHERE status=?", (status,)
         ).fetchone()[0]
       return conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+
+  def insert_retrieval_metrics(
+    self,
+    message_id: str,
+    facts_sent: int,
+    facts_used: int,
+    goals_sent: int,
+    goals_used: int,
+    reflections_sent: int,
+    reflections_used: int,
+  ) -> None:
+    from datetime import datetime
+    with self._conn() as conn:
+      conn.execute(
+        """
+        INSERT OR REPLACE INTO retrieval_metrics 
+        (message_id, timestamp, facts_sent, facts_used, goals_sent, goals_used, reflections_sent, reflections_used)
+        VALUES (?,?,?,?,?,?,?,?)
+        """,
+        (
+          message_id,
+          datetime.now().isoformat(),
+          facts_sent,
+          facts_used,
+          goals_sent,
+          goals_used,
+          reflections_sent,
+          reflections_used,
+        ),
+      )
