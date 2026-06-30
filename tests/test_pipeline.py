@@ -10,7 +10,14 @@ from companion.llm.pipeline import run_compress_pipeline
 
 _LLM_ONESHOT_RETURN = '[{"fact": "test fact", "importance": 5, "confidence": 0.8, "tags": [], "memory_kind": "event", "evidence_messages": ["msg_1"]}]'
 _LLM_PARSE_RETURN = [{"fact": "test fact", "importance": 5, "confidence": 0.8, "tags": [], "memory_kind": "event", "evidence_messages": ["msg_1"]}]
-_LLM_PARSE_OBJ_RETURN = {"interests": {}}
+_LLM_PARSE_OBJ_RETURN = {
+    "interests_delta": {"QA и автоматизация": 1},
+    "values_to_add": ["Морзик"],
+    "values_to_remove": [],
+    "fears_to_add": [],
+    "fears_to_remove": [],
+    "habits_delta": {}
+}
 
 
 @patch("companion.llm.client.parse_json_object", return_value=_LLM_PARSE_OBJ_RETURN)
@@ -62,3 +69,61 @@ def test_run_compress_pipeline_error_handling(mock_oneshot, mock_parse, mock_par
 
     result = run_compress_pipeline(memory_store, chat, 12345)
     assert result is None
+
+
+def test_merge_personality_differential_and_decay():
+    from companion.llm.pipeline import _merge_personality
+
+    old_profile = {
+        "interests": {
+            "QA и автоматизация": 8.0,
+            "Python": 5.0,
+            "История": 2.1
+        },
+        "values": ["Морзик", "Качественный код"],
+        "fears": ["Выгорание"],
+        "habits": {
+            "работать по ночам": "стабильно"
+        }
+    }
+
+    # Delta updates from LLM
+    delta = {
+        "interests_delta": {
+            "QA и автоматизация": 1.0,
+            "Python": -2.0,
+            "Философия": 3.0
+        },
+        "values_to_add": ["Свобода"],
+        "values_to_remove": ["Качественный код"],
+        "fears_to_add": ["Одиночество"],
+        "fears_to_remove": ["Выгорание"],
+        "habits_delta": {
+            "работать по ночам": "усилилась",
+            "курение": "появилась"
+        }
+    }
+
+    merged = _merge_personality(old_profile, delta)
+
+    # QA: 8.0 + 1.0 = 9.0
+    assert merged["interests"]["QA и автоматизация"] == 9.0
+    # Python: 5.0 - 2.0 = 3.0
+    assert merged["interests"]["Python"] == 3.0
+    # История: not in delta, decay -0.2 applied -> 2.1 - 0.2 = 1.9 (< 2.0, so pruned)
+    assert "История" not in merged["interests"]
+    # Философия: new interest -> 3.0
+    assert merged["interests"]["Философия"] == 3.0
+
+    # Values: "Качественный код" removed, "Свобода" added
+    assert "Морзик" in merged["values"]
+    assert "Свобода" in merged["values"]
+    assert "Качественный код" not in merged["values"]
+
+    # Fears: "Выгорание" removed, "Одиночество" added
+    assert "Одиночество" in merged["fears"]
+    assert "Выгорание" not in merged["fears"]
+
+    # Habits: updated
+    assert merged["habits"]["работать по ночам"] == "усилилась"
+    assert merged["habits"]["курение"] == "появилась"

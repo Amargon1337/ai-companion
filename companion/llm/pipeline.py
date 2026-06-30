@@ -216,9 +216,8 @@ def generate_personality_snapshot(store: MemoryStore, summary: str) -> dict[str,
     reflections = store.list_reflections()[:10]
     beliefs = store.list_beliefs()[:15]
 
-    # Не передаем current в промпт — избегаем feedback loop
     prompt = PERSONALITY_PIPELINE_PROMPT.format(
-        current="{}",  # пустой объект
+        current=json.dumps(current, ensure_ascii=False),
         facts=json.dumps([f.fact for f in top_facts], ensure_ascii=False),
         reflections=json.dumps([r.insight for r in reflections], ensure_ascii=False),
         beliefs=json.dumps([b["belief"] for b in beliefs], ensure_ascii=False),
@@ -244,47 +243,100 @@ def generate_personality_snapshot(store: MemoryStore, summary: str) -> dict[str,
         return current
 
 
-def _merge_personality(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
-    """Merge personality без feedback loop amplification."""
+def _merge_personality(old: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
+    """Merge personality delta-обновлений с глобальным старением (decay)."""
     merged = dict(old)
 
-    # Interests: усреднить веса старых и новых
-    old_interests = old.get("interests", {})
-    new_interests = new.get("interests", {})
-    merged_interests = {}
-    for topic in set(old_interests.keys()) | set(new_interests.keys()):
-        old_weight = old_interests.get(topic, 0)
-        new_weight = new_interests.get(topic, 0)
-        if old_weight and new_weight:
-            merged_interests[topic] = (old_weight + new_weight) / 2
+    # 1. Interests & Decay
+    old_interests = dict(old.get("interests", {}))
+    interests_delta = delta.get("interests_delta", {})
+    if not isinstance(interests_delta, dict):
+        interests_delta = {}
+    
+    new_interests = {}
+    # Применяем дельту к существующим
+    for topic, val in old_interests.items():
+        weight = float(val)
+        if topic in interests_delta:
+            weight += float(interests_delta[topic])
         else:
-            merged_interests[topic] = old_weight or new_weight
-    merged["interests"] = merged_interests
+            # Применяем decay (-0.2), если интерес НЕ был затронут дельтой
+            weight -= 0.2
+        
+        weight = max(1.0, min(10.0, weight))
+        if weight >= 2.0:
+            new_interests[topic] = weight
 
-    # Lists: union без дубликатов
+    # Добавляем новые интересы из дельты
+    for topic, val in interests_delta.items():
+        if topic not in old_interests:
+            weight = max(1.0, min(10.0, float(val)))
+            if weight >= 2.0:
+                new_interests[topic] = weight
+
+    merged["interests"] = new_interests
+
+    # 2. Lists: Add / Remove
     for list_field in ["beliefs", "values", "fears", "motivation", "strengths", "weaknesses"]:
-        old_list = old.get(list_field, [])
-        new_list = new.get(list_field, [])
-        # Deduplication: normalize strings for comparison (case-insensitive, strip whitespace)
-        existing_normalized = {str(item).lower().strip() for item in old_list}
-        for item in new_list:
-            item_normalized = str(item).lower().strip()
-            if item_normalized not in existing_normalized:
-                old_list.append(item)
-                existing_normalized.add(item_normalized)
+        old_list = list(old.get(list_field, []))
+        
+        add_items = delta.get(f"{list_field}_to_add", [])
+        if not isinstance(add_items, list):
+            add_items = []
+        remove_items = delta.get(f"{list_field}_to_remove", [])
+        if not isinstance(remove_items, list):
+            remove_items = []
+
+        normalized_remove = {str(x).lower().strip() for x in remove_items}
+        old_list = [x for x in old_list if str(x).lower().strip() not in normalized_remove]
+        
+        existing_normalized = {str(x).lower().strip() for x in old_list}
+        for item in add_items:
+            item_str = str(item).strip()
+            if item_str and item_str.lower() not in existing_normalized:
+                old_list.append(item_str)
+                existing_normalized.add(item_str.lower())
+                
         merged[list_field] = old_list
 
-    # Relationships, habits, addictions: merge dicts
-    for dict_field in ["relationships", "habits", "addictions"]:
-        old_dict = old.get(dict_field, {})
-        new_dict = new.get(dict_field, {})
-        old_dict.update(new_dict)
-        merged[dict_field] = old_dict
+    # 3. Dicts: Habits, Relationships, Addictions
+    old_habits = dict(old.get("habits", {}))
+    habits_delta = delta.get("habits_delta", {})
+    if isinstance(habits_delta, dict):
+        for habit, status in habits_delta.items():
+            if status == "исчезла" or not status:
+                old_habits.pop(habit, None)
+            else:
+                old_habits[habit] = status
+    merged["habits"] = old_habits
 
-    # Changes: append новые изменения
-    old_changes = old.get("changes", [])
-    new_changes = new.get("changes", [])
-    merged["changes"] = old_changes + new_changes
+    # Relationships
+    old_relationships = dict(old.get("relationships", {}))
+    relationships_delta = delta.get("relationships_delta", {})
+    if isinstance(relationships_delta, dict):
+        for name, desc in relationships_delta.items():
+            if not desc:
+                old_relationships.pop(name, None)
+            else:
+                old_relationships[name] = desc
+    merged["relationships"] = old_relationships
+
+    # Addictions
+    old_addictions = dict(old.get("addictions", {}))
+    addictions_delta = delta.get("addictions_delta", {})
+    if isinstance(addictions_delta, dict):
+        for name, desc in addictions_delta.items():
+            if not desc:
+                old_addictions.pop(name, None)
+            else:
+                old_addictions[name] = desc
+    merged["addictions"] = old_addictions
+
+    # Changes
+    old_changes = list(old.get("changes", []))
+    new_changes = delta.get("changes", [])
+    if isinstance(new_changes, list):
+        merged["changes"] = old_changes + new_changes
 
     return merged
 
