@@ -156,13 +156,13 @@ class RetrievalBudgetManager:
             world_model_context=world_model_context[:1200],
         )
 
-        # Trim if over budget
-        while len(bundle.to_prompt_block()) > self.char_budget and bundle.facts:
-            bundle.facts.pop()
+        # Trim if over budget — summaries first, reflections second, facts last
         while len(bundle.to_prompt_block()) > self.char_budget and bundle.summaries:
             bundle.summaries.pop()
         while len(bundle.to_prompt_block()) > self.char_budget and bundle.reflections:
             bundle.reflections.pop()
+        while len(bundle.to_prompt_block()) > self.char_budget and bundle.facts:
+            bundle.facts.pop()
 
         return bundle
 

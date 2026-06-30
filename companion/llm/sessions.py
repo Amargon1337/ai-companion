@@ -97,8 +97,8 @@ def _reconstruct_recent_history(store: MemoryStore, limit: int = 30) -> list[dic
     import logging
     logger = logging.getLogger(__name__)
 
-    # Загружаем последние сообщения (БЕЗ фильтра по importance)
-    recent = store.recent_messages(min_importance=0, limit=limit)
+    # Загружаем последние сообщения (важность >= 5 — фильтруем casual-флуд)
+    recent = store.recent_messages(min_importance=5, limit=limit)
 
     if not recent:
         logger.info("No recent messages to reconstruct")

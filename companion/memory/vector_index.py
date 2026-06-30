@@ -72,6 +72,13 @@ class VectorIndex:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_type ON embeddings(content_type)")
             except sqlite3.OperationalError:
                 pass
+            try:
+                cursor = conn.execute("PRAGMA table_info(embeddings)")
+                cols = [row[1] for row in cursor.fetchall()]
+                if "embedding" not in cols:
+                    conn.execute("ALTER TABLE embeddings ADD COLUMN embedding BLOB NOT NULL DEFAULT (x'')")
+            except sqlite3.OperationalError:
+                pass
 
     def _conn(self):
         conn = sqlite3.connect(self.path)

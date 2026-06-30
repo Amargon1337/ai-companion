@@ -24,8 +24,8 @@ def _build_safety_settings() -> list:
     }
     result = []
     for key, cat in _mapping.items():
-        threshold_str = SAFETY_SETTINGS_CONFIG.get(key, "BLOCK_MEDIUM_AND_ABOVE")
-        threshold = getattr(google_types.HarmBlockThreshold, threshold_str, google_types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE)
+        threshold_str = SAFETY_SETTINGS_CONFIG.get(key, "BLOCK_NONE")
+        threshold = getattr(google_types.HarmBlockThreshold, threshold_str, google_types.HarmBlockThreshold.BLOCK_NONE)
         result.append(google_types.SafetySetting(category=cat, threshold=threshold))
     return result
 

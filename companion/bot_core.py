@@ -22,7 +22,6 @@ from companion.config import BASE_DIR, SUMMARY_THRESHOLD
 from companion.critique_manager import apply_critique_to_text, run_self_critique
 from companion.grounding_handler import (
     grounding_answer_only,
-    handle_grounding,
     should_retry_with_grounding,
 )
 from companion.llm import client as llm
@@ -209,10 +208,13 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
     state.policy_constraints = policy_decision.constraints if policy_decision else None
     ctx_data = _load_retrieval_context(query, state.reasoning_context)
 
-    if query and intent in ("world", "mixed") and conf >= 0.55:
-        if await handle_grounding(message, query, ctx_data, uid, retrieval_mgr, memory_store):
-            return None
+    # Блокируем web search для технических/кодовых запросов — ответ только из памяти
+    _coding_keywords = {"питон", "python", "код", "скрипт", "бот"}
+    _is_coding_query = query and any(kw in query.lower() for kw in _coding_keywords)
+    if _is_coding_query and intent in ("world", "mixed"):
+        state.intent = "memory" if intent == "world" else "chat_casual"
 
+    # Фоновый поиск удалён — ручной поиск через /search работает в handlers/chat.py
     if uid not in user_chats:
         await _init_user_session(uid, query)
     user_message_counts[uid] = user_message_counts.get(uid, 0) + 1
@@ -304,8 +306,8 @@ async def process_llm_request(message: types.Message, content_payload: Any) -> N
 
     state = ctx["state"]
 
-    # Route commands via LLM-analyzed intent (only when confidence >= 0.65)
-    if state.intent == "command" and state.command and state.intent_confidence >= 0.65:
+    # Route commands via LLM-analyzed intent (only when confidence >= 0.92)
+    if state.intent == "command" and state.command and state.intent_confidence >= 0.92:
         command = state.command
         try:
             if await _route_command(message, command, str(content_payload)):
@@ -377,18 +379,6 @@ async def _init_user_session(uid, query):
 
 
 async def _generate_and_send_response(message, chat, state, content_payload, query, ctx_data, policy_decision, uid):
-    # Vibe sync: inject time & rule tag into text payloads
-    if isinstance(content_payload, str):
-        from datetime import datetime as _dt
-        now_str = _dt.now().strftime("%H:%M")
-        word_count = len(content_payload.split())
-        rule = (
-            "Отвечай максимально кратко, сухо, 1-2 предложения, без философии."
-            if word_count < 5
-            else "Пользователь написал лонгрид. Отвечай развернуто, поддержи философский диалог."
-        )
-        content_payload = f"[Системное время: {now_str}. Правило: {rule}] {content_payload}"
-
     if isinstance(content_payload, str) and query:
         bundle = retrieval_mgr.select(
             query=query, facts=ctx_data["facts"], reflections=ctx_data["reflections"],
@@ -468,7 +458,9 @@ def fact_from_permanent_note(note: str) -> Fact:
 
 
 def _build_user_prompt_block(content_payload: str, reasoning_context: dict[str, Any], retrieval_context: str) -> str:
-    parts = [f"[Сообщение пользователя]\n{content_payload}"]
+    now = datetime.now()
+    parts = [f"[Системное время: {now.strftime('%Y-%m-%d %H:%M')}]"]
+    parts.append(f"[Сообщение пользователя]\n{content_payload}")
     if reasoning_context.get("causal_trigger"):
         parts.append("[Режим reasoning]\nПользователь спрашивает о причинах. Используй причинно-следственный анализ, если контекст это поддерживает.")
     if reasoning_context.get("future_trigger"):
