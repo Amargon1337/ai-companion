@@ -4,14 +4,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from companion.user_model import user_model
+from companion.self_model import self_model
 
 logger = logging.getLogger(__name__)
 
 
 def run_self_critique(query: str, response: str, ctx_data: dict[str, Any]) -> dict[str, Any]:
     try:
-        return user_model.critique_response(
+        return self_model.critique_response(
             response=response,
             query=query,
             context={

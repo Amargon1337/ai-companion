@@ -87,6 +87,43 @@ class RetrievalBudgetManager:
             if f.status == "active" or (include_archived and f.status != "inactive")
         ]
 
+        # Filter facts if query is an external search / tool request
+        import re
+        search_patterns = [
+            r"\bпоиск", r"\bинтернет", r"\bgoogle\b", r"\bгугл", r"\bsearch\b", r"\bweb\b", r"\bвеб",
+            r"\bpytest\b", r"\bтест\b", r"\bтесты\b", r"\bзапусти\b", r"\bпогугли", r"\bзагугли"
+        ]
+        q_lower = query.lower()
+        is_external_query = any(re.search(pat, q_lower) for pat in search_patterns)
+
+        if is_external_query:
+            q_words = {w for w in q_lower.split() if len(w) > 3}
+            # Remove search triggers to avoid matching them to unrelated facts
+            q_words -= {
+                "поиск", "интернет", "google", "гугл", "search", "web", "веб",
+                "pytest", "тест", "тесты", "запусти", "погугли", "загугли"
+            }
+            if q_words:
+                filtered_facts = []
+                for f in active_facts:
+                    f_text = f.fact.lower()
+                    f_tags = [t.lower() for t in f.tags]
+                    match_found = False
+                    for qw in q_words:
+                        if qw in f_text or any(qw in t for t in f_tags):
+                            match_found = True
+                            break
+                        if len(qw) >= 4:
+                            pref = qw[:4]
+                            if pref in f_text or any(pref in t for t in f_tags):
+                                match_found = True
+                                break
+                    if match_found:
+                        filtered_facts.append(f)
+                active_facts = filtered_facts
+            else:
+                active_facts = []
+
         # БЛОК 2: PINNED FACTS GUARANTEE
         pinned_facts = self.extract_pinned_facts(active_facts)
         regular_facts = [f for f in active_facts if f.id not in {p.id for p in pinned_facts}]

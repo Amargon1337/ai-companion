@@ -72,3 +72,18 @@ class TestRetrievalBudgetManagerSelect:
             query="тест", facts=sample_facts, reflections=reflections
         )
         assert len(bundle.reflections) <= retrieval_mgr.max_reflections
+
+    def test_external_queries_prune_unrelated_facts(self, retrieval_mgr, sample_facts):
+        """Web search or pytest commands must filter out unrelated personal facts."""
+        bundle = retrieval_mgr.select(
+            query="посмотри в интернете последние новости о погоде",
+            facts=sample_facts,
+            reflections=[],
+        )
+        fact_texts = {f.fact for f in bundle.facts}
+        # Only weather-related fact should remain
+        assert any("погода" in f for f in fact_texts), "weather fact missing"
+        # Irrelevant core/anchor facts should be pruned
+        assert not any("Иван" in f for f in fact_texts), "personal fact leaked"
+        assert not any("Морзик" in f for f in fact_texts), "anchor fact leaked"
+        assert not any("амитриптилин" in f for f in fact_texts), "medical fact leaked"

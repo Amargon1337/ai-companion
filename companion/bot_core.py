@@ -299,6 +299,28 @@ def _strip_prefix(text: str, prefixes: list[str]) -> str:
     return text
 
 
+def is_explicit_search_request(payload: Any) -> bool:
+    import re
+    text = ""
+    if isinstance(payload, str):
+        text = payload
+    elif isinstance(payload, list) and payload:
+        first = payload[0]
+        if isinstance(first, str):
+            text = first
+    if not text:
+        return False
+    lowered = text.lower()
+    search_keywords = ["интернет", "google", "гугл", "погугли", "поищи"]
+    if any(kw in lowered for kw in search_keywords):
+        action_verbs = ["посмотри", "найди", "поищи", "поиск", "проверь", "узнай", "загугли", "погугли"]
+        if any(verb in lowered for verb in action_verbs):
+            return True
+        if any(lowered.startswith(verb) for verb in ["найди ", "поищи ", "погугли ", "загугли "]):
+            return True
+    return False
+
+
 async def process_llm_request(message: types.Message, content_payload: Any) -> None:
     ctx = await build_context(message, content_payload)
     if ctx is None:
@@ -319,6 +341,19 @@ async def process_llm_request(message: types.Message, content_payload: Any) -> N
                 return
         finally:
             state.command = None
+
+    # Handle explicit search request
+    if is_explicit_search_request(content_payload):
+        from companion.grounding_handler import handle_grounding
+        if await handle_grounding(
+            message=message,
+            query=ctx["query"],
+            ctx_data=ctx["ctx_data"],
+            uid=ctx["uid"],
+            retrieval_mgr=retrieval_mgr,
+            memory_store=memory_store
+        ):
+            return
 
     chat = user_chats[ctx["uid"]]
     await _generate_and_send_response(

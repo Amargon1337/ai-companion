@@ -220,36 +220,93 @@ class PolicyLayer:
 
         Это post-processing для проверки что LLM следовал правилам.
         """
-        lines = response_text.strip().split("\n")
-        sentences = []
+        import re
+
+        lines = response_text.split("\n")
+        parsed_lines = []
+        in_code_block = False
 
         for line in lines:
-            if line.strip():
-                # Разбить на предложения (упрощенно)
-                line_sentences = [s.strip() for s in line.split(".") if s.strip()]
-                sentences.extend(line_sentences)
+            stripped = line.strip()
+            # Любая строка, начинающаяся с тройных бэктиков, переключает состояние блока кода
+            if stripped.startswith("```"):
+                in_code_block = not in_code_block
+                parsed_lines.append({"type": "code", "content": line})
+            elif in_code_block:
+                parsed_lines.append({"type": "code", "content": line})
+            else:
+                # Разбить строку на предложения и разделители
+                parts = re.split(r'((?<!\b\d)(?<!\b[a-zA-Z])(?<=[.!?])\s+)', line)
+                line_tokens = []
+                for part in parts:
+                    if not part:
+                        continue
+                    is_sep = bool(re.match(r'^\s+$', part))
+                    line_tokens.append({
+                        "text": part,
+                        "is_sentence": not is_sep,
+                        "is_question": not is_sep and "?" in part
+                    })
+                parsed_lines.append({"type": "normal", "tokens": line_tokens})
+
+        # Считаем общее число вопросов
+        total_questions = 0
+        for pl in parsed_lines:
+            if pl["type"] == "normal":
+                for token in pl["tokens"]:
+                    if token["is_question"]:
+                        total_questions += 1
 
         # Ограничение по количеству вопросов
-        question_count = sum(1 for s in sentences if "?" in s)
-        if question_count > constraints.max_questions:
-            # Удалить лишние вопросы
+        if total_questions > constraints.max_questions:
+            to_remove = total_questions - constraints.max_questions
             removed = 0
-            filtered = []
-            for s in sentences:
-                if "?" in s:
-                    if removed < (question_count - constraints.max_questions):
-                        removed += 1
-                        continue
-                filtered.append(s)
-            sentences = filtered
+            for pl in parsed_lines:
+                if pl["type"] == "normal":
+                    tokens = pl["tokens"]
+                    i = 0
+                    while i < len(tokens):
+                        token = tokens[i]
+                        if token["is_question"]:
+                            if removed < to_remove:
+                                token["text"] = ""
+                                token["is_sentence"] = False
+                                token["is_question"] = False
+                                removed += 1
+                                # Также удаляем один из соседних пробельных разделителей
+                                if i + 1 < len(tokens) and not tokens[i+1]["is_sentence"]:
+                                    tokens[i+1]["text"] = ""
+                                elif i - 1 >= 0 and not tokens[i-1]["is_sentence"]:
+                                    tokens[i-1]["text"] = ""
+                        i += 1
             logger.warning(f"Removed {removed} questions to meet constraint")
 
-        # Собрать обратно
-        result = ". ".join(sentences)
-        if result and not result.endswith((".", "?", "!")):
-            result += "."
+        # Добавляем точку в конец последнего предложения, если необходимо
+        # Ищем последнюю нормальную непустую строку, содержащую предложения
+        for pl in reversed(parsed_lines):
+            if pl["type"] == "normal":
+                tokens = pl["tokens"]
+                last_sent_idx = -1
+                for idx in reversed(range(len(tokens))):
+                    if tokens[idx]["is_sentence"] and tokens[idx]["text"]:
+                        last_sent_idx = idx
+                        break
+                if last_sent_idx != -1:
+                    token_text = tokens[last_sent_idx]["text"].rstrip()
+                    if token_text and not token_text.endswith((".", "?", "!")):
+                        tokens[last_sent_idx]["text"] = token_text + "."
+                    break
 
-        return result
+        # Собираем обратно
+        rebuilt_lines = []
+        for pl in parsed_lines:
+            if pl["type"] == "code":
+                rebuilt_lines.append(pl["content"])
+            else:
+                line_text = "".join(t["text"] for t in pl["tokens"])
+                rebuilt_lines.append(line_text)
+
+        return "\n".join(rebuilt_lines)
 
     def detect_user_state(
         self,
