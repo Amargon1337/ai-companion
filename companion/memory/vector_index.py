@@ -78,6 +78,17 @@ class VectorIndex:
             try:
                 cursor = conn.execute("PRAGMA table_info(embeddings)")
                 cols = [row[1] for row in cursor.fetchall()]
+                if "content_hash" not in cols:
+                    conn.execute("ALTER TABLE embeddings ADD COLUMN content_hash TEXT")
+                    # Populate content_hash for existing records
+                    cursor_old = conn.execute("SELECT content FROM embeddings WHERE content_hash IS NULL")
+                    rows = cursor_old.fetchall()
+                    if rows:
+                        import hashlib
+                        for r in rows:
+                            text = r[0]
+                            h = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                            conn.execute("UPDATE embeddings SET content_hash = ? WHERE content = ?", (h, text))
                 if "embedding" not in cols:
                     conn.execute("ALTER TABLE embeddings ADD COLUMN embedding BLOB NOT NULL DEFAULT (x'')")
             except sqlite3.OperationalError:
