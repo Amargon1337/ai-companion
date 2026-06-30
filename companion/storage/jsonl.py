@@ -33,10 +33,14 @@ def rotate_jsonl(path: str, max_bytes: int = 50 * 1024 * 1024, max_lines: int = 
     if not os.path.exists(path):
         return
 
-    # Check size
+    # Check size (O(1))
     size = os.path.getsize(path)
     if size < max_bytes:
-        # Check line count
+        # Fast path: if the file size is too small to possibly contain max_lines
+        # (assuming a minimum of 10 bytes per JSON line), skip line counting.
+        if size < max_lines * 10:
+            return
+        # Check line count only if the file size is large enough to potentially exceed max_lines
         try:
             with open(path, encoding="utf-8") as f:
                 line_count = sum(1 for _ in f)

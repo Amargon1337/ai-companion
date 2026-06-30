@@ -21,6 +21,7 @@ class MemoryDatabase:
   @contextmanager
   def _conn(self) -> Generator[sqlite3.Connection, None, None]:
     conn = sqlite3.connect(self.path)
+    conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.row_factory = sqlite3.Row
     try:
@@ -124,16 +125,111 @@ class MemoryDatabase:
       if count > 0:
         return
 
-    for path, table, mapper in (
-      (FACTS_PATH, "facts", self._insert_fact),
-      (FACT_RELATIONS_PATH, "fact_relations", self._insert_relation),
-      (MESSAGES_PATH, "messages", self._insert_message),
-      (REFLECTIONS_PATH, "reflections", self._insert_reflection),
-      (BELIEFS_PATH, "beliefs", self._insert_belief),
+    for path, table, batch_mapper in (
+      (FACTS_PATH, "facts", self.batch_insert_facts),
+      (FACT_RELATIONS_PATH, "fact_relations", self.batch_insert_relations),
+      (MESSAGES_PATH, "messages", self.batch_insert_messages),
+      (REFLECTIONS_PATH, "reflections", self.batch_insert_reflections),
+      (BELIEFS_PATH, "beliefs", self.batch_insert_beliefs),
     ):
       if os.path.exists(path):
-        for row in read_jsonl(path):
-          mapper(row)
+        rows = list(read_jsonl(path))
+        if rows:
+          batch_mapper(rows)
+
+  def batch_insert_facts(self, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+      return
+    tuples = [
+      (
+        row["id"], row["fact"], row.get("date"), row.get("created_at"),
+        row.get("memory_kind", "event"), row.get("importance", 5),
+        row.get("confidence", 0.8), row.get("source"), row.get("source_type"),
+        json.dumps(row.get("tags", []), ensure_ascii=False),
+        row.get("status", "active"), row.get("valid_from"),
+        row.get("valid_until"), row.get("schema_version", 1),
+      )
+      for row in rows
+    ]
+    with self._conn() as conn:
+      conn.executemany(
+        """
+        INSERT OR IGNORE INTO facts VALUES
+        (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        tuples,
+      )
+
+  def batch_insert_relations(self, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+      return
+    tuples = [
+      (
+        row["id"], row["from_id"], row["to_id"], row["relation"],
+        row.get("created_at"), row.get("reason", ""), row.get("confidence", 0.8),
+      )
+      for row in rows
+    ]
+    with self._conn() as conn:
+      conn.executemany(
+        "INSERT OR IGNORE INTO fact_relations VALUES (?,?,?,?,?,?,?)",
+        tuples,
+      )
+
+  def batch_insert_messages(self, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+      return
+    tuples = [
+      (
+        row["id"], row.get("ts"), row.get("role"), row.get("text"),
+        row.get("importance", 5), row.get("mode", "default"),
+        json.dumps(row.get("signals", []), ensure_ascii=False),
+        row.get("user_id"),
+      )
+      for row in rows
+    ]
+    with self._conn() as conn:
+      conn.executemany(
+        "INSERT OR IGNORE INTO messages VALUES (?,?,?,?,?,?,?,?)",
+        tuples,
+      )
+
+  def batch_insert_reflections(self, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+      return
+    tuples = [
+      (
+        row["id"], row["insight"],
+        json.dumps(row.get("based_on", []), ensure_ascii=False),
+        row.get("period"), row.get("importance", 7),
+        row.get("confidence", 0.8), row.get("status", "active"),
+        row.get("created_at"),
+      )
+      for row in rows
+    ]
+    with self._conn() as conn:
+      conn.executemany(
+        "INSERT OR IGNORE INTO reflections VALUES (?,?,?,?,?,?,?,?)",
+        tuples,
+      )
+
+  def batch_insert_beliefs(self, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+      return
+    tuples = [
+      (
+        row["id"], row["belief"],
+        json.dumps(row.get("based_on", []), ensure_ascii=False),
+        row.get("importance", 6), row.get("status", "active"),
+        row.get("created_at"),
+      )
+      for row in rows
+    ]
+    with self._conn() as conn:
+      conn.executemany(
+        "INSERT OR IGNORE INTO beliefs VALUES (?,?,?,?,?,?)",
+        tuples,
+      )
 
   def _insert_fact(self, row: dict[str, Any]) -> None:
     with self._conn() as conn:

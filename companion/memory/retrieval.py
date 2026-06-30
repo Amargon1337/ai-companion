@@ -75,6 +75,7 @@ class RetrievalBudgetManager:
         causal_links: list[str] | None = None,
         predictions: list[str] | None = None,
         world_model_context: str = "",
+        user_model_context: str = "",
         mood: dict | None = None,
     ) -> ContextBundle:
         summaries = summaries or []
@@ -191,6 +192,7 @@ class RetrievalBudgetManager:
             causal_links=causal_links[:5],
             predictions=predictions[:5],
             world_model_context=world_model_context[:1200],
+            user_model_context=user_model_context,
         )
 
         # Trim if over budget — summaries first, reflections second, facts last

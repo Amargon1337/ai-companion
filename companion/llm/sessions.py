@@ -28,6 +28,7 @@ def build_system_instruction(
     predictions = reasoning_engine.get_prediction_context(query)
     world_model_context = reasoning_engine.get_world_model_context(query)
 
+    from companion.user_model import user_model
     bundle = retrieval.select(
         query=query,
         facts=store.list_facts("active"),
@@ -39,6 +40,7 @@ def build_system_instruction(
         causal_links=causal_links,
         predictions=predictions,
         world_model_context=world_model_context,
+        user_model_context=user_model.to_prompt_block(),
     )
     ctx = bundle.to_prompt_block()
 

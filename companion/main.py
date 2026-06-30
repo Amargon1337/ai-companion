@@ -71,12 +71,19 @@ async def run() -> None:
 
     # Start proactive ping loop (background)
     from companion.bot_core import proactive_ping_loop
-    asyncio.create_task(proactive_ping_loop(bot))
+    ping_task = asyncio.create_task(proactive_ping_loop(bot))
 
     try:
         await dp.start_polling(bot, handle_as_tasks=True)
     finally:
         logger.info("Shutting down bot...")
+        ping_task.cancel()
+        try:
+            await asyncio.gather(ping_task, return_exceptions=True)
+        except Exception:
+            pass
+        from companion.background_scheduler import cancel_all_tasks
+        await cancel_all_tasks()
         await bot.session.close()
         logger.info("Bot shutdown complete.")
 

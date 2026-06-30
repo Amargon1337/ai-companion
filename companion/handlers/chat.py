@@ -105,6 +105,7 @@ def register(dp, bot) -> None:
                 causal_links=ctx_data.get("causal_links", []),
                 predictions=ctx_data.get("predictions", []),
                 world_model_context=ctx_data.get("world_model_context", ""),
+                user_model_context=ctx_data.get("user_model_context", ""),
             ).to_prompt_block()
             await core.send_typing(message)
             text, sources = await llm.run_llm(llm.search_with_grounding, query, ctx)

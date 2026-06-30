@@ -5,6 +5,8 @@ import logging
 import math
 import sqlite3
 import struct
+from contextlib import contextmanager
+from collections.abc import Generator
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,7 @@ class VectorIndex:
 
     def _init_table(self) -> None:
         with sqlite3.connect(self.path) as conn:
+            conn.execute("PRAGMA journal_mode = WAL;")
             conn.execute("PRAGMA foreign_keys = ON;")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS embeddings (
@@ -80,10 +83,16 @@ class VectorIndex:
             except sqlite3.OperationalError:
                 pass
 
-    def _conn(self):
+    @contextmanager
+    def _conn(self) -> Generator[sqlite3.Connection, None, None]:
         conn = sqlite3.connect(self.path)
+        conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA foreign_keys = ON;")
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
 
     def _content_hash(self, text: str) -> str:
         import hashlib

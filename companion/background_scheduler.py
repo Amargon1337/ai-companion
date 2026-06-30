@@ -24,16 +24,11 @@ _CIRCUIT_BREAKER_COOLDOWN_SECONDS = 600  # 10 minutes
 # Semaphore for background tasks (prevent OOM from task pileup)
 _background_semaphore = asyncio.Semaphore(5)
 
-
-async def _run_background_task(coro, task_name: str = "background"):
-    async with _background_semaphore:
-        try:
-            await coro
-        except Exception as e:
-            logger.error(f"Background task '{task_name}' failed: {e}")
+# Set to track currently running background tasks
+_active_tasks: set[asyncio.Task] = set()
 
 
-def safe_task(coro, task_name: str = "background"):
+def safe_task(coro, task_name: str = "background") -> asyncio.Task:
     """Fire-and-forget with semaphore, exception logging to logger + self_errors.jsonl."""
     async def _wrapped():
         async with _background_semaphore:
@@ -51,7 +46,22 @@ def safe_task(coro, task_name: str = "background"):
                     )
                 except Exception:
                     pass
-    return asyncio.create_task(_wrapped())
+    task = asyncio.create_task(_wrapped())
+    _active_tasks.add(task)
+    task.add_done_callback(_active_tasks.discard)
+    return task
+
+
+async def cancel_all_tasks() -> None:
+    """Cancel all active background tasks and wait for them to finish."""
+    if not _active_tasks:
+        return
+    logger.info("Cancelling %d active background tasks...", len(_active_tasks))
+    tasks_to_cancel = list(_active_tasks)
+    for task in tasks_to_cancel:
+        task.cancel()
+    await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+    _active_tasks.clear()
 
 
 def _check_circuit_breaker(task_name: str) -> bool:

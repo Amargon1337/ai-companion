@@ -392,6 +392,7 @@ def _get_policy_decision(state: RuntimeState, query: str) -> Any | None:
 
 def _load_retrieval_context(query: str = "", reasoning_context: dict[str, Any] | None = None):
     reasoning_context = reasoning_context or reasoning_engine.auto_reasoning_context(query)
+    from companion.user_model import user_model
     return {
         "facts": memory_store.list_facts("active"),
         "reflections": memory_store.list_reflections(),
@@ -403,6 +404,7 @@ def _load_retrieval_context(query: str = "", reasoning_context: dict[str, Any] |
         "causal_links": reasoning_context.get("causal_links", []),
         "predictions": reasoning_context.get("predictions", []),
         "world_model_context": reasoning_context.get("world_model_context", ""),
+        "user_model_context": user_model.to_prompt_block(),
     }
 
 
@@ -423,6 +425,7 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             causal_links=ctx_data.get("causal_links", []),
             predictions=ctx_data.get("predictions", []),
             world_model_context=ctx_data.get("world_model_context", ""),
+            user_model_context=ctx_data.get("user_model_context", ""),
             mood=state.mood_state,
         )
         ctx = bundle.to_prompt_block()

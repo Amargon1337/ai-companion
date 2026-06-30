@@ -138,11 +138,14 @@ class ContextBundle:
     causal_links: list[str] = field(default_factory=list)
     predictions: list[str] = field(default_factory=list)
     world_model_context: str = ""
+    user_model_context: str = ""
 
     def to_prompt_block(self) -> str:
         parts: list[str] = []
         if self.personality_snapshot:
             parts.append(self.personality_snapshot)
+        if self.user_model_context:
+            parts.append(self.user_model_context)
         if self.permanent_notes:
             parts.append(f"[Постоянная память]\n{self.permanent_notes}")
         if self.recent_messages:

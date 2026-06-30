@@ -42,8 +42,8 @@ def extract_facts(
                 f"Fact extraction returned empty array. "
                 f"Prompt length: {len(prompt)}, Known facts: {len(known)}"
             )
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.error(f"Fact extraction parse error: {e}")
+    except Exception as e:
+        logger.error(f"Fact extraction failed: {e}")
         return []
 
     created: list[Fact] = []
@@ -107,8 +107,8 @@ def consolidate_facts(store: MemoryStore, new_facts: list[Fact]) -> None:
                 f"Consolidation returned empty array. "
                 f"New facts: {len(new_facts)}, Existing facts: {len(existing)}"
             )
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.error(f"Consolidation parse error: {e}")
+    except Exception as e:
+        logger.error(f"Consolidation failed: {e}")
         return
 
     for rel in relations:
@@ -149,8 +149,8 @@ def generate_reflections(
                 f"Reflection generation returned empty array. "
                 f"Period: {period}, Facts available: {len(facts)}"
             )
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.error(f"Reflection parse error: {e}")
+    except Exception as e:
+        logger.error(f"Reflection failed: {e}")
         return []
 
     created: list[Reflection] = []
@@ -200,8 +200,8 @@ def generate_personality_snapshot(store: MemoryStore, summary: str) -> dict[str,
             if isinstance(belief, str) and belief.strip():
                 store.add_belief(belief.strip(), [f"personality_{merged['last_updated'][:10]}"])
         return merged
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.error(f"Personality pipeline error: {e}")
+    except Exception as e:
+        logger.error(f"Personality pipeline failed: {e}")
         return current
 
 

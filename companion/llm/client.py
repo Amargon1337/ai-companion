@@ -8,11 +8,14 @@ from typing import Any
 from google import genai
 from google.genai import types as google_types
 
-from companion.config import GOOGLE_API_KEY, MODEL_NAME, SAFETY_SETTINGS_CONFIG, SEARCH_MODEL
+from companion.config import GOOGLE_API_KEY, MODEL_NAME, SAFETY_SETTINGS_CONFIG, SEARCH_MODEL, LLM_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
-client = genai.Client(api_key=GOOGLE_API_KEY)
+client = genai.Client(
+    api_key=GOOGLE_API_KEY,
+    http_options=google_types.HttpOptions(timeout=LLM_TIMEOUT * 1000)
+)
 
 def _build_safety_settings() -> list:
     """Build SafetySetting list from config (env-overridable)."""
@@ -52,9 +55,21 @@ def history_item(role: str, text: str) -> dict:
 
 
 def oneshot(prompt: str, model: str = MODEL_NAME) -> str:
-    temp = client.chats.create(model=model, config=make_config())
-    r = temp.send_message(prompt)
-    return (r.text or "").strip().replace("```json", "").replace("```", "").strip()
+    import time
+    from companion.config import LLM_RETRIES, LLM_RETRY_DELAY
+    last_exc = None
+    for attempt in range(LLM_RETRIES):
+        try:
+            temp = client.chats.create(model=model, config=make_config())
+            r = temp.send_message(prompt)
+            return (r.text or "").strip().replace("```json", "").replace("```", "").strip()
+        except Exception as e:
+            logger.error("oneshot call failed (attempt %d/%d): %s", attempt + 1, LLM_RETRIES, e)
+            last_exc = e
+            if attempt < LLM_RETRIES - 1:
+                delay = LLM_RETRY_DELAY * (2 ** attempt)
+                time.sleep(delay)
+    raise last_exc or RuntimeError("oneshot call failed: unknown error")
 
 
 def parse_json_array(text: str) -> list:
@@ -189,8 +204,12 @@ def _get_aio_client():
     global _aio_client
     if _aio_client is None:
         from google import genai
-        from companion.config import GOOGLE_API_KEY
-        _aio_client = genai.Client(api_key=GOOGLE_API_KEY)
+        from google.genai import types
+        from companion.config import GOOGLE_API_KEY, LLM_TIMEOUT
+        _aio_client = genai.Client(
+            api_key=GOOGLE_API_KEY,
+            http_options=types.HttpOptions(timeout=LLM_TIMEOUT * 1000)
+        )
     return _aio_client
 
 
