@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 
 client = genai.Client(
     api_key=GOOGLE_API_KEY,
-    http_options=google_types.HttpOptions(timeout=LLM_TIMEOUT * 1000)
+    http_options=google_types.HttpOptions(
+        timeout=LLM_TIMEOUT * 1000
+    )
 )
 
 def _build_safety_settings() -> list:
@@ -208,7 +210,9 @@ def _get_aio_client():
         from companion.config import GOOGLE_API_KEY, LLM_TIMEOUT
         _aio_client = genai.Client(
             api_key=GOOGLE_API_KEY,
-            http_options=types.HttpOptions(timeout=LLM_TIMEOUT * 1000)
+            http_options=types.HttpOptions(
+                timeout=LLM_TIMEOUT * 1000
+            )
         )
     return _aio_client
 

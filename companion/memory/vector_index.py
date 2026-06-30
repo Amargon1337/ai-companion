@@ -17,17 +17,30 @@ _EMBEDDING_DIM = 768  # text-embedding-004 output dimension
 
 def _embed_texts(texts: list[str]) -> list[list[float]]:
     """Embed a batch of texts via Gemini API. Falls back to zero vectors on failure."""
+    if not texts:
+        return []
     try:
         from google import genai
+        from google.genai import types
         from companion.config import GOOGLE_API_KEY
         if not GOOGLE_API_KEY or "test" in GOOGLE_API_KEY.lower():
             return [[0.0] * _EMBEDDING_DIM for _ in texts]
-        client = genai.Client(api_key=GOOGLE_API_KEY)
-        result = client.models.embed_content(
-            model=_EMBEDDING_MODEL,
-            contents=texts,
+        client = genai.Client(
+            api_key=GOOGLE_API_KEY,
+            http_options=types.HttpOptions(api_version="v1beta")
         )
-        return [e.values for e in result.embeddings]
+        
+        chunk_size = 90
+        all_embeddings = []
+        for i in range(0, len(texts), chunk_size):
+            chunk = texts[i : i + chunk_size]
+            result = client.models.embed_content(
+                model=_EMBEDDING_MODEL,
+                contents=chunk,
+            )
+            all_embeddings.extend([e.values for e in result.embeddings])
+            
+        return all_embeddings
     except Exception as exc:
         logger.warning("Embedding API call failed: %s. Using zero vectors.", exc)
         return [[0.0] * _EMBEDDING_DIM for _ in texts]
@@ -62,6 +75,20 @@ class VectorIndex:
         with sqlite3.connect(self.path) as conn:
             conn.execute("PRAGMA journal_mode = WAL;")
             conn.execute("PRAGMA foreign_keys = ON;")
+            
+            # Check if table exists
+            table_exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='embeddings'"
+            ).fetchone()
+            
+            if table_exists:
+                cursor = conn.execute("PRAGMA table_info(embeddings)")
+                cols = {row[1] for row in cursor.fetchall()}
+                required_cols = {"content_hash", "content", "embedding", "content_type"}
+                if not required_cols.issubset(cols):
+                    logger.info("Embeddings table schema is outdated. Dropping and recreating table.")
+                    conn.execute("DROP TABLE IF EXISTS embeddings")
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS embeddings (
                     content_hash TEXT PRIMARY KEY,
@@ -73,24 +100,6 @@ class VectorIndex:
             """)
             try:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_type ON embeddings(content_type)")
-            except sqlite3.OperationalError:
-                pass
-            try:
-                cursor = conn.execute("PRAGMA table_info(embeddings)")
-                cols = [row[1] for row in cursor.fetchall()]
-                if "content_hash" not in cols:
-                    conn.execute("ALTER TABLE embeddings ADD COLUMN content_hash TEXT")
-                    # Populate content_hash for existing records
-                    cursor_old = conn.execute("SELECT content FROM embeddings WHERE content_hash IS NULL")
-                    rows = cursor_old.fetchall()
-                    if rows:
-                        import hashlib
-                        for r in rows:
-                            text = r[0]
-                            h = hashlib.sha256(text.encode("utf-8")).hexdigest()
-                            conn.execute("UPDATE embeddings SET content_hash = ? WHERE content = ?", (h, text))
-                if "embedding" not in cols:
-                    conn.execute("ALTER TABLE embeddings ADD COLUMN embedding BLOB NOT NULL DEFAULT (x'')")
             except sqlite3.OperationalError:
                 pass
 
