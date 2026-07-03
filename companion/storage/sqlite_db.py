@@ -144,6 +144,17 @@ class MemoryDatabase:
           new_state TEXT,
           timestamp TEXT DEFAULT (datetime('now', 'utc'))
         );
+        CREATE TABLE IF NOT EXISTS proactive_events (
+          id TEXT PRIMARY KEY,
+          timestamp TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          baseline_state TEXT,
+          urgency INTEGER,
+          message TEXT,
+          sent BOOLEAN DEFAULT 1,
+          user_replied BOOLEAN DEFAULT 0,
+          reply_delay_hours REAL
+        );
         """
       )
       

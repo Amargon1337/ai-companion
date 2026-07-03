@@ -61,7 +61,14 @@ USER_MODEL_REFLECTION_PROMPT = """Ты анализируешь диалог И�
     "pattern_observations": ["наблюдения за паттернами"],
     "emotional_notes": ["заметки об эмоциях"],
     "recurring_themes": ["повторяющиеся темы диалога"]
-  }}
+  }},
+  "shared_lore_candidates": [
+    {{
+      "candidate_phrase": "потенциальный локальный мем/фраза из диалога (если есть)",
+      "candidate_context": "почему это смешно или значимо",
+      "confidence": 0.9
+    }}
+  ]
 }}
 
 Отвечай ТОЛЬКО чистым JSON без разметки ```json."""
@@ -69,6 +76,7 @@ USER_MODEL_REFLECTION_PROMPT = """Ты анализируешь диалог И�
 
 class UserModel:
     """Целостная модель пользователя как системы."""
+    CORE_STATES = {"neutral", "depressed", "anxious", "energized", "angry"}
 
     def __init__(self):
         import threading
@@ -96,7 +104,13 @@ class UserModel:
                 "deterioration_triggers": [],
                 "frequent_triggers": [],
                 "baseline_state": "neutral",
+                "signals": [],
                 "state_variance": 0.5,
+            },
+            "proactivity": {
+                "last_ping_time": 0.0,
+                "consecutive_ignored_pings": 0,
+                "total_pings_sent": 0,
             },
             "last_updated": datetime.now().isoformat(),
             "total_interactions": 0,
@@ -161,6 +175,10 @@ class UserModel:
         baseline = timeline.get("baseline_state", "")
         if baseline and baseline != "neutral":
             parts.append(f"Базовое эмоциональное состояние: {baseline}")
+            
+        signals = timeline.get("signals", [])
+        if signals:
+            parts.append(f"Эмоциональные маркеры (сигналы): {', '.join(signals)}")
 
         if parts:
             return "[Модель пользователя]\n" + "\n\n".join(parts)
@@ -203,17 +221,66 @@ class UserModel:
             raw = await aio_oneshot(prompt, MODEL_NAME)
             res = parse_json_object(raw)
 
+            # --- SHARED LORE PHASE 0: Dry-Run Logging ---
+            lore_candidates = res.get("shared_lore_candidates", [])
+            if lore_candidates:
+                import os
+                from companion.config import DATA_DIR
+                lore_log_path = os.path.join(DATA_DIR, "shared_lore_candidates.jsonl")
+                now_str = datetime.now().isoformat()
+                with open(lore_log_path, "a", encoding="utf-8") as f:
+                    for cand in lore_candidates:
+                        # Ensure it's not a hallucinated placeholder
+                        if cand.get("candidate_phrase") and cand.get("candidate_phrase") != "потенциальный локальный мем/фраза из диалога (если есть)":
+                            cand["timestamp"] = now_str
+                            f.write(json.dumps(cand, ensure_ascii=False) + "\n")
+
             # --- SHADOW EVALUATION (Drift Control) ---
             from companion.llm.shadow_eval import evaluate_identity_change
             identity_updates = res.get("identity_updates", {})
-            who_new = identity_updates.get("who_they_are")
-            if who_new:
-                with self._lock:
-                    who_old = self.data.get("identity", {}).get("who_they_are", "")
-                is_valid = await evaluate_identity_change("core_identity", who_old, who_new)
-                if not is_valid:
-                    identity_updates["who_they_are"] = "" # Block drift
-                    res.setdefault("reflection", {}).setdefault("discoveries", []).append("ShadowEvaluator blocked core_identity drift.")
+
+            with self._lock:
+                current_ident = self.data.get("identity", {})
+
+            # 1. Scalar fields mapping: (update_key -> vault_category)
+            scalar_map = {
+                "who_they_are": "core_identity",
+                "who_they_want_to_be": "ambitions",
+                "who_they_fear_becoming": "fears",
+            }
+
+            for key, category in scalar_map.items():
+                new_val = identity_updates.get(key)
+                if new_val:
+                    old_val = current_ident.get(key, "")
+                    is_valid = await evaluate_identity_change(category, old_val, new_val)
+                    if not is_valid:
+                        identity_updates[key] = ""  # Block drift
+                        res.setdefault("reflection", {}).setdefault("discoveries", []).append(f"ShadowEvaluator blocked {category} drift.")
+
+            # 2. List fields mapping: (update_key -> (ident_key, vault_category))
+            list_map = {
+                "core_traits_to_add": ("core_traits", "core_traits"),
+                "values_to_add": ("values", "values"),
+                "roles_to_add": ("roles", "roles"),
+            }
+
+            for update_key, (ident_key, category) in list_map.items():
+                items_to_add = identity_updates.get(update_key, [])
+                if items_to_add:
+                    old_list = current_ident.get(ident_key, [])
+                    new_list = old_list.copy()
+                    for item in items_to_add:
+                        if item and item not in new_list:
+                            new_list.append(item)
+                    
+                    old_val = ", ".join(old_list)
+                    new_val = ", ".join(new_list)
+                    
+                    is_valid = await evaluate_identity_change(category, old_val, new_val)
+                    if not is_valid:
+                        identity_updates[update_key] = []  # Block drift
+                        res.setdefault("reflection", {}).setdefault("discoveries", []).append(f"ShadowEvaluator blocked {category} drift.")
             # -----------------------------------------
 
             with self._lock:
@@ -260,7 +327,17 @@ class UserModel:
                         if item and item not in lst:
                             lst.append(item)
                 if emotional_updates.get("baseline_state"):
-                    timeline["baseline_state"] = emotional_updates["baseline_state"]
+                    raw_state = emotional_updates["baseline_state"].lower()
+                    if raw_state in UserModel.CORE_STATES:
+                        timeline["baseline_state"] = raw_state
+                    else:
+                        logger.warning(f"Invalid CORE state '{raw_state}'. Falling back to 'neutral'. Sub-state logged to signals.")
+                        timeline["baseline_state"] = "neutral"
+                        signals = timeline.setdefault("signals", [])
+                        if raw_state not in signals:
+                            signals.append(raw_state)
+                            if len(signals) > 20:
+                                signals.pop(0)
 
                 # Populate reflection log
                 res_reflection = res.get("reflection", {})
@@ -276,31 +353,38 @@ class UserModel:
             # Update metadata
             self.data["total_interactions"] += 1
             self.data["last_updated"] = datetime.now().isoformat()
+            import copy
+            ident_snapshot = copy.deepcopy(self.data.get("identity", {}))
+            
+        def _sync_io(snapshot, ref_data):
             self._save_model()
-            self._log_reflection(reflection)
-
+            self._log_reflection(ref_data)
+            
             # Sync to IdentityVault
             from companion.bot_core import memory_store
-            ident = self.data.get("identity", {})
-            if ident.get("who_they_are"):
-                memory_store.identity.update_identity("core_identity", ident["who_they_are"], explicit_overwrite=True)
-            if ident.get("who_they_want_to_be"):
-                memory_store.identity.update_identity("ambitions", ident["who_they_want_to_be"], explicit_overwrite=True)
-            if ident.get("who_they_fear_becoming"):
-                memory_store.identity.update_identity("fears", ident["who_they_fear_becoming"], explicit_overwrite=True)
-            if ident.get("core_traits"):
-                memory_store.identity.update_identity("core_traits", ", ".join(ident["core_traits"]), explicit_overwrite=True)
-            if ident.get("values"):
-                memory_store.identity.update_identity("values", ", ".join(ident["values"]), explicit_overwrite=True)
-            if ident.get("roles"):
-                memory_store.identity.update_identity("roles", ", ".join(ident["roles"]), explicit_overwrite=True)
+            if snapshot.get("who_they_are"):
+                memory_store.identity.update_identity("core_identity", snapshot["who_they_are"], explicit_overwrite=True)
+            if snapshot.get("who_they_want_to_be"):
+                memory_store.identity.update_identity("ambitions", snapshot["who_they_want_to_be"], explicit_overwrite=True)
+            if snapshot.get("who_they_fear_becoming"):
+                memory_store.identity.update_identity("fears", snapshot["who_they_fear_becoming"], explicit_overwrite=True)
+            if snapshot.get("core_traits"):
+                memory_store.identity.update_identity("core_traits", ", ".join(snapshot["core_traits"]), explicit_overwrite=True)
+            if snapshot.get("values"):
+                memory_store.identity.update_identity("values", ", ".join(snapshot["values"]), explicit_overwrite=True)
+            if snapshot.get("roles"):
+                memory_store.identity.update_identity("roles", ", ".join(snapshot["roles"]), explicit_overwrite=True)
+
+        await asyncio.to_thread(_sync_io, ident_snapshot, reflection)
 
         return reflection
 
     def _save_model(self):
         from companion.storage.sqlite_db import MemoryDatabase
+        with self._lock:
+            data_json = json.dumps(self.data, ensure_ascii=False)
         db = MemoryDatabase()
-        db.set_meta("user_model", json.dumps(self.data, ensure_ascii=False))
+        db.set_meta("user_model", data_json)
 
     def _load_model(self):
         from companion.storage.sqlite_db import MemoryDatabase
@@ -308,7 +392,13 @@ class UserModel:
         val = db.get_meta("user_model", "")
         if val:
             try:
-                self.data = json.loads(val)
+                loaded_data = json.loads(val)
+                # Preserve defaults if keys are missing from loaded data
+                for k, v in loaded_data.items():
+                    if isinstance(v, dict) and k in self.data:
+                        self.data[k].update(v)
+                    else:
+                        self.data[k] = v
                 return
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to load user model from DB: {e}")
@@ -317,7 +407,12 @@ class UserModel:
         if os.path.exists(USER_MODEL_PATH):
             try:
                 with open(USER_MODEL_PATH, encoding="utf-8") as f:
-                    self.data = json.load(f)
+                    loaded_data = json.load(f)
+                    for k, v in loaded_data.items():
+                        if isinstance(v, dict) and k in self.data:
+                            self.data[k].update(v)
+                        else:
+                            self.data[k] = v
                 self._save_model()
                 try:
                     os.remove(USER_MODEL_PATH)

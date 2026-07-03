@@ -58,26 +58,24 @@ last_activity: dict[int, float] = {}
 
 
 async def proactive_ping_loop(bot):
-    """Every 30 min: ping users inactive >12h during daytime."""
+    """Каждые 30 мин проверяет возможность проактивного пинга."""
     from datetime import datetime
+    from companion.proactive.loop import run_proactive_loop
+    
     while True:
         try:
             await asyncio.sleep(1800)
-            now = time.time()
             now_dt = datetime.now()
             hour = now_dt.hour
+            # Не пингуем ночью
             if not (10 <= hour < 23):
                 continue
-            for uid, last_ts in list(last_activity.items()):
-                if now - last_ts > 43200:  # 12 hours
-                    try:
-                        await bot.send_message(
-                            uid,
-                            "Ты там живой? 12 часов молчишь. Код сам себя не напишет, или опять в депресняк улетел?"
-                        )
-                    except Exception:
-                        pass
-                    last_activity[uid] = now
+                
+            # Запуск нового детерминированного лупа
+            await run_proactive_loop(debug=False)
+            
+        except asyncio.CancelledError:
+            break
         except Exception:
             logger.exception("proactive_ping_loop crashed, restarting...")
 
@@ -370,6 +368,11 @@ def is_explicit_search_request(payload: Any) -> bool:
 
 async def process_llm_request(message: types.Message, content_payload: Any) -> None:
     last_activity[message.from_user.id] = time.time()
+    
+    from companion.user_model import user_model
+    from companion.proactive.engagement import record_user_replied
+    record_user_replied(user_model)
+
     ctx = await build_context(message, content_payload)
     if ctx is None:
         return

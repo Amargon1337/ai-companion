@@ -58,11 +58,56 @@
 
 1.  **Перенос подсистемы Reasoning в SQLite**: Отказаться от JSON/JSONL для целей, модели мира и предсказаний. Внедрить их в БД для транзакционной целостности вместе с остальной памятью.
 2.  **Устранение дублирования Permanent Notes**: Прекратить запись в `permanent_notes.txt`. Оставить работу с постоянными фактами исключительно через `Fact(memory_kind="permanent")` в SQLite.
-3.  **Закрытие уязвимости ShadowEvaluator**: Написать проверку не только для `who_they_are`, но и для всех остальных полей (страхи, ценности, амбиции).
-4.  **Удаление `explicit_overwrite=True` в IdentityVault**: Сделать запись в Identity безопасной, используя обновленный ShadowEvaluator.
-5.  **Рефакторинг `UserModel.reflect_after_interaction`**: Вынести синхронные операции с базой внутри `RLock` в отдельный поток через `asyncio.to_thread()` или перевести на полностью асинхронные SQL-вызовы.
-6.  **Устранение дублирования личности (Identity/Profile)**: Свести профиль пользователя и личность бота (сейчас разбросано между `UserModel`, `IdentityVault` и SQLite Meta) в одну сущность.
-7.  **Оптимизация реиндексации FAISS при старте**: Сохранять хеш состояния базы и перестраивать `reindex_all()` только если были изменения, а не при каждом рестарте бота.
-8.  **Добавление очистки `_compression_locks`**: Написать механизм удаления локов для `user_id` после завершения компрессии, чтобы устранить утечку памяти.
-9.  **Внедрение `asyncio.Lock` на сессию пользователя**: Запретить параллельную обработку нескольких сообщений от одного пользователя в `aiogram` хендлерах, чтобы избежать состояний гонки (race conditions).
-10. **Полный отказ от Legacy-хранилища**: Завершить миграцию логов рефлексий, списков задач (todo) и дневников из текстовых файлов в SQLite и безопасно удалить `storage/legacy.py`.
+3.  **Рефакторинг `UserModel.reflect_after_interaction`**: Вынести синхронные операции с базы внутри `RLock` в отдельный поток через `asyncio.to_thread()` или перевести на полностью асинхронные SQL-вызовы.
+4.  **Устранение дублирования личности (Identity/Profile)**: Свести профиль пользователя и личность бота (сейчас разбросано между `UserModel`, `IdentityVault` и SQLite Meta) в одну сущность.
+5.  **Оптимизация реиндексации FAISS при старте**: Сохранять хеш состояния базы и перестраивать `reindex_all()` только если были изменения, а не при каждом рестарте бота.
+6.  **Добавление очистки `_compression_locks`**: Написать механизм удаления локов для `user_id` после завершения компрессии, чтобы устранить утечку памяти.
+7.  **Внедрение `asyncio.Lock` на сессию пользователя**: Запретить параллельную обработку нескольких сообщений от одного пользователя в `aiogram` хендлерах, чтобы избежать состояний гонки (race conditions).
+8.  **Полный отказ от Legacy-хранилища**: Завершить миграцию логов рефлексий, списков задач (todo) и дневников из текстовых файлов в SQLite и безопасно удалить `storage/legacy.py`.
+
+---
+
+## 8. Реализованные Фичи (Status: Production Ready)
+
+### Prompt-Based Policy Engine (Dynamic Tone V6)
+**Статус:** [DONE] Implemented, Tested, Production Ready
+
+Amargon now adapts communication style and dialogue strategy based on user emotional baseline while preserving a stable core personality.
+
+**Known Constraints (Архитектурные решения V6):**
+- `CORE_STATES` are fixed and control routing.
+- `signals` are informational only (no routing impact).
+- Strategy overrides Tone.
+- Memory is excluded from cache key by design (to prevent 0% cache hit rate).
+- Unknown states always fallback to `neutral`.
+
+**Changelog (2026-07):**
+- CORE / STRATEGY / TONE separation
+- deterministic prompt compilation
+- sha256 policy cache
+- CORE_STATES validation
+- signals isolation
+- invalid-state fallback
+- integration test coverage
+
+---
+
+## 9. Следующий фокус разработки
+
+### Context-Aware Proactive Loop (Умные пинги)
+**Статус:** [BETA] Live Validation
+
+Реализован масштабируемый и детерминированный пайплайн проактивности, состоящий из:
+1. **Engagement Gate** (`engagement.py`): защита от спама и выгорания (cooldown 12ч, счетчик игноров, min silence).
+2. **Reason Selector** (`reasons.py`): строгий выбор причины пинга на основе приоритетов (Unfinished Goal, Emotional Checkin, и т.д.).
+3. **Context Collector** (`collector.py`): извлечение данных из БД только под выбранную причину.
+4. **Policy Engine + Formatter** (`formatter.py`): жесткий генератор текста с антигаллюцинаторным промптом, динамической длиной сообщения (по urgency) и наложенным Tone/Strategy.
+5. **Telemetry / Orchestrator** (`loop.py`, `telemetry.py`): запись метрик в таблицу `proactive_events` для отслеживания Reply Rate и качества пингов.
+
+**Текущий шаг (Live Validation):**
+Система развернута и проходит тестирование в реальном времени (5-7 дней). 
+Ключевые метрики для проверки:
+- Частота срабатывания Engagement Gate (gate passed vs blocked).
+- Распределение выбираемых причин.
+- **Reply Rate** (отклик пользователя).
+- Отсутствие "кринжа" и ложных воспоминаний (строгий мониторинг LLM-галлюцинаций).

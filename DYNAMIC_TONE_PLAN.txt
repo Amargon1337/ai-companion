@@ -1,0 +1,84 @@
+ПЛАН РЕАЛИЗАЦИИ: PROMPT-BASED POLICY ENGINE (DYNAMIC TONE V6)
+
+ЦЕЛЬ:
+Имплементация масштабируемого поведенческого ядра с полной изоляцией управляющих состояний, стабильным криптографическим кэшированием и жесткими директивами LLM.
+
+---
+ПОСЛЕДНИЕ АРХИТЕКТУРНЫЕ ПРАВКИ (ФИНАЛЬНЫЙ СРЕЗ):
+1. Изоляция SUB_STATES: Чтобы рефлексия не засорила логику, все сгенерированные LLM состояния уносятся в отдельную структуру `emotional_timeline["signals"] = []`. Управляющий `baseline_state` остается строго типизированным.
+2. Стабильный кэш: Замена `hash()` на `hashlib.sha256()` для стабильности кэша между рестартами приложения (защита от Python hash randomization).
+
+---
+ШАГИ РЕАЛИЗАЦИИ:
+
+ШАГ 1: Архитектура CORE STATES vs SIGNALS в `UserModel`
+1. Зафиксировать жесткий список `CORE_STATES`:
+   `CORE_STATES = {"neutral", "depressed", "anxious", "energized", "angry"}`
+2. Вся кастомная рефлексия от LLM (типа "burnt_out") уходит в `user_model.data["emotional_timeline"]["signals"]`. Они только идут в контекст памяти, не касаясь резолва тона/стратегии.
+3. Чтение `baseline_state`:
+   ```python
+   raw_state = user_model.data.get("emotional_timeline", {}).get("baseline_state", "neutral")
+   if raw_state not in CORE_STATES:
+       logger.warning(f"Invalid CORE state '{raw_state}'. Falling back to 'neutral'.")
+       current_state = "neutral"
+   else:
+       current_state = raw_state
+   ```
+
+ШАГ 2: Профили поведения (Policy Engine Profiles)
+1. CORE: (Максимально стабильное ядро)
+   - Amargon. Ироничный, аналитичный ИИ.
+   - Живой язык, без морализаторства.
+2. TONE_PROFILES (Wording only):
+   - `neutral`: `- постирония\n- лёгкий интернет-цинизм`
+   - `depressed`: `- мягкий и бережный тон\n- заботливые формулировки\n- никакого сарказма`
+   - `anxious`: `- спокойный, структурный тон\n- без резких подколов`
+   - `energized`: `- бодрый и дерзкий тон\n- провокации разрешены`
+   - `angry`: `- холодный, сдержанный тон\n- не зеркалить агрессию`
+3. DIALOGUE_STRATEGY_PROFILES (Behavior only):
+   - `neutral`: `- развивай мысль пользователя\n- веди диалог`
+   - `depressed`: `- валидируй эмоции\n- НИКАКИХ непрошеных советов`
+   - `anxious`: `- своди панику к фактам\n- разбивай проблему на мелкие шаги`
+   - `energized`: `- бросай вызовы\n- мотивируй на действия`
+   - `angry`: `- держи границы\n- не спорь\n- используй логику`
+
+ШАГ 3: "Prompt OS" Директивы и Сборка
+```python
+system_prompt = f"""
+# SYSTEM DIRECTIVES
+Each section is INDEPENDENT. Do not reinterpret, merge or summarize sections.
+Use each section only for its defined purpose.
+
+# PRIORITY ORDER
+1. CORE_PERSONALITY (highest priority)
+2. DIALOGUE_STRATEGY (governs behavior, overrides Tone)
+3. EMOTIONAL_TONE (governs wording only)
+4. CONTEXT
+
+# 1. CORE_PERSONALITY
+{CORE_PERSONALITY}
+
+# 2. DIALOGUE_STRATEGY
+{dynamic_strategy}
+
+# 3. EMOTIONAL_TONE
+{dynamic_tone}
+
+# 4. CONTEXT
+{memory_block}
+"""
+```
+
+ШАГ 4: Стабильное Кэширование (sha256)
+```python
+import hashlib
+prompt_hash_source = f"{current_state}_{mood_intensity}_{dynamic_strategy}_{dynamic_tone}"
+cache_key = hashlib.sha256(prompt_hash_source.encode('utf-8')).hexdigest()
+
+if user_id not in cache or cache[user_id]["key"] != cache_key:
+    # Пересобираем слои
+    cache[user_id] = {"key": cache_key, "compiled_prompt": compiled_blocks}
+```
+
+ОЖИДАЕМЫЙ РЕЗУЛЬТАТ:
+Эталонная реализация Prompt-Based Policy Engine. Стейты строго контролируются, кэш живет стабильно между ребутами, LLM не путается в приоритизации, а стратегия четко изолирована от тона.

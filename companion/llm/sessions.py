@@ -5,18 +5,23 @@ from typing import Any
 
 from companion.config import MODEL_NAME, FINAL_RESPONSE_MODEL
 from companion.llm import client as llm
-from companion.llm.prompts import SYSTEM_INSTRUCTION
+from companion.llm.prompts import CORE_PERSONALITY, TONE_PROFILES, STRATEGY_PROFILES
 from companion.memory.retrieval import RetrievalBudgetManager
 from companion.memory.store import MemoryStore
 from companion.reasoning import reasoning_engine
 from companion.storage.legacy import LegacyStorage
+from companion.user_model import user_model
+import hashlib
 
+_PROMPT_CACHE = {}
 
 def build_system_instruction(
     store: MemoryStore,
     retrieval: RetrievalBudgetManager,
     query: str = "",
 ) -> str:
+    PROMPT_VERSION = "v6"
+    
     notes = LegacyStorage.load_permanent_notes()
     pers_snapshot = store.build_personality_snapshot_text()
     ivan = LegacyStorage.load_memory()
@@ -28,7 +33,6 @@ def build_system_instruction(
     predictions = reasoning_engine.get_prediction_context(query)
     world_model_context = reasoning_engine.get_world_model_context(query)
 
-    from companion.user_model import user_model
     bundle = retrieval.select(
         query=query,
         facts=store.list_facts("active"),
@@ -45,16 +49,54 @@ def build_system_instruction(
     )
     ctx = bundle.to_prompt_block()
 
-    # БЛОК 3: Добавляем master summary в system instruction
-    result = SYSTEM_INSTRUCTION + "\n\n"
+    # --- Policy Engine (Dynamic Tone V6) ---
+    raw_state = user_model.data.get("emotional_timeline", {}).get("baseline_state", "neutral").lower()
+    from companion.user_model import UserModel
+    if raw_state not in UserModel.CORE_STATES:
+        current_state = "neutral"
+    else:
+        current_state = raw_state
 
+    mood_intensity = 1 
+
+    strategy = STRATEGY_PROFILES.get(current_state, STRATEGY_PROFILES["neutral"])
+    tone = TONE_PROFILES.get(current_state, TONE_PROFILES["neutral"])
+
+    prompt_hash_source = f"{PROMPT_VERSION}_{current_state}_{mood_intensity}_{strategy}_{tone}"
+    cache_key = hashlib.sha256(prompt_hash_source.encode('utf-8')).hexdigest()
+
+    if "default" not in _PROMPT_CACHE or _PROMPT_CACHE["default"].get("key") != cache_key:
+        policy_shell = f"""# SYSTEM DIRECTIVES
+Each section is INDEPENDENT. Do not reinterpret, merge or summarize sections.
+Use each section only for its defined purpose.
+
+# PRIORITY ORDER
+1. CORE_PERSONALITY (highest priority)
+2. DIALOGUE_STRATEGY (governs behavior, overrides Tone)
+3. EMOTIONAL_TONE (governs wording only)
+4. CONTEXT
+
+# 1. CORE_PERSONALITY
+{CORE_PERSONALITY}
+
+# 2. DIALOGUE_STRATEGY
+{strategy}
+
+# 3. EMOTIONAL_TONE
+{tone}
+"""
+        _PROMPT_CACHE["default"] = {"key": cache_key, "compiled_prompt": policy_shell}
+        
+    # Context assembly (not cached because it changes every request)
+    memory_block = ""
     if master_summary:
-        result += f"[Master Summary — долговременный контекст]\n{master_summary[:2000]}\n\n"
+        memory_block += f"[Master Summary — долговременный контекст]\n{master_summary[:2000]}\n\n"
+    memory_block += (ctx if ctx else pers_snapshot)
+    memory_block += f"\n\n[ivan.txt — статичная персона]\n{ivan}"
 
-    result += (ctx if ctx else pers_snapshot)
-    result += f"\n\n[ivan.txt — статичная персона]\n{ivan}"
-
-    return result
+    final_system_prompt = _PROMPT_CACHE["default"]["compiled_prompt"] + f"\n# 4. CONTEXT\n{memory_block}\n"
+    
+    return final_system_prompt
 
 
 def create_default_session(
