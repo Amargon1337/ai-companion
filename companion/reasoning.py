@@ -154,6 +154,8 @@ class ReasoningEngine:
     """Движок разума — модель мира, цели, причинность, прогнозы."""
 
     def __init__(self):
+        import threading
+        self._lock = threading.RLock()
         self.world_model = self._load_world_model()
         self._last_wm_save = 0.0
 
@@ -173,27 +175,31 @@ class ReasoningEngine:
         }
 
     def _save_world_model(self) -> None:
-        now = time.time()
-        if now - self._last_wm_save < 10.0:
-            return
-        self._last_wm_save = now
-        os.makedirs(os.path.dirname(WORLD_MODEL_PATH) or ".", exist_ok=True)
-        self.world_model["last_updated"] = datetime.now().isoformat()
-        with open(WORLD_MODEL_PATH, "w", encoding="utf-8") as f:
-            json.dump(self.world_model, f, ensure_ascii=False, indent=2)
+        with self._lock:
+            now = time.time()
+            if now - self._last_wm_save < 10.0:
+                return
+            self._last_wm_save = now
+            os.makedirs(os.path.dirname(WORLD_MODEL_PATH) or ".", exist_ok=True)
+            self.world_model["last_updated"] = datetime.now().isoformat()
+            tmp = WORLD_MODEL_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.world_model, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, WORLD_MODEL_PATH)
 
     def update_world_model_from_message(self, text: str, importance: int = 5) -> None:
         clean = text.strip()
         if len(clean) < 8:
             return
-        contexts = self.world_model.setdefault("active_contexts", [])
-        candidate = clean[:120]
-        if any(candidate.lower() == str(existing).lower() for existing in contexts):
-            return
-        if importance >= 7 or self._is_reasoning_trigger(clean):
-            contexts.append(candidate)
-            self.world_model["active_contexts"] = contexts[-8:]
-            self._save_world_model()
+        with self._lock:
+            contexts = self.world_model.setdefault("active_contexts", [])
+            candidate = clean[:120]
+            if any(candidate.lower() == str(existing).lower() for existing in contexts):
+                return
+            if importance >= 7 or self._is_reasoning_trigger(clean):
+                contexts.append(candidate)
+                self.world_model["active_contexts"] = contexts[-8:]
+                self._save_world_model()
 
     def get_goal_snapshot(self, query: str = "", limit: int = 3) -> list[str]:
         goals = self.list_goals("active")
@@ -311,20 +317,21 @@ class ReasoningEngine:
 
     def add_goal(self, goal: Goal) -> None:
         """Добавить цель. Если похожая уже есть — обновить её (priority, status, updated_at)."""
-        existing = self.list_goals("active")
-        for ex in existing:
-            if text_overlap(ex.title, goal.title) > 0.55:
-                updates = {}
-                if goal.priority != ex.priority:
-                    updates["priority"] = goal.priority
-                if goal.description and goal.description != ex.description:
-                    updates["description"] = goal.description
-                if updates:
-                    updates["status"] = "active"
-                    self.update_goal(ex.goal_id, updates)
-                return
-        append_jsonl(GOALS_PATH, goal.to_dict())
-        rotate_jsonl(GOALS_PATH)
+        with self._lock:
+            existing = self.list_goals("active")
+            for ex in existing:
+                if text_overlap(ex.title, goal.title) > 0.55:
+                    updates = {}
+                    if goal.priority != ex.priority:
+                        updates["priority"] = goal.priority
+                    if goal.description and goal.description != ex.description:
+                        updates["description"] = goal.description
+                    if updates:
+                        updates["status"] = "active"
+                        self.update_goal(ex.goal_id, updates)
+                    return
+            append_jsonl(GOALS_PATH, goal.to_dict())
+            rotate_jsonl(GOALS_PATH)
 
     def list_goals(self, status: str | None = None) -> list[Goal]:
         """Список целей."""
@@ -349,24 +356,27 @@ class ReasoningEngine:
 
     def update_goal(self, goal_id: str, updates: dict[str, Any]) -> bool:
         """Обновить цель (rewrite file)."""
-        goals = self.list_goals()
-        found = False
+        with self._lock:
+            goals = self.list_goals()
+            found = False
 
-        for goal in goals:
-            if goal.goal_id == goal_id:
-                for key, value in updates.items():
-                    if hasattr(goal, key):
-                        setattr(goal, key, value)
-                goal.updated_at = datetime.now().isoformat()
-                found = True
-                break
+            for goal in goals:
+                if goal.goal_id == goal_id:
+                    for key, value in updates.items():
+                        if hasattr(goal, key):
+                            setattr(goal, key, value)
+                    goal.updated_at = datetime.now().isoformat()
+                    found = True
+                    break
 
-        if found:
-            with open(GOALS_PATH, "w", encoding="utf-8") as f:
-                for goal in goals:
-                    f.write(json.dumps(goal.to_dict(), ensure_ascii=False) + "\n")
+            if found:
+                tmp = GOALS_PATH + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    for goal in goals:
+                        f.write(json.dumps(goal.to_dict(), ensure_ascii=False) + "\n")
+                os.replace(tmp, GOALS_PATH)
 
-        return found
+            return found
 
     # ═══ Causal Links ═══
 

@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 MemoryKind = Literal["permanent", "state", "event"]
-FactStatus = Literal["active", "superseded", "inactive", "archived"]
+FactStatus = Literal["active", "superseded", "inactive", "archived", "dormant"]
 RelationType = Literal["supersedes", "contradicts", "confirms", "related_to"]
 QueryIntent = Literal["memory", "world", "mixed"]
 
@@ -31,6 +31,8 @@ class Fact:
     id: str = ""
     created_at: str = ""
     evidence: list[str] = field(default_factory=list)
+    facts_sent_count: int = 0
+    facts_used_count: int = 0
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -133,6 +135,7 @@ class ContextBundle:
     reflections: list[Reflection] = field(default_factory=list)
     summaries: list[str] = field(default_factory=list)
     permanent_notes: str = ""
+    identity_vault_block: str = ""
     personality_snapshot: str = ""
     recent_messages: list[str] = field(default_factory=list)
     active_goals: list[str] = field(default_factory=list)
@@ -140,13 +143,18 @@ class ContextBundle:
     predictions: list[str] = field(default_factory=list)
     world_model_context: str = ""
     user_model_context: str = ""
+    unified_profile_block: str = ""
 
     def to_prompt_block(self) -> str:
         parts: list[str] = []
+        if self.identity_vault_block:
+            parts.append(self.identity_vault_block)
         if self.personality_snapshot:
             parts.append(self.personality_snapshot)
         if self.user_model_context:
             parts.append(self.user_model_context)
+        if self.unified_profile_block:
+            parts.append(self.unified_profile_block)
         if self.permanent_notes:
             parts.append(f"[Постоянная память]\n{self.permanent_notes}")
         if self.recent_messages:

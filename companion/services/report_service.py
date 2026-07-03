@@ -21,7 +21,8 @@ async def show_summary(message: types.Message) -> None:
             await core.send_long_message(message, f"Саммери:\n\n{summary}")
             return
 
-    latest = LegacyStorage.load_latest_summary()
+    latest_list = core.memory_store.load_recent_summaries(1)
+    latest = latest_list[0] if latest_list else ""
     if latest:
         await core.send_long_message(message, f"Последнее саммери:\n\n{latest}")
     else:
@@ -30,10 +31,11 @@ async def show_summary(message: types.Message) -> None:
 
 async def show_personality(message: types.Message) -> None:
     store = core.memory_store
-    personality = store.load_personality()
-    summary = LegacyStorage.load_latest_summary()
+    identity_block = store.identity.to_prompt_block()
+    latest_list = store.load_recent_summaries(1)
+    summary = latest_list[0] if latest_list else ""
     prompt = PERSONALITY_REPORT_PROMPT.format(
-        personality=json.dumps(personality, ensure_ascii=False),
+        personality=identity_block,
         summary=summary,
     )
     await core.send_typing(message)
@@ -94,7 +96,8 @@ async def show_retrospective(message: types.Message, days: int = 30) -> None:
 
 
 async def show_context(message: types.Message) -> None:
-    summary = LegacyStorage.load_latest_summary()
+    latest_list = core.memory_store.load_recent_summaries(1)
+    summary = latest_list[0] if latest_list else ""
     if summary:
         await core.send_long_message(message, f"Последнее саммери:\n\n{summary}")
     else:

@@ -50,6 +50,7 @@ user_message_counts: dict[int, int] = {}
 
 # Rate limiter for LLM requests
 _user_request_times: dict[int, list[float]] = {}
+_compressing_users: set[int] = set()
 _MAX_REQUESTS_PER_MINUTE = 10
 
 # Temportal sync: tracks last user activity timestamp
@@ -100,6 +101,9 @@ async def send_long_message(message: types.Message, text: str) -> None:
             m = _re.search(r"\s", text[max_len - 100:max_len])
             if m:
                 split = max_len - 100 + m.start()
+            else:
+                # No split point found — force split at max_len to prevent infinite loop
+                split = max_len
         await message.answer(text[:split])
         text = text[split:].lstrip()
     if text:
@@ -125,46 +129,66 @@ def _query_text(payload: Any) -> str:
     return ""
 
 
-def _persist_session(user_id: int) -> None:
-    memory_store.db.save_session(user_id, user_message_counts.get(user_id, 0))
+async def _persist_session(user_id: int) -> None:
+    await asyncio.to_thread(memory_store.db.save_session, user_id, user_message_counts.get(user_id, 0))
 
+
+_compression_locks: dict[int, asyncio.Lock] = {}
+
+def _get_compression_lock(user_id: int) -> asyncio.Lock:
+    if user_id not in _compression_locks:
+        _compression_locks[user_id] = asyncio.Lock()
+    return _compression_locks[user_id]
 
 async def compress_and_reset(user_id: int) -> str | None:
     if user_id not in user_chats:
         return None
-    chat = user_chats[user_id]
 
-    max_retries = 2
-    for attempt in range(max_retries):
+    lock = _get_compression_lock(user_id)
+    if lock.locked():
+        logger.info("Compression already in progress for user %d, skipping", user_id)
+        return None
+
+    async with lock:
+        chat = user_chats[user_id]
+        original_count = user_message_counts.get(user_id, 0)
+        # Pre-decrement counter to prevent re-triggering during pipeline
+        user_message_counts[user_id] = 0
+
+        max_retries = 2
         try:
-            summary = await llm.run_llm(run_compress_pipeline, memory_store, chat, user_id)
-            if summary:
-                user_message_counts[user_id] = 0
-                hist = [
-                    llm.history_item("user", f"[Саммери]\n{summary}"),
-                    llm.history_item("model", "Понял."),
-                ]
-                user_chats[user_id] = await llm.run_llm(
-                    create_default_session, memory_store, retrieval_mgr, hist
-                )
-                _persist_session(user_id)
-                return summary
-            else:
-                logger.warning(f"Compress attempt {attempt + 1}/{max_retries} returned empty summary")
+            for attempt in range(max_retries):
+                try:
+                    summary = await run_compress_pipeline(memory_store, chat, user_id)
+                    if summary:
+                        hist = [
+                            llm.history_item("user", f"[Саммери]\n{summary}"),
+                            llm.history_item("model", "Понял."),
+                        ]
+                        user_chats[user_id] = await llm.run_llm(
+                            create_default_session, memory_store, retrieval_mgr, hist
+                        )
+                        await _persist_session(user_id)
+                        return summary
+                    else:
+                        logger.warning(f"Compress attempt {attempt + 1}/{max_retries} returned empty summary")
+                except Exception as e:
+                    logger.error(f"Compress attempt {attempt + 1}/{max_retries} failed: {e}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2)
+
+            user_message_counts[user_id] = user_message_counts.get(user_id, 0) + original_count
+            logger.error(f"Compress failed after {max_retries} attempts for user {user_id}")
+            return None
         except Exception as e:
-            logger.error(f"Compress attempt {attempt + 1}/{max_retries} failed: {e}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(2)
-
-    user_message_counts[user_id] = max(0, user_message_counts[user_id] - 25)
-    logger.error(f"Compress failed after {max_retries} attempts, reduced counter to {user_message_counts[user_id]}")
-    return None
+            logger.error(f"Unexpected error in compress_and_reset: {e}")
+            return None
 
 
-def _restore_sessions() -> None:
+async def _restore_sessions() -> None:
     """Load persisted session state from SQLite into memory."""
     if not user_chats:
-        saved = memory_store.db.load_sessions()
+        saved = await asyncio.to_thread(memory_store.db.load_sessions)
         for uid, count in saved.items():
             if uid not in user_chats:
                 user_message_counts[uid] = count
@@ -174,7 +198,7 @@ def _restore_sessions() -> None:
 
 async def build_context(message: types.Message, content_payload: Any) -> dict | None:
     """Unified preprocessing: rate limit, session, retrieval, policy, grounding."""
-    _restore_sessions()
+    await _restore_sessions()
     uid = message.from_user.id
 
     force_flash = False
@@ -199,20 +223,22 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
         state.user_state = analysis["user_state"]
         state.command = analysis["command"]
 
-        memory_store.log_message(
-            role="user", text=content_payload, importance=analysis["estimated_importance"],
-            mode="default", signals=[], user_id=uid,
+        await asyncio.to_thread(
+            memory_store.log_message,
+            "user", content_payload, analysis["estimated_importance"],
+            "default", [], uid
         )
         state.reasoning_context = await asyncio.to_thread(
             reasoning_engine.auto_reasoning_context, content_payload, analysis["estimated_importance"]
         )
-        await asyncio.to_thread(memory_service.auto_add_event_from_message, content_payload, analysis["estimated_importance"])
+        async with memory_store.lock:
+            await asyncio.to_thread(memory_service.auto_add_event_from_message, content_payload, analysis["estimated_importance"])
 
     intent = state.intent or "memory"
     conf = state.intent_confidence or 0.6
     policy_decision = _get_policy_decision(state, query)
     state.policy_constraints = policy_decision.constraints if policy_decision else None
-    ctx_data = _load_retrieval_context(query, state.reasoning_context)
+    ctx_data = await _load_retrieval_context(query, state.reasoning_context)
 
     # Блокируем web search для технических/кодовых запросов — ответ только из памяти
     _coding_keywords = {"питон", "python", "код", "скрипт", "бот"}
@@ -235,6 +261,21 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
         "force_flash": force_flash, "content_payload": content_payload,
     }
 
+from companion.config import LLM_COMMAND_CONFIDENCE_THRESHOLD
+
+SAFE_COMMANDS = {
+    "show_facts", "show_notes", "export_diary", "show_timeline",
+    "show_context", "week_digest", "retrospective", "selfie",
+    "show_goals", "show_reasoning", "self_description",
+    "knowledge_map", "show_todos", "monthbook", "show_year"
+}
+
+MUTATING_COMMANDS = {
+    "reset_context", "clear_done", "complete_todo",
+    "delete_todo", "add_goal", "diary_entry", "add_todo"
+}
+
+PENDING_COMMANDS: dict[str, dict[str, Any]] = {}
 
 async def _route_command(message: types.Message, command: str, text: str) -> bool:
     """Route a command from LLM analysis to the appropriate service."""
@@ -307,7 +348,6 @@ def _strip_prefix(text: str, prefixes: list[str]) -> str:
 
 
 def is_explicit_search_request(payload: Any) -> bool:
-    import re
     text = ""
     if isinstance(payload, str):
         text = payload
@@ -329,21 +369,47 @@ def is_explicit_search_request(payload: Any) -> bool:
 
 
 async def process_llm_request(message: types.Message, content_payload: Any) -> None:
+    last_activity[message.from_user.id] = time.time()
     ctx = await build_context(message, content_payload)
     if ctx is None:
         return
 
     state = ctx["state"]
 
-    # Route commands via LLM-analyzed intent (only when confidence >= 0.92)
-    if state.intent == "command" and state.command and state.intent_confidence >= 0.92:
+    # Route commands via LLM-analyzed intent
+    if state.intent == "command" and state.command and state.intent_confidence >= LLM_COMMAND_CONFIDENCE_THRESHOLD:
         command = state.command
+        if command in MUTATING_COMMANDS:
+            if not isinstance(ctx["content_payload"], str) or not ctx["content_payload"].startswith("/"):
+                import uuid
+                from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                cmd_id = uuid.uuid4().hex[:8]
+                PENDING_COMMANDS[cmd_id] = {
+                    "command": command,
+                    "payload": str(ctx["content_payload"]),
+                    "uid": ctx["uid"]
+                }
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="✅ Выполнить", callback_data=f"cmd_ok:{cmd_id}"),
+                        InlineKeyboardButton(text="❌ Отмена", callback_data=f"cmd_no:{cmd_id}")
+                    ]
+                ])
+                safe_task(message.answer(
+                    f"⚠️ Команда `{command}` изменяет данные.\n"
+                    f"LLM предложила это действие. Подтвердить выполнение?",
+                    reply_markup=kb
+                ), "destructive_confirm")
+                state.command = None
+                return
+
         try:
             if await _route_command(message, command, str(ctx["content_payload"])):
-                memory_store.log_message(
-                    role="assistant",
-                    text=f"[Выполнена команда: {command}]",
-                    importance=4, mode="command", user_id=ctx["uid"],
+                await asyncio.to_thread(
+                    memory_store.log_message,
+                    "assistant",
+                    f"[Выполнена команда: {command}]",
+                    4, "command", [], ctx["uid"]
                 )
                 return
         finally:
@@ -398,29 +464,61 @@ def _get_policy_decision(state: RuntimeState, query: str) -> Any | None:
     return None
 
 
-def _load_retrieval_context(query: str = "", reasoning_context: dict[str, Any] | None = None):
-    reasoning_context = reasoning_context or reasoning_engine.auto_reasoning_context(query)
+async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, Any] | None = None):
+    """All operations here are blocking I/O (SQLite, file reads, embedding API).
+    Must run via to_thread to avoid freezing the event loop."""
     from companion.user_model import user_model
-    return {
-        "facts": memory_store.list_facts("active"),
-        "reflections": memory_store.list_reflections(),
-        "summaries": LegacyStorage.load_all_summaries()[-3:],
-        "permanent_notes": LegacyStorage.load_permanent_notes(),
-        "personality": memory_store.build_personality_snapshot_text(),
-        "recent": memory_store.recent_messages(min_importance=6, limit=10),
-        "active_goals": reasoning_context.get("active_goals", []),
-        "causal_links": reasoning_context.get("causal_links", []),
-        "predictions": reasoning_context.get("predictions", []),
-        "world_model_context": reasoning_context.get("world_model_context", ""),
-        "user_model_context": user_model.to_prompt_block(),
-    }
+
+    def _load_sync() -> dict[str, Any]:
+        all_facts = memory_store.list_facts("active")
+        if query:
+            search_results = memory_store.search_facts(query, limit=30)
+            searched = [f for f, _ in search_results]
+            faiss_scores = {f.id: score for f, score in search_results}
+            merged = {f.id: f for f in searched}
+            for f in all_facts:
+                if f.memory_kind == "permanent" or f.importance >= 9 or any(
+                    t.lower() in ["pinned", "core_identity", "anchor"] for t in f.tags
+                ):
+                    merged[f.id] = f
+            facts_list = list(merged.values())
+        else:
+            faiss_scores = {}
+            facts_list = all_facts
+
+        return {
+            "facts": facts_list,
+            "reflections": memory_store.search_reflections(query, limit=10) if query else memory_store.list_reflections("active")[:10],
+            "summaries": memory_store.search_summaries(query, limit=3) if query else memory_store.load_recent_summaries(3),
+            "permanent_notes": LegacyStorage.load_permanent_notes(),
+            "identity_vault_block": memory_store.identity.to_prompt_block(),
+            "personality": memory_store.build_personality_snapshot_text(),
+            "user_model_context": user_model.to_prompt_block(),
+            "recent": memory_store.recent_messages(min_importance=6, limit=10),
+            "active_goals": reasoning_context.get("active_goals", []) if reasoning_context else [],
+            "causal_links": reasoning_context.get("causal_links", []) if reasoning_context else [],
+            "predictions": reasoning_context.get("predictions", []) if reasoning_context else [],
+            "world_model_context": reasoning_context.get("world_model_context", "") if reasoning_context else "",
+            "faiss_scores": faiss_scores,
+        }
+
+    return await asyncio.to_thread(_load_sync)
 
 
 async def _init_user_session(uid, query):
-    latest = LegacyStorage.load_latest_summary()
-    hist = ([llm.history_item("user", f"[Контекст]\n{latest}"), llm.history_item("model", "Понял.")] if latest else [])
-    user_chats[uid] = await llm.run_llm(create_default_session, memory_store, retrieval_mgr, hist, query)
-    _persist_session(uid)
+    latest_list = memory_store.load_recent_summaries(1)
+    latest = latest_list[0] if latest_list else ""
+    # Раньше summary-контекст передавался как history, из-за чего guard
+    # "if not history" в create_default_session не срабатывал и последние
+    # сообщения (несжатое окно) НЕ реконструировались → забывание после рестарта.
+    summary_hist = (
+        [llm.history_item("user", f"[Контекст]\n{latest}"), llm.history_item("model", "Понял.")]
+        if latest else []
+    )
+    user_chats[uid] = await llm.run_llm(
+        create_default_session, memory_store, retrieval_mgr, summary_hist, query
+    )
+    await _persist_session(uid)
 
 
 async def _generate_and_send_response(message, chat, state, content_payload, query, ctx_data, policy_decision, uid, force_flash: bool = False):
@@ -429,13 +527,16 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
         bundle = retrieval_mgr.select(
             query=query, facts=ctx_data["facts"], reflections=ctx_data["reflections"],
             summaries=ctx_data["summaries"], permanent_notes=ctx_data["permanent_notes"],
+            identity_vault_block=ctx_data.get("identity_vault_block", ""),
             personality_snapshot=ctx_data["personality"], recent_messages=ctx_data["recent"],
             active_goals=ctx_data.get("active_goals", []),
             causal_links=ctx_data.get("causal_links", []),
             predictions=ctx_data.get("predictions", []),
             world_model_context=ctx_data.get("world_model_context", ""),
             user_model_context=ctx_data.get("user_model_context", ""),
+            unified_profile_block=ctx_data.get("unified_profile_block", ""),
             mood=state.mood_state,
+            faiss_scores=ctx_data.get("faiss_scores", {}),
         )
         ctx = bundle.to_prompt_block()
         user_block = _build_user_prompt_block(content_payload, state.reasoning_context, ctx)
@@ -524,20 +625,18 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
         await send_long_message(message, text)
         msg_rec = None
         if text:
-            msg_rec = memory_store.log_message(role="assistant", text=text[:500], importance=4, mode="default", user_id=uid)
+            msg_rec = await asyncio.to_thread(
+                memory_store.log_message,
+                "assistant", text[:500], 4, "default", [], uid
+            )
         state.llm_response = text
 
         if bundle and msg_rec and text:
             try:
                 fs, fu, gs, gu, rs, ru = _analyze_context_utilization(text, bundle)
-                memory_store.db.insert_retrieval_metrics(
-                    message_id=msg_rec.id,
-                    facts_sent=fs,
-                    facts_used=fu,
-                    goals_sent=gs,
-                    goals_used=gu,
-                    reflections_sent=rs,
-                    reflections_used=ru
+                await asyncio.to_thread(
+                    memory_store.db.insert_retrieval_metrics,
+                    msg_rec.id, fs, fu, gs, gu, rs, ru
                 )
             except Exception as e:
                 logger.error(f"Failed to record retrieval metrics: {e}")
@@ -549,7 +648,8 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
                 safe_task(background_user_model_reflection(state, memory_store), "user_model_reflection")
     except Exception as e:
         logger.error(f"LLM error: {e}")
-        await message.answer(f"API ошибка: {e}")
+        logger.error("LLM error details: %s", e, exc_info=True)
+        await message.answer("Произошла ошибка при обработке запроса. Подробности в логах.")
 
 
 def _analyze_context_utilization(response_text: str, bundle: Any) -> tuple[int, int, int, int, int, int]:
@@ -564,19 +664,29 @@ def _analyze_context_utilization(response_text: str, bundle: Any) -> tuple[int, 
     resp_lower = response_text.lower()
 
     if bundle.facts:
+        sent_ids = []
+        used_ids = []
         for f in bundle.facts:
+            sent_ids.append(f.id)
             f_text = f.fact.lower()
-            words = [w for w in _re.findall(r'[а-яа-яa-z0-9]+', f_text) if len(w) > 3]
-            if not words:
-                continue
-            matches = sum(1 for w in words if w in resp_lower)
-            if matches / len(words) >= 0.5:
-                facts_used += 1
+            words = [w for w in _re.findall(r'[а-яёa-z0-9]+', f_text) if len(w) > 3]
+            used = False
+            if words:
+                matches = sum(1 for w in words if w in resp_lower)
+                if matches / len(words) >= 0.5:
+                    facts_used += 1
+                    used = True
+                    used_ids.append(f.id)
+            
+        try:
+            memory_store.db.increment_fact_usage_batch(sent_ids, used_ids)
+        except Exception as e:
+            logger.error("Failed to batch increment fact usage: %s", e)
 
     if bundle.reflections:
         for r in bundle.reflections:
             r_text = r.insight.lower()
-            words = [w for w in _re.findall(r'[а-яа-яa-z0-9]+', r_text) if len(w) > 3]
+            words = [w for w in _re.findall(r'[а-яёa-z0-9]+', r_text) if len(w) > 3]
             if not words:
                 continue
             matches = sum(1 for w in words if w in resp_lower)
@@ -586,7 +696,7 @@ def _analyze_context_utilization(response_text: str, bundle: Any) -> tuple[int, 
     if bundle.active_goals:
         for g in bundle.active_goals:
             g_clean = _re.sub(r'^•\s*\[\d+/\d+\]\s*', '', g).lower()
-            words = [w for w in _re.findall(r'[а-яа-яa-z0-9]+', g_clean) if len(w) > 3]
+            words = [w for w in _re.findall(r'[а-яёa-z0-9]+', g_clean) if len(w) > 3]
             if not words:
                 continue
             matches = sum(1 for w in words if w in resp_lower)

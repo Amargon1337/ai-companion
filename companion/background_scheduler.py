@@ -130,15 +130,13 @@ async def background_personality_micro_update(state, store) -> None:
         return
 
     try:
-        current = store.load_personality()
-
-        recent = store.recent_messages(min_importance=0, limit=10)
+        # Сбор сырых данных — вне локa (I/O к SQLite).
+        recent = await asyncio.to_thread(store.recent_messages, 0, 10)
         user_messages = [m.text for m in recent if m.role == "user"]
 
         if not user_messages:
             return
 
-        interests = current.get("interests", {})
         all_text = " ".join(user_messages).lower()
 
         topics = [
@@ -149,23 +147,42 @@ async def background_personality_micro_update(state, store) -> None:
             "спорт", "тренировки", "здоровье"
         ]
 
+        # Считаем дельту до входа в критическую секцию.
+        interests_delta: dict[str, int] = {}
         for topic in topics:
             count = all_text.count(topic)
             if count > 0:
-                interests[topic] = interests.get(topic, 0) + count
+                interests_delta[topic] = count
 
-        current["interests"] = interests
-
+        new_change = None
         if state.message_importance >= 7:
-            changes = current.get("changes", [])
-            changes.append({
+            new_change = {
                 "date": datetime.now().strftime("%Y-%m-%d"),
-                "observation": state.user_message[:150]
-            })
-            current["changes"] = changes[-20:]
+                "observation": (state.user_message or "")[:150],
+            }
 
-        current["last_updated"] = datetime.now().isoformat()
-        store.save_personality(current)
+        if not interests_delta and not new_change:
+            return
+
+        def _sync_micro_update(store_ref, delta, change) -> None:
+            curr = store_ref.load_personality()
+            inter = dict(curr.get("interests", {}))
+            for topic, count in delta.items():
+                inter[topic] = inter.get(topic, 0) + count
+            curr["interests"] = inter
+
+            if change:
+                ch_list = list(curr.get("changes", []))
+                ch_list.append(change)
+                curr["changes"] = ch_list[-20:]
+
+            curr["last_updated"] = datetime.now().isoformat()
+            store_ref.save_personality(curr)
+
+        # Критическая секция: read-modify-write под тем же локом, что и
+        # generate_personality_snapshot, иначе перетирают изменения друг друга.
+        async with store.lock:
+            await asyncio.to_thread(_sync_micro_update, store, interests_delta, new_change)
 
         logger.info("Personality micro-update completed")
         _record_success(task_name)

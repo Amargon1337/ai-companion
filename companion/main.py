@@ -32,6 +32,11 @@ class AuthMiddleware(BaseMiddleware):
             if not user or user.id not in ADMIN_IDS:
                 await event.answer("Пошёл нахуй, ты не Иван. Доступ закрыт.")
                 return
+        elif isinstance(event, types.CallbackQuery):
+            user = event.from_user
+            if not user or user.id not in ADMIN_IDS:
+                await event.answer("Доступ закрыт.", show_alert=True)
+                return
         return await handler(event, data)
 
 
@@ -42,15 +47,52 @@ async def run() -> None:
     logger.info("JSONL rotation check complete")
 
     from companion.bot_core import memory_store
+
+    # Migrate timeline events to SQLite if needed
+    from companion.config import TIMELINE_PATH
+    if os.path.exists(TIMELINE_PATH):
+        logger.info("Migrating timeline events from JSONL to SQLite...")
+        try:
+            import json
+            import hashlib
+            events = []
+            with open(TIMELINE_PATH, encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        e = json.loads(line)
+                        events.append(e)
+                    except Exception:
+                        pass
+            if events:
+                for e in events:
+                    h = hashlib.md5(f"{e['date']}_{e['event']}".encode("utf-8")).hexdigest()[:12]
+                    id_ = f"evt_{h}"
+                    memory_store.db.save_event(id_, e["date"], e["event"], e.get("importance", 5), e.get("description", ""))
+            bak_path = TIMELINE_PATH + ".bak"
+            os.rename(TIMELINE_PATH, bak_path)
+            logger.info("Timeline migration complete. Archived to %s", bak_path)
+        except Exception as exc:
+            logger.error("Timeline migration failed: %s", exc)
+
     try:
         result = memory_store.reindex_all()
         logger.info("Vector index initialized: %s", result)
     except Exception as exc:
         logger.warning("Vector index initialization skipped: %s", exc)
 
+    logger.info("Testing embedding API on startup...")
+    if not memory_store.vector.test_embeddings():
+        logger.critical("Embedding API test failed on startup. Disabling vector retrieval.")
+        memory_store.vector.embeddings_enabled = False
+    else:
+        logger.info("Embedding API test successful.")
+
     bot = Bot(token=API_TOKEN)
     dp = Dispatcher()
     dp.message.outer_middleware(AuthMiddleware())
+    dp.callback_query.outer_middleware(AuthMiddleware())
     register_handlers(dp, bot)
     await setup_bot_commands(bot)
 

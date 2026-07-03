@@ -9,27 +9,41 @@ from contextlib import contextmanager
 from collections.abc import Generator
 from typing import Any
 
+def _configure_conn(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA busy_timeout = 5000;")
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA foreign_keys = ON;")
+
 logger = logging.getLogger(__name__)
 
-_EMBEDDING_MODEL = "text-embedding-004"
-_EMBEDDING_DIM = 768  # text-embedding-004 output dimension
+from companion.config import EMBEDDING_MODEL as _EMBEDDING_MODEL
+from companion.config import EMBEDDING_DIM as _EMBEDDING_DIM
 
+
+EMBEDDING_FAILURES = 0
+ZERO_VECTOR_GENERATIONS = 0
+_GENAI_CLIENT = None
+
+
+def _get_genai_client():
+    global _GENAI_CLIENT
+    if _GENAI_CLIENT is None:
+        from google import genai
+        from companion.config import GOOGLE_API_KEY
+
+        if not GOOGLE_API_KEY or "test" in GOOGLE_API_KEY.lower():
+            raise ValueError("Invalid or test GOOGLE_API_KEY")
+        _GENAI_CLIENT = genai.Client(api_key=GOOGLE_API_KEY)
+    return _GENAI_CLIENT
 
 def _embed_texts(texts: list[str]) -> list[list[float]]:
-    """Embed a batch of texts via Gemini API. Falls back to zero vectors on failure."""
+    """Embed a batch of texts via Gemini API."""
     if not texts:
         return []
     try:
-        from google import genai
         from google.genai import types
-        from companion.config import GOOGLE_API_KEY
-        if not GOOGLE_API_KEY or "test" in GOOGLE_API_KEY.lower():
-            return [[0.0] * _EMBEDDING_DIM for _ in texts]
-        client = genai.Client(
-            api_key=GOOGLE_API_KEY,
-            http_options=types.HttpOptions(api_version="v1beta")
-        )
-        
+        client = _get_genai_client()
+
         chunk_size = 90
         all_embeddings = []
         for i in range(0, len(texts), chunk_size):
@@ -37,13 +51,28 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
             result = client.models.embed_content(
                 model=_EMBEDDING_MODEL,
                 contents=chunk,
+                config=types.EmbedContentConfig(output_dimensionality=_EMBEDDING_DIM)
             )
-            all_embeddings.extend([e.values for e in result.embeddings])
-            
+            for embedding in result.embeddings:
+                values = list(embedding.values)
+                if values and not any(values):
+                    global ZERO_VECTOR_GENERATIONS
+                    ZERO_VECTOR_GENERATIONS += 1
+                    logger.warning("Embedding API returned an all-zero vector")
+                all_embeddings.append(values)
+
         return all_embeddings
     except Exception as exc:
-        logger.warning("Embedding API call failed: %s. Using zero vectors.", exc)
-        return [[0.0] * _EMBEDDING_DIM for _ in texts]
+        global EMBEDDING_FAILURES
+        EMBEDDING_FAILURES += 1
+        logger.warning("Embedding API call failed: %s. Total failures: %d", exc, EMBEDDING_FAILURES)
+        raise exc
+
+def get_embedding_stats() -> dict[str, int]:
+    return {
+        "failures": EMBEDDING_FAILURES,
+        "zero_vectors_generated": ZERO_VECTOR_GENERATIONS,
+    }
 
 
 def _float_list_to_blob(vec: list[float]) -> bytes:
@@ -69,12 +98,36 @@ class VectorIndex:
     def __init__(self, path: str | None = None) -> None:
         from companion.config import SQLITE_PATH as _SQLITE_PATH
         self.path = path if path is not None else _SQLITE_PATH
+        import threading
+        self.lock = threading.RLock()
         self._init_table()
+        
+        # In-memory FAISS structures
+        import faiss
+        self.index = faiss.IndexHNSWFlat(_EMBEDDING_DIM, 32)
+        self.content_list: list[str] = []
+        self.hash_list: list[str] = []
+        self.content_type_list: list[str] = []
+        self._is_initialized = False
+        self.embeddings_enabled = True
+        
+        # Load existing database embeddings into memory index at startup
+        self._load_index()
+
+    def test_embeddings(self) -> bool:
+        """Perform a test embedding request to validate API config."""
+        try:
+            vec = _embed_texts(["test validation"])
+            if vec and any(v != 0.0 for v in vec[0]):
+                return True
+            return False
+        except Exception as exc:
+            logger.error("Embedding validation failed on startup: %s", exc)
+            return False
 
     def _init_table(self) -> None:
         with sqlite3.connect(self.path) as conn:
-            conn.execute("PRAGMA journal_mode = WAL;")
-            conn.execute("PRAGMA foreign_keys = ON;")
+            _configure_conn(conn)
             
             # Check if table exists
             table_exists = conn.execute(
@@ -106,13 +159,40 @@ class VectorIndex:
     @contextmanager
     def _conn(self) -> Generator[sqlite3.Connection, None, None]:
         conn = sqlite3.connect(self.path)
-        conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA foreign_keys = ON;")
+        _configure_conn(conn)
         try:
             yield conn
             conn.commit()
         finally:
             conn.close()
+
+    def _load_index(self) -> None:
+        import faiss
+        import numpy as np
+        
+        with self.lock:
+            with self._conn() as conn:
+                rows = conn.execute(
+                    "SELECT content, embedding, content_type FROM embeddings WHERE content_type != 'query'"
+                ).fetchall()
+            
+            self.content_list = []
+            self.hash_list = []
+            self.content_type_list = []
+            arr_vecs = []
+            
+            for content, blob, content_type in rows:
+                arr_vecs.append(_blob_to_float_list(blob))
+                self.content_list.append(content)
+                self.hash_list.append(self._content_hash(content))
+                self.content_type_list.append(content_type)
+                
+            self.index = faiss.IndexHNSWFlat(_EMBEDDING_DIM, 32)
+            if arr_vecs:
+                arr = np.array(arr_vecs, dtype=np.float32)
+                faiss.normalize_L2(arr)
+                self.index.add(arr)
+            self._is_initialized = True
 
     def _content_hash(self, text: str) -> str:
         import hashlib
@@ -121,12 +201,32 @@ class VectorIndex:
     def upsert_embedding(self, text: str, embedding: list[float], content_type: str = "fact") -> None:
         h = self._content_hash(text)
         blob = _float_list_to_blob(embedding)
-        with self._conn() as conn:
-            conn.execute(
-                """INSERT OR REPLACE INTO embeddings (content_hash, content, embedding, content_type)
-                   VALUES (?, ?, ?, ?)""",
-                (h, text, blob, content_type),
-            )
+        with self.lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """INSERT OR REPLACE INTO embeddings (content_hash, content, embedding, content_type)
+                       VALUES (?, ?, ?, ?)""",
+                    (h, text, blob, content_type),
+                )
+                
+            if content_type == "query":
+                return
+                
+            if not self._is_initialized:
+                self._load_index()
+                return
+                
+            if text in self.content_list:
+                return
+            import faiss
+            import numpy as np
+            self.content_list.append(text)
+            self.hash_list.append(h)
+            self.content_type_list.append(content_type)
+            
+            vec = np.array([embedding], dtype=np.float32)
+            faiss.normalize_L2(vec)
+            self.index.add(vec)
 
     def get_embedding(self, text: str) -> list[float] | None:
         h = self._content_hash(text)
@@ -138,57 +238,88 @@ class VectorIndex:
             return _blob_to_float_list(row[0])
         return None
 
-    def compute_and_cache(self, text: str, content_type: str = "fact") -> list[float]:
+    def compute_and_cache(self, text: str, content_type: str = "fact") -> list[float] | None:
+        if not self.embeddings_enabled:
+            return None
         existing = self.get_embedding(text)
         if existing:
             return existing
-        vec = _embed_texts([text])[0]
-        self.upsert_embedding(text, vec, content_type)
-        return vec
+        try:
+            vec = _embed_texts([text])[0]
+            self.upsert_embedding(text, vec, content_type)
+            return vec
+        except Exception:
+            return None
 
     def compute_and_cache_batch(self, texts: list[str], content_type: str = "fact") -> None:
-        missing: list[tuple[int, str]] = []
-        for i, t in enumerate(texts):
-            if not t.strip():
-                continue
-            if self.get_embedding(t) is None:
-                missing.append((i, t))
-        if not missing:
+        if not self.embeddings_enabled:
             return
-        batch_texts = [t for _, t in missing]
+            
+        valid_texts = [t for t in texts if t.strip()]
+        if not valid_texts:
+            return
+            
+        hashes = [self._content_hash(t) for t in valid_texts]
+        hash_to_text = dict(zip(hashes, valid_texts))
+        
+        with self._conn() as conn:
+            query = f"SELECT content_hash FROM embeddings WHERE content_hash IN ({','.join(['?'] * len(hashes))})"
+            rows = conn.execute(query, hashes).fetchall()
+            found_hashes = {row[0] for row in rows}
+            
+        missing_texts = [hash_to_text[h] for h in hashes if h not in found_hashes]
+        
+        if not missing_texts:
+            return
+            
         try:
-            vectors = _embed_texts(batch_texts)
+            vectors = _embed_texts(missing_texts)
         except Exception as exc:
             logger.error("Batch embedding failed: %s", exc)
             return
-        for (_, text), vec in zip(missing, vectors):
+            
+        for text, vec in zip(missing_texts, vectors):
             self.upsert_embedding(text, vec, content_type)
 
     def search(self, query: str, top_k: int = 10, content_type: str | None = None) -> list[dict[str, Any]]:
+        if not self.embeddings_enabled:
+            return []
+        with self.lock:
+            if not self._is_initialized:
+                self._load_index()
+            
         qvec = self.compute_and_cache(query, content_type="query")
-        with self._conn() as conn:
-            if content_type:
-                rows = conn.execute(
-                    "SELECT content, embedding FROM embeddings WHERE content_type=?",
-                    (content_type,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT content, embedding FROM embeddings WHERE content_type != 'query'"
-                ).fetchall()
-
-        scored: list[tuple[float, str]] = []
-        for content, blob in rows:
-            vec = _blob_to_float_list(blob)
-            score = cosine_similarity(qvec, vec)
-            scored.append((score, content))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [
-            {"content": text, "score": round(score, 4)}
-            for score, text in scored[:top_k]
-            if score > 0.3
-        ]
+        if qvec is None:
+            return []
+        
+        import faiss
+        import numpy as np
+        
+        q = np.array([qvec], dtype=np.float32)
+        faiss.normalize_L2(q)
+        
+        with self.lock:
+            ntotal = self.index.ntotal
+            if ntotal == 0:
+                return []
+            distances, indices = self.index.search(q, min(ntotal, top_k * 5))
+            
+            results = []
+            for dist, idx in zip(distances[0], indices[0]):
+                if idx != -1 and idx < len(self.content_list):
+                    if content_type and self.content_type_list[idx] != content_type:
+                        continue
+                    # Convert L2 distance squared of normalized vectors to Cosine Similarity
+                    score = 1.0 - float(dist) / 2.0
+                    if score > 0.3:
+                        results.append({
+                            "content": self.content_list[idx],
+                            "content_hash": self.hash_list[idx],
+                            "score": round(score, 4)
+                        })
+                        if len(results) >= top_k:
+                            break
+            return results
 
     def count(self, content_type: str | None = None) -> int:
         with self._conn() as conn:
@@ -199,6 +330,20 @@ class VectorIndex:
             return conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
 
     def delete_for_content(self, text: str) -> None:
-        h = self._content_hash(text)
-        with self._conn() as conn:
-            conn.execute("DELETE FROM embeddings WHERE content_hash=?", (h,))
+        self.delete_for_content_batch([text])
+
+    def delete_for_content_batch(self, texts: list[str]) -> None:
+        """Удалить несколько эмбеддингов и перестроить индекс ОДИН раз.
+        Раньше delete_for_content делал _load_index() на каждый вызов →
+        apply_importance_decay перестраивал весь HNSW N раз подряд."""
+        if not texts:
+            return
+        hashes = [self._content_hash(t) for t in texts]
+        with self.lock:
+            with self._conn() as conn:
+                conn.executemany(
+                    "DELETE FROM embeddings WHERE content_hash=?",
+                    [(h,) for h in hashes],
+                )
+            # Одна перестройка на весь батч.
+            self._load_index()

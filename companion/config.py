@@ -109,18 +109,26 @@ FINAL_RESPONSE_MODEL = "gemma-4-31b-it"
 # Для поиска с Google Search grounding используем Gemini 2.5 Flash
 # Поддерживает grounding и работает на бесплатном тарифе (июнь 2026)
 SEARCH_MODEL = "gemini-2.5-flash"
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "768"))
 
 SUMMARY_THRESHOLD = 50
-REFLECTION_EVERY_N = 4
 MAX_DOCUMENT_CHARS = 120_000
 RETRIEVAL_CHAR_BUDGET = 50_000
 RETRIEVAL_MAX_FACTS = 25  # Увеличено с 15 до 25
 RETRIEVAL_MAX_REFLECTIONS = 5
+MAX_VIDEO_DOWNLOAD_BYTES = int(os.getenv("MAX_VIDEO_DOWNLOAD_BYTES", str(50 * 1024 * 1024)))
+SPEECH_RECOGNITION_LANGUAGE = os.getenv("SPEECH_RECOGNITION_LANGUAGE", "ru-RU")
 
 # LLM timeouts and retry
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "120"))
 LLM_RETRIES = int(os.getenv("LLM_RETRIES", "3"))
 LLM_RETRY_DELAY = int(os.getenv("LLM_RETRY_DELAY", "4"))
+
+# Memory Settings
+REFLECTION_EVERY_N = int(os.getenv("REFLECTION_EVERY_N", "10"))
+DORMANT_REVIVAL_THRESHOLD = float(os.getenv("DORMANT_REVIVAL_THRESHOLD", "0.80"))
+LLM_COMMAND_CONFIDENCE_THRESHOLD = float(os.getenv("LLM_COMMAND_CONFIDENCE_THRESHOLD", "0.92"))
 
 # Safety settings — пороги блокировки контента Gemini.
 # По умолчанию BLOCK_NONE — фильтрация отключена.

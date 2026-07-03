@@ -25,6 +25,7 @@ def score_message_importance(text: str) -> tuple[int, list[str]]:
         score += 2
         signals.append("emphasis")
     if re.search(r"[А-ЯЁ][а-яё]+", text):
+        score += 1
         signals.append("named_entity")
 
     return max(1, min(10, score)), signals
@@ -61,6 +62,7 @@ def retrieval_score(
     w_importance: float = 0.4,
     w_recency: float = 0.25,
     w_relevance: float = 0.35,
+    faiss_score: float | None = None,
 ) -> float:
     importance = int(fact.get("importance", 5)) / 10.0
     kind = fact.get("memory_kind", "event")
@@ -68,7 +70,9 @@ def retrieval_score(
     recency = decay_factor(age, kind)
 
     relevance = 0.3
-    if query:
+    if faiss_score is not None and faiss_score > 0:
+        relevance = faiss_score
+    elif query:
         q = query.lower()
         ft = fact.get("fact", "").lower()
         tags = [t.lower() for t in fact.get("tags", [])]

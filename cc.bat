@@ -2,7 +2,7 @@
 set ANTHROPIC_BASE_URL=http://localhost:20128/v1 
 set ANTHROPIC_AUTH_TOKEN=sk-e29c6f32461a8a29-5addf8-902df64b 
 set ANTHROPIC_API_KEY= 
-set ANTHROPIC_MODEL=kr/claude-sonnet-4.5 
-set ANTHROPIC_SMALL_FAST_MODEL=kr/claude-sonnet-4.5 
+set ANTHROPIC_MODEL=kr/claude-sonnet-4.5
+set ANTHROPIC_SMALL_FAST_MODEL=kr/claude-sonnet-4.5
 set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 
 claude %*

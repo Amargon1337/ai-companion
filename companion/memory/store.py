@@ -5,18 +5,17 @@ import json
 import logging
 import os
 import re
-import tempfile
 import uuid
 from datetime import datetime
 from typing import Any
 
 from companion.config import (
-    EMPTY_PERSONALITY,
-    PERSONALITY_PATH,
+    DATA_DIR,
 )
 from companion.memory.importance import days_since
 from companion.memory.text_sim import text_overlap
 from companion.memory.vector_index import VectorIndex
+from companion.memory.identity_vault import IdentityVault
 from companion.models import Fact, FactRelation, MessageRecord, Reflection
 from companion.storage.sqlite_db import MemoryDatabase
 
@@ -27,7 +26,110 @@ class MemoryStore:
     def __init__(self) -> None:
         self.db = MemoryDatabase()
         self.vector = VectorIndex()
-        self._personality_cache: dict[str, Any] | None = None
+        self.identity = IdentityVault(self.db.path)
+        import threading
+        self._cache_lock = threading.Lock()
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        """Lock for critical sections reading and mutating state.
+        
+        Contract:
+        - Ownership: The lock protects read-modify-write operations on shared files 
+          (e.g., personality.json) and multi-step dependent DB transactions.
+        - Acquisition: The CALLER (e.g., pipeline, background task) MUST acquire this 
+          lock BEFORE invoking methods that perform read-modify-write cycles. 
+          MemoryStore does NOT acquire this lock internally to avoid deadlocks.
+        - Blocking I/O: Do NOT hold this lock during long blocking I/O (like LLM calls). 
+          Synchronous file I/O inside the lock should be delegated to threads.
+        """
+        import asyncio
+        if not hasattr(self, "_lock"):
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    def _assert_locked(self) -> None:
+        """Debug assertion to ensure the lock was acquired by the caller."""
+        if hasattr(self, "_lock") and not self._lock.locked():
+            logger.warning("DEBUG ASSERTION FAILED: store.lock is not held during critical mutation!")
+
+    # ── Personality ───────────────────────────────────────────────────
+
+    def load_personality(self) -> dict[str, Any]:
+        """Load personality from SQLite DB (meta table). Migrates from personality.json if needed."""
+        from companion.config import PERSONALITY_PATH, EMPTY_PERSONALITY
+        val = self.db.get_meta("personality", "")
+        if val:
+            try:
+                return json.loads(val)
+            except json.JSONDecodeError as e:
+                logger.error("Failed to parse personality from DB: %s", e)
+                
+        # Migration
+        if os.path.exists(PERSONALITY_PATH):
+            try:
+                with open(PERSONALITY_PATH, encoding="utf-8") as f:
+                    data = json.load(f)
+                self.save_personality(data)
+                try:
+                    os.remove(PERSONALITY_PATH)
+                except OSError:
+                    pass
+                return data
+            except (OSError, json.JSONDecodeError) as e:
+                logger.error("Failed to load personality: %s", e)
+        return dict(EMPTY_PERSONALITY)
+
+    def save_personality(self, data: dict[str, Any]) -> None:
+        """Save personality to SQLite DB."""
+        self.db.set_meta("personality", json.dumps(data, ensure_ascii=False))
+
+    def build_personality_snapshot_text(self) -> str:
+        """Build a text representation of personality for prompts.
+
+        Combines IdentityVault (core facts) with personality.json (interests/habits).
+        """
+        parts: list[str] = []
+        # Primary: IdentityVault
+        vault_block = self.identity.to_prompt_block()
+        if vault_block:
+            parts.append(vault_block)
+        # Secondary: personality.json enrichment
+        pers = self.load_personality()
+        interests = pers.get("interests", {})
+        if interests:
+            top = sorted(interests.items(), key=lambda x: x[1], reverse=True)[:7]
+            parts.append("[Интересы]\n" + ", ".join(f"{k}({v})" for k, v in top))
+        relationships = pers.get("relationships", {})
+        if relationships:
+            parts.append("[Отношения]\n" + "\n".join(f"- {k}: {v}" for k, v in relationships.items()))
+        habits = pers.get("habits", {})
+        if habits:
+            parts.append("[Привычки]\n" + "\n".join(f"- {k}: {v}" for k, v in habits.items()))
+        return "\n\n".join(parts)
+
+    def load_master_summary(self) -> str:
+        """Load master summary from SQLite DB (meta table). Migrates from file if needed."""
+        from companion.config import BASE_DIR
+        val = self.db.get_meta("master_summary", "")
+        if val:
+            return val
+            
+        master_path = os.path.join(BASE_DIR, "master_summary.txt")
+        if os.path.exists(master_path):
+            with open(master_path, encoding="utf-8") as f:
+                content = f.read().strip()
+            self.save_master_summary(content)
+            try:
+                os.remove(master_path)
+            except OSError:
+                pass
+            return content
+        return ""
+
+    def save_master_summary(self, content: str) -> None:
+        """Save master summary to SQLite DB (meta table)."""
+        self.db.set_meta("master_summary", content)
 
     # ── Meta ──────────────────────────────────────────────────────────
 
@@ -35,9 +137,7 @@ class MemoryStore:
         return int(self.db.get_meta("compress_count", "0"))
 
     def increment_compress_count(self) -> int:
-        n = self.get_compress_count() + 1
-        self.db.set_meta("compress_count", str(n))
-        return n
+        return self.db.increment_meta("compress_count")
 
     # ── Messages ──────────────────────────────────────────────────────
 
@@ -76,6 +176,10 @@ class MemoryStore:
         self.vector.compute_and_cache(fact.fact, content_type="fact")
         return fact
 
+    def get_fact(self, fact_id: str) -> Fact | None:
+        row = self.db.get_fact(fact_id)
+        return Fact.from_dict(row) if row else None
+
     def list_facts(self, status: str = "active") -> list[Fact]:
         rows = self.db.list_facts(status=status)
         return [Fact.from_dict(r) for r in rows]
@@ -84,56 +188,82 @@ class MemoryStore:
         rows = self.db.list_all_facts()
         return [Fact.from_dict(r) for r in rows]
 
-    def search_facts(self, query: str, limit: int = 20) -> list[Fact]:
+    def revive_dormant_fact(self, fact_id: str) -> None:
+        """Promote a dormant fact back to active status."""
+        with self.db._conn() as conn:
+            conn.execute("UPDATE facts SET status='active', facts_sent_count=0 WHERE id=?", (fact_id,))
+        logger.info("dormant_auto_revival: Fact %s promoted to active", fact_id)
+
+    def search_facts(self, query: str, limit: int = 20, return_scores: bool = False) -> list[tuple[Fact, float]]:
+        active_facts = self.list_facts("active")
+        dormant_facts = self.list_facts("dormant")
+        
         try:
-            results = self.vector.search(query, top_k=limit, content_type="fact")
+            results = self.vector.search(query, top_k=limit * 2, content_type="fact")
             if results:
-                ql = query.lower()
-                seen = set()
-                hits: list[Fact] = []
+                by_hash_active = {self.vector._content_hash(f.fact): f for f in active_facts}
+                by_hash_dormant = {self.vector._content_hash(f.fact): f for f in dormant_facts}
+                seen: set[str] = set()
+                hits: list[tuple[Fact, float]] = []
+                
+                # First search only "active"
                 for r in results:
                     if len(hits) >= limit:
                         break
-                    for f in self.list_facts("active"):
-                        if f.id in seen:
-                            continue
-                        if f.fact == r["content"]:
+                    f = by_hash_active.get(r["content_hash"])
+                    if f and f.id not in seen:
+                        seen.add(f.id)
+                        hits.append((f, r["score"]))
+                        
+                # Then check dormant facts via FAISS
+                for r in results:
+                    if len(hits) >= limit:
+                        break
+                    f = by_hash_dormant.get(r["content_hash"])
+                    if f and f.id not in seen:
+                        from companion.config import DORMANT_REVIVAL_THRESHOLD
+                        if r["score"] >= DORMANT_REVIVAL_THRESHOLD:
                             seen.add(f.id)
-                            hits.append(f)
-                            break
+                            hits.append((f, r["score"]))
+                                
                 if hits:
                     return hits
         except Exception as exc:
             logger.debug("Vector search unavailable, falling back to keyword: %s", exc)
 
         q = query.lower()
-        hits = [
-            f for f in self.list_facts("active")
+        hits_fallback = [
+            f for f in active_facts
             if q in f.fact.lower()
             or any(q in t.lower() for t in f.tags)
         ]
-        if not hits:
-            hits = [
-                f for f in self.list_facts("active")
+        if not hits_fallback:
+            hits_fallback = [
+                f for f in active_facts
                 if any(w in f.fact.lower() for w in q.split() if len(w) > 3)
             ]
-        return hits[:limit]
+        
+        return [(f, 0.0) for f in hits_fallback[:limit]]
 
     def add_relation(self, rel: FactRelation) -> None:
         d = rel.to_dict()
         self.db._insert_relation(d)
         if rel.relation == "supersedes":
             self.db.update_fact_status(rel.to_id, "superseded")
+            old_fact = self.get_fact(rel.to_id)
+            if old_fact and old_fact.fact:
+                self.vector.delete_for_content(old_fact.fact)
 
     def get_active_fact_texts(self) -> list[str]:
         return [f.fact for f in self.list_facts("active")]
 
     def find_similar_fact(self, text: str, threshold: float = 0.52) -> Fact | None:
-        """Dedup via char n-grams — устойчиво к русским окончаниям."""
+        """Dedup via FAISS vector search + n-grams."""
         norm = self._normalize(text)
+        results = self.search_facts(text, limit=5)
         best: Fact | None = None
         best_score = 0.0
-        for f in self.list_facts("active"):
+        for f, _ in results:
             score = text_overlap(norm, self._normalize(f.fact))
             if score > best_score:
                 best_score = score
@@ -155,9 +285,59 @@ class MemoryStore:
         rows = self.db.list_reflections(status=status)
         return [Reflection.from_dict(r) for r in rows]
 
+    def search_reflections(self, query: str, limit: int = 10) -> list[Reflection]:
+        if not query:
+            return self.list_reflections("active")[:limit]
+        results = self.vector.search(query, top_k=limit, content_type="reflection")
+        if not results:
+            return []
+        hit_hashes = {r["content_hash"] for r in results}
+        return [r for r in self.list_reflections("active") if self.vector._content_hash(r.insight) in hit_hashes]
+
+    def search_summaries(self, query: str, limit: int = 3) -> list[str]:
+        if not query:
+            return self.load_recent_summaries(limit)
+        results = self.vector.search(query, top_k=limit, content_type="summary")
+        if not results:
+            return []
+        return [r["content"] for r in results]
+
+    def load_recent_summaries(self, limit: int = 10) -> list[str]:
+        return [r["content"] for r in self.db.list_summaries(status="active", limit=limit)]
+        
+    def save_summary(self, content: str) -> None:
+        summary_id = f"summary_{uuid.uuid4().hex[:10]}"
+        self.db._insert_summary({
+            "id": summary_id,
+            "content": content,
+            "created_at": datetime.now().isoformat(),
+            "status": "active"
+        })
+        self.vector.compute_and_cache(content, content_type="summary")
+        
+        # Enforce 50 active limit
+        active_summaries = self.db.list_summaries(status="active")
+        if len(active_summaries) > 50:
+            to_archive = active_summaries[50:]
+            for s in to_archive:
+                self.db.update_summary_status(s["id"], "archived")
+
+    def update_reflection(self, reflection: Reflection) -> None:
+        with self.db._conn() as conn:
+            conn.execute(
+                "UPDATE reflections SET importance=?, created_at=? WHERE id=?",
+                (reflection.importance, reflection.created_at, reflection.id)
+            )
+
     # ── Beliefs ───────────────────────────────────────────────────────
 
     def add_belief(self, belief: str, based_on: list[str], importance: int = 6) -> None:
+        # Дедуп: не вставляем убеждение, если идентичное (нормализованное) уже есть.
+        # Раньше каждый compress переписывал те же beliefs → 405 строк при 20 уникальных.
+        norm = self._normalize(belief)
+        for existing in self.list_beliefs():
+            if self._normalize(existing.get("belief", "")) == norm:
+                return
         d = {
             "id": f"belief_{uuid.uuid4().hex[:10]}",
             "belief": belief,
@@ -172,51 +352,6 @@ class MemoryStore:
     def list_beliefs(self) -> list[dict[str, Any]]:
         return self.db.list_beliefs()
 
-    # ── Personality snapshot ─────────────────────────────────────────
-
-    def load_personality(self) -> dict[str, Any]:
-        if self._personality_cache is not None:
-            return self._personality_cache
-        try:
-            with open(PERSONALITY_PATH, encoding="utf-8") as f:
-                self._personality_cache = json.load(f)
-                return self._personality_cache
-        except (FileNotFoundError, json.JSONDecodeError):
-            return dict(EMPTY_PERSONALITY)
-
-    def save_personality(self, data: dict[str, Any]) -> None:
-        self._personality_cache = data
-        parent = os.path.dirname(PERSONALITY_PATH) or "."
-        os.makedirs(parent, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=parent, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, PERSONALITY_PATH)
-        except Exception:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-            raise
-
-    def build_personality_snapshot_text(self) -> str:
-        """Compressed personality for retrieval context (not full JSON dump)."""
-        p = self.load_personality()
-        lines = ["[Снимок личности]"]
-        for key in ("values", "fears", "strengths", "weaknesses"):
-            items = p.get(key, [])
-            if items:
-                lines.append(f"{key}: " + "; ".join(str(x) for x in items[:8]))
-        interests = p.get("interests", {})
-        if interests:
-            top = sorted(interests.items(), key=lambda x: x[1], reverse=True)[:10]
-            lines.append("interests: " + ", ".join(f"{k}({v})" for k, v in top))
-        beliefs = p.get("beliefs", [])
-        if beliefs:
-            lines.append("beliefs: " + "; ".join(str(b) for b in beliefs[:10]))
-        changes = p.get("changes", [])
-        if changes:
-            lines.append("recent_changes: " + "; ".join(str(c) for c in changes[-5:]))
-        return "\n".join(lines)
 
     # ── Monthbook data ────────────────────────────────────────────────
 
@@ -237,19 +372,24 @@ class MemoryStore:
         ]
 
     def apply_importance_decay(self) -> int:
-        """Lower effective tier for old low-importance facts — never delete."""
-        updated = 0
+        """Phase 5: Dormant Memory System — never delete, set to dormant."""
+        to_dormant: list[str] = []
+
         for f in self.list_facts("active"):
-            if f.importance >= 8 or f.memory_kind == "permanent":
+            if f.importance >= 8 or f.memory_kind == "permanent" or any(
+                t.lower() in ["anchor", "core_identity", "pinned"] for t in f.tags
+            ):
                 continue
             age = days_since(f.date or f.created_at)
-            if age > 180 and f.importance <= 4 and f.status == "active":
-                self.db.update_fact_status(f.id, "archived")
-                updated += 1
-            elif age > 90 and f.importance <= 3 and f.status == "active":
-                self.db.update_fact_status(f.id, "inactive")
-                updated += 1
-        return updated
+            # Both old thresholds now just move to dormant
+            if age > 90 and f.importance <= 4 and f.status == "active":
+                to_dormant.append(f.id)
+
+        with self.db._conn() as conn:
+            for fid in to_dormant:
+                conn.execute("UPDATE facts SET status='dormant', facts_sent_count=0 WHERE id=?", (fid,))
+
+        return len(to_dormant)
 
     def reindex_all(self) -> dict[str, int]:
         """Reindex all facts, beliefs, reflections, and causal links into vector index."""
@@ -280,10 +420,12 @@ class MemoryStore:
             logger.debug("Causal link indexing skipped: %s", exc)
 
         logger.info("Reindexed %d facts, %d beliefs, %d reflections, %d causal links",
-                     counts["facts"], counts["beliefs"], counts["beliefs"], counts["causal_links"])
+                     counts["facts"], counts["beliefs"], counts["reflections"], counts["causal_links"])
         return counts
 
     def stats(self) -> dict[str, int]:
+        from companion.memory.vector_index import get_embedding_stats
+        estats = get_embedding_stats()
         return {
             "facts_active": self.db.count_facts("active"),
             "facts_total": self.db.count_facts(None),
@@ -291,4 +433,39 @@ class MemoryStore:
             "reflections": len(self.db.list_reflections()),
             "beliefs": len(self.db.list_beliefs()),
             "compress_count": self.get_compress_count(),
+            "embedding_failures": estats.get("failures", 0),
+            "embedding_zero_vectors": estats.get("zero_vectors_generated", 0),
         }
+
+    def analyze_retrieval_effectiveness(self) -> dict[str, int]:
+        """Analyze retrieval metrics and adjust fact importance based on usage patterns."""
+        adjusted = {"boosted": 0, "lowered": 0}
+        try:
+            with self.db._conn() as conn:
+                rows = conn.execute("SELECT id, importance, facts_sent_count, facts_used_count, tags, memory_kind FROM facts WHERE status='active'").fetchall()
+                for row in rows:
+                    fid = row["id"]
+                    imp = int(row["importance"])
+                    sent = int(row["facts_sent_count"])
+                    used = int(row["facts_used_count"])
+                    tags = str(row["tags"] or "").lower()
+                    kind = str(row["memory_kind"] or "").lower()
+                    
+                    if kind == "permanent" or any(t in tags for t in ["anchor", "core_identity", "pinned"]):
+                        continue
+                        
+                    if sent > 10 and used == 0:
+                        new_imp = max(3, imp - 1)
+                        if new_imp != imp:
+                            conn.execute("UPDATE facts SET importance=?, facts_sent_count=0 WHERE id=?", (new_imp, fid))
+                            logger.info("memory_feedback_loop_applied: %s lowered from %d to %d", fid, imp, new_imp)
+                            adjusted["lowered"] += 1
+                    elif sent > 5 and used > 3:
+                        new_imp = min(8, imp + 1)
+                        if new_imp != imp:
+                            conn.execute("UPDATE facts SET importance=? WHERE id=?", (new_imp, fid))
+                            logger.info("memory_feedback_loop_applied: %s boosted from %d to %d", fid, imp, new_imp)
+                            adjusted["boosted"] += 1
+        except Exception as e:
+            logger.error("Retrieval effectiveness analysis failed: %s", e)
+        return adjusted

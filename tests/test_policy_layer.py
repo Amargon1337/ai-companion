@@ -64,3 +64,10 @@ class TestPolicyLayerEnforceConstraints:
             "Ты понял? Пожалуйста, ответь."
         )
         assert result == expected
+
+    def test_preserves_urls_with_query_params(self):
+        text = "Вот ссылка: https://google.com/search?q=python. Будут ли еще вопросы?"
+        constraints = PolicyConstraints(max_questions=1)
+        result = policy_layer.enforce_constraints(text, constraints)
+        assert result == text
+

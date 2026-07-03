@@ -306,3 +306,132 @@ async def run_llm(
             logger.info("Retrying in %ds...", delay)
             await asyncio.sleep(delay)
     raise last_exc or RuntimeError("LLM call failed: unknown error")
+
+
+# ── Structured Outputs with Pydantic ──────────────────────────────────
+
+from pydantic import BaseModel, Field
+from typing import Literal, Dict, List, Optional
+
+class UserMood(BaseModel):
+    anxiety: float = Field(default=0.0, ge=0.0, le=1.0)
+    anger: float = Field(default=0.0, ge=0.0, le=1.0)
+    sadness: float = Field(default=0.0, ge=0.0, le=1.0)
+    energy: float = Field(default=0.5, ge=0.0, le=1.0)
+
+class MessageAnalysis(BaseModel):
+    intent: Literal["world", "memory", "mixed", "command", "chat_casual"]
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    user_mood: UserMood
+    user_state: Literal["ANXIOUS", "DEPRESSED", "CURIOUS", "OVERWHELMED", "NORMAL"]
+    estimated_importance: int = Field(default=5, ge=1, le=10)
+    command: str = Field(default="")
+
+class FactItem(BaseModel):
+    fact: str
+    memory_kind: Literal["permanent", "state", "event"]
+    importance: int = Field(default=5, ge=1, le=10)
+    confidence: float = Field(default=0.75, ge=0.0, le=1.0)
+    tags: List[str] = Field(default_factory=list)
+    evidence_messages: List[str] = Field(default_factory=list)
+
+class FactExtractionResult(BaseModel):
+    facts: List[FactItem]
+
+class ConsolidationItem(BaseModel):
+    new_fact_index: int
+    existing_fact_id: str
+    relation: Literal["supersedes", "contradicts", "confirms", "related_to"]
+    reason: str = Field(default="")
+
+class ConsolidationResult(BaseModel):
+    relations: List[ConsolidationItem]
+
+class CausalLinkItem(BaseModel):
+    cause: str
+    effect: str
+    confidence: float = Field(default=0.75, ge=0.0, le=1.0)
+    evidence: List[str] = Field(default_factory=list)
+    mechanism: str = Field(default="")
+
+class CausalLinkExtractionResult(BaseModel):
+    links: List[CausalLinkItem]
+
+class ReflectionItem(BaseModel):
+    insight: str
+    importance: int = Field(default=7, ge=1, le=10)
+    confidence: float = Field(default=0.75, ge=0.0, le=1.0)
+
+class ReflectionResult(BaseModel):
+    reflections: List[ReflectionItem]
+
+class PersonalityPipelineResult(BaseModel):
+    interests_delta: Dict[str, int] = Field(default_factory=dict)
+    values_to_add: List[str] = Field(default_factory=list)
+    values_to_remove: List[str] = Field(default_factory=list)
+    fears_to_add: List[str] = Field(default_factory=list)
+    fears_to_remove: List[str] = Field(default_factory=list)
+    beliefs_to_add: List[str] = Field(default_factory=list)
+    beliefs_to_remove: List[str] = Field(default_factory=list)
+    motivation_to_add: List[str] = Field(default_factory=list)
+    motivation_to_remove: List[str] = Field(default_factory=list)
+    strengths_to_add: List[str] = Field(default_factory=list)
+    strengths_to_remove: List[str] = Field(default_factory=list)
+    weaknesses_to_add: List[str] = Field(default_factory=list)
+    weaknesses_to_remove: List[str] = Field(default_factory=list)
+    habits_delta: Dict[str, str] = Field(default_factory=dict)
+    relationships_delta: Dict[str, str] = Field(default_factory=dict)
+    addictions_delta: Dict[str, str] = Field(default_factory=dict)
+    changes: List[str] = Field(default_factory=list)
+
+class KnowledgeDomainItem(BaseModel):
+    domain: str
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+
+class KnowledgeDomainsExtractionResult(BaseModel):
+    domains: List[KnowledgeDomainItem]
+
+
+def oneshot_structured(prompt: str, response_schema: type[BaseModel], model: str = MODEL_NAME) -> Any:
+    """Run generate_content with structured JSON output and exponential backoff retries."""
+    import time
+    import json
+    from companion.config import LLM_RETRIES, LLM_RETRY_DELAY
+    last_exc = None
+    config = make_config(
+        response_mime_type="application/json",
+        response_schema=response_schema,
+        temperature=0.1,
+    )
+    for attempt in range(LLM_RETRIES):
+        try:
+            r = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=config,
+            )
+            text = (r.text or "").strip()
+            if not text:
+                raise ValueError("Empty response from model")
+            try:
+                data = json.loads(text)
+                return response_schema.model_validate(data)
+            except json.JSONDecodeError as jde:
+                logger.error("JSON decode failed on attempt %d: %s. Raw text: %r", attempt + 1, jde, text)
+                raise
+            except Exception as ve:
+                logger.error("Pydantic validation failed on attempt %d: %s. Raw text: %r", attempt + 1, ve, text)
+                raise
+        except Exception as e:
+            logger.error("oneshot_structured call failed (attempt %d/%d): %s", attempt + 1, LLM_RETRIES, e)
+            last_exc = e
+            if attempt < LLM_RETRIES - 1:
+                delay = LLM_RETRY_DELAY * (2 ** attempt)
+                time.sleep(delay)
+    raise last_exc or RuntimeError("oneshot_structured call failed: unknown error")
+
+
+async def oneshot_structured_async(prompt: str, response_schema: type[BaseModel], model: str = MODEL_NAME) -> Any:
+    """Async wrapper: runs the blocking structured call in a worker thread."""
+    return await asyncio.to_thread(oneshot_structured, prompt, response_schema, model)
+

@@ -22,7 +22,7 @@ def build_system_instruction(
     ivan = LegacyStorage.load_memory()
 
     # БЛОК 3: SUMMARY STACK - включаем Tier 3 (master summary)
-    master_summary = LegacyStorage.load_master_summary()
+    master_summary = store.load_master_summary()
     active_goals = reasoning_engine.get_goal_snapshot(query)
     causal_links = reasoning_engine.get_relevant_causal_context(query)
     predictions = reasoning_engine.get_prediction_context(query)
@@ -33,8 +33,9 @@ def build_system_instruction(
         query=query,
         facts=store.list_facts("active"),
         reflections=store.list_reflections(),
-        summaries=LegacyStorage.load_all_summaries()[-5:],
+        summaries=store.load_recent_summaries(5),
         permanent_notes=notes,
+        identity_vault_block=store.identity.to_prompt_block(),
         personality_snapshot=pers_snapshot,
         active_goals=active_goals,
         causal_links=causal_links,
@@ -63,13 +64,23 @@ def create_default_session(
     query: str = "",
 ) -> Any:
     # БЛОК 1: RESTART MEMORY RECOVERY
-    # Если history пустая, восстанавливаем последние сообщения из SQLite
-    if not history:
-        history = _reconstruct_recent_history(store)
+    # Всегда реконструируем последние сообщения из SQLite для continuity.
+    # Раньше guard "if not history" пропускал реконструкцию, если передавали
+    # summary-контекст → бот забывал несжатое окно после рестарта.
+    reconstructed = _reconstruct_recent_history(store)
+    base = list(history) if history else []
+    # Deduplicate: reconstructed may overlap with base summary context.
+    # Use text content as key to avoid sending the same message twice.
+    seen_texts = {(m.get("parts", [{}])[0].get("text", "")).strip()
+                  for m in base if m.get("parts")}
+    deduped = [m for m in reconstructed
+               if (m.get("parts", [{}])[0].get("text", "")).strip() not in seen_texts]
+    # summary-контекст первым, затем уникальные недавние реплики.
+    full_history = base + deduped
 
     return llm.client.chats.create(
         model=FINAL_RESPONSE_MODEL,
-        history=history,
+        history=full_history,
         config=llm.make_config(
             system_instruction=build_system_instruction(store, retrieval, query),
             temperature=0.7,

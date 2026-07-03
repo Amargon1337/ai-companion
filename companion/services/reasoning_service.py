@@ -1,6 +1,7 @@
 """Reasoning and task services for NL intents and runtime integration."""
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import datetime
 
@@ -77,7 +78,7 @@ async def show_reasoning_state(message: types.Message) -> None:
 
 
 async def show_todos(message: types.Message) -> None:
-    todos = LegacyStorage.load_todos()
+    todos = await asyncio.to_thread(LegacyStorage.load_todos)
     if not todos:
         await message.answer("Список пуст.")
         return
@@ -90,37 +91,38 @@ async def add_todo(message: types.Message, text: str) -> None:
     if not task_text:
         await message.answer("Что добавить в задачи?")
         return
-    todos = LegacyStorage.load_todos()
+    todos = await asyncio.to_thread(LegacyStorage.load_todos)
     todos.append({"text": task_text, "done": False, "created": datetime.now().isoformat()})
-    LegacyStorage.save_todos(todos)
+    await asyncio.to_thread(LegacyStorage.save_todos, todos)
     await message.answer("Задача добавлена.")
 
 
 async def complete_todo(message: types.Message, text: str) -> None:
-    todos = LegacyStorage.load_todos()
+    todos = await asyncio.to_thread(LegacyStorage.load_todos)
     idx = _extract_index(text) - 1
     if idx < 0 or idx >= len(todos):
         await message.answer("Нет такого номера.")
         return
     todos[idx]["done"] = True
-    LegacyStorage.save_todos(todos)
+    await asyncio.to_thread(LegacyStorage.save_todos, todos)
     await message.answer("Готово.")
 
 
 async def delete_todo(message: types.Message, text: str) -> None:
-    todos = LegacyStorage.load_todos()
+    todos = await asyncio.to_thread(LegacyStorage.load_todos)
     idx = _extract_index(text) - 1
     if idx < 0 or idx >= len(todos):
         await message.answer("Нет такого номера.")
         return
     todos.pop(idx)
-    LegacyStorage.save_todos(todos)
+    await asyncio.to_thread(LegacyStorage.save_todos, todos)
     await message.answer("Готово.")
 
 
 async def clear_done_todos(message: types.Message) -> None:
-    todos = [t for t in LegacyStorage.load_todos() if not t.get("done")]
-    LegacyStorage.save_todos(todos)
+    all_todos = await asyncio.to_thread(LegacyStorage.load_todos)
+    todos = [t for t in all_todos if not t.get("done")]
+    await asyncio.to_thread(LegacyStorage.save_todos, todos)
     await message.answer("Выполненные очищены.")
 
 
@@ -133,7 +135,7 @@ async def show_self_description(message: types.Message) -> None:
 async def show_selfmap(message: types.Message) -> None:
     from companion.self_model import self_model
 
-    km = self_model.data["knowledge_map"]
+    km = self_model.data.get("knowledge_domains", {})
     lines = ["🗺️ Карта моих знаний о тебе:\n", "✅ Глубокое понимание:"]
     for topic in km.get("deep_knowledge", []):
         lines.append(f"  • {topic}")

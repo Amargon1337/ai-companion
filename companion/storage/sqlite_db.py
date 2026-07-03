@@ -8,7 +8,10 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
 
-
+def _configure_conn(conn: sqlite3.Connection) -> None:
+  conn.execute("PRAGMA busy_timeout = 5000;")
+  conn.execute("PRAGMA journal_mode = WAL;")
+  conn.execute("PRAGMA foreign_keys = ON;")
 class MemoryDatabase:
   def __init__(self, path: str | None = None) -> None:
     from companion.config import SQLITE_PATH as _SQLITE_PATH
@@ -18,8 +21,7 @@ class MemoryDatabase:
   @contextmanager
   def _conn(self) -> Generator[sqlite3.Connection, None, None]:
     conn = sqlite3.connect(self.path)
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA foreign_keys = ON;")
+    _configure_conn(conn)
     conn.row_factory = sqlite3.Row
     try:
       yield conn
@@ -95,6 +97,15 @@ class MemoryDatabase:
           created_at TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS timeline (
+          id TEXT PRIMARY KEY,
+          date TEXT NOT NULL,
+          event TEXT NOT NULL,
+          importance INTEGER DEFAULT 5,
+          description TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_timeline_date ON timeline(date);
+
         CREATE TABLE IF NOT EXISTS meta (
           key TEXT PRIMARY KEY,
           value TEXT
@@ -117,13 +128,64 @@ class MemoryDatabase:
           reflections_sent INTEGER,
           reflections_used INTEGER
         );
+        CREATE TABLE IF NOT EXISTS summaries (
+          id TEXT PRIMARY KEY,
+          content TEXT NOT NULL,
+          created_at TEXT,
+          embedding_hash TEXT,
+          status TEXT DEFAULT 'active'
+        );
+        CREATE TABLE IF NOT EXISTS audit_log (
+          audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          table_name TEXT NOT NULL,
+          record_id TEXT NOT NULL,
+          action TEXT NOT NULL,
+          old_state TEXT,
+          new_state TEXT,
+          timestamp TEXT DEFAULT (datetime('now', 'utc'))
+        );
         """
       )
+      
+      # Try to create triggers separately to avoid syntax errors in older SQLite versions on combined executescript
+      try:
+          conn.execute('''
+              CREATE TRIGGER IF NOT EXISTS audit_facts_insert
+              AFTER INSERT ON facts
+              BEGIN
+                  INSERT INTO audit_log (table_name, record_id, action, new_state)
+                  VALUES ('facts', NEW.id, 'INSERT', json_object('fact', NEW.fact, 'status', NEW.status, 'importance', NEW.importance, 'memory_kind', NEW.memory_kind));
+              END;
+          ''')
+          conn.execute('''
+              CREATE TRIGGER IF NOT EXISTS audit_facts_update
+              AFTER UPDATE ON facts
+              BEGIN
+                  INSERT INTO audit_log (table_name, record_id, action, old_state, new_state)
+                  VALUES ('facts', NEW.id, 'UPDATE', 
+                          json_object('fact', OLD.fact, 'status', OLD.status, 'importance', OLD.importance, 'memory_kind', OLD.memory_kind),
+                          json_object('fact', NEW.fact, 'status', NEW.status, 'importance', NEW.importance, 'memory_kind', NEW.memory_kind));
+              END;
+          ''')
+          conn.execute('''
+              CREATE TRIGGER IF NOT EXISTS audit_facts_delete
+              AFTER DELETE ON facts
+              BEGIN
+                  INSERT INTO audit_log (table_name, record_id, action, old_state)
+                  VALUES ('facts', OLD.id, 'DELETE', json_object('fact', OLD.fact, 'status', OLD.status, 'importance', OLD.importance, 'memory_kind', OLD.memory_kind));
+              END;
+          ''')
+      except sqlite3.OperationalError:
+          pass
       try:
         cursor = conn.execute("PRAGMA table_info(facts)")
         cols = [row[1] for row in cursor.fetchall()]
         if "evidence" not in cols:
           conn.execute("ALTER TABLE facts ADD COLUMN evidence TEXT DEFAULT '[]'")
+        if "facts_sent_count" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN facts_sent_count INTEGER DEFAULT 0")
+        if "facts_used_count" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN facts_used_count INTEGER DEFAULT 0")
       except sqlite3.OperationalError:
         pass
 
@@ -141,6 +203,7 @@ class MemoryDatabase:
         row.get("status", "active"), row.get("valid_from"),
         row.get("valid_until"), row.get("schema_version", 1),
         json.dumps(row.get("evidence", []), ensure_ascii=False),
+        row.get("facts_sent_count", 0), row.get("facts_used_count", 0),
       )
       for row in rows
     ]
@@ -148,7 +211,7 @@ class MemoryDatabase:
       conn.executemany(
         """
         INSERT OR IGNORE INTO facts VALUES
-        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         tuples,
       )
@@ -225,11 +288,28 @@ class MemoryDatabase:
       )
 
   def _insert_fact(self, row: dict[str, Any]) -> None:
+    # ON CONFLICT DO UPDATE вместо INSERT OR IGNORE: иначе при совпадении id
+    # (например, повторный импорт/миграция) обновления полей молча терялись.
     with self._conn() as conn:
       conn.execute(
         """
-        INSERT OR IGNORE INTO facts VALUES
-        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        INSERT INTO facts VALUES
+        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+          fact=excluded.fact,
+          date=excluded.date,
+          memory_kind=excluded.memory_kind,
+          importance=excluded.importance,
+          confidence=excluded.confidence,
+          source=excluded.source,
+          source_type=excluded.source_type,
+          tags=excluded.tags,
+          status=excluded.status,
+          valid_from=excluded.valid_from,
+          valid_until=excluded.valid_until,
+          evidence=excluded.evidence,
+          facts_sent_count=excluded.facts_sent_count,
+          facts_used_count=excluded.facts_used_count
         """,
         (
           row["id"], row["fact"], row.get("date"), row.get("created_at"),
@@ -239,6 +319,7 @@ class MemoryDatabase:
           row.get("status", "active"), row.get("valid_from"),
           row.get("valid_until"), row.get("schema_version", 1),
           json.dumps(row.get("evidence", []), ensure_ascii=False),
+          row.get("facts_sent_count", 0), row.get("facts_used_count", 0),
         ),
       )
 
@@ -300,6 +381,20 @@ class MemoryDatabase:
         "INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (key, value),
       )
+      conn.commit()
+
+  def increment_meta(self, key: str, amount: int = 1) -> int:
+    with self._conn() as conn:
+      row = conn.execute(
+        """
+        INSERT INTO meta(key, value) VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(meta.value AS INTEGER) + ? AS TEXT)
+        RETURNING value
+        """,
+        (key, str(amount), amount),
+      ).fetchone()
+      conn.commit()
+      return int(row["value"]) if row else 0
 
   def list_facts(self, status: str | None = "active") -> list[dict[str, Any]]:
     with self._conn() as conn:
@@ -316,6 +411,11 @@ class MemoryDatabase:
 
   def list_all_facts(self) -> list[dict[str, Any]]:
     return self.list_facts(status=None)  # type: ignore[arg-type]
+
+  def get_fact(self, fact_id: str) -> dict[str, Any] | None:
+    with self._conn() as conn:
+      row = conn.execute("SELECT * FROM facts WHERE id=?", (fact_id,)).fetchone()
+      return self._row_fact(row) if row else None
 
   def update_fact_status(self, fact_id: str, status: str) -> None:
     with self._conn() as conn:
@@ -441,3 +541,66 @@ class MemoryDatabase:
           reflections_used,
         ),
       )
+
+  def save_event(self, id_: str, date: str, event: str, importance: int, description: str) -> None:
+    with self._conn() as conn:
+      conn.execute(
+        "INSERT OR IGNORE INTO timeline (id, date, event, importance, description) VALUES (?,?,?,?,?)",
+        (id_, date, event, importance, description),
+      )
+
+  def load_events(self, year: int | None = None) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      if year is not None:
+        rows = conn.execute(
+          "SELECT * FROM timeline WHERE date LIKE ? ORDER BY date ASC",
+          (f"{year}%",),
+        ).fetchall()
+      else:
+        rows = conn.execute(
+          "SELECT * FROM timeline ORDER BY date ASC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+  def increment_fact_usage(self, fact_id: str, used: bool = False) -> None:
+    with self._conn() as conn:
+      if used:
+        conn.execute("UPDATE facts SET facts_sent_count = facts_sent_count + 1, facts_used_count = facts_used_count + 1 WHERE id=?", (fact_id,))
+      else:
+        conn.execute("UPDATE facts SET facts_sent_count = facts_sent_count + 1 WHERE id=?", (fact_id,))
+
+  def increment_fact_usage_batch(self, sent_ids: list[str], used_ids: list[str]) -> None:
+    if not sent_ids and not used_ids:
+      return
+    with self._conn() as conn:
+      if sent_ids:
+        sent_only = [i for i in sent_ids if i not in used_ids]
+        if sent_only:
+          conn.executemany("UPDATE facts SET facts_sent_count = facts_sent_count + 1 WHERE id=?", [(i,) for i in sent_only])
+      if used_ids:
+        conn.executemany("UPDATE facts SET facts_sent_count = facts_sent_count + 1, facts_used_count = facts_used_count + 1 WHERE id=?", [(i,) for i in used_ids])
+
+  def _insert_summary(self, row: dict[str, Any]) -> None:
+    with self._conn() as conn:
+      conn.execute(
+        "INSERT OR IGNORE INTO summaries (id, content, created_at, embedding_hash, status) VALUES (?,?,?,?,?)",
+        (row["id"], row["content"], row.get("created_at"), row.get("embedding_hash"), row.get("status", "active")),
+      )
+
+  def list_summaries(self, status: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      q = "SELECT * FROM summaries"
+      params = []
+      if status:
+        q += " WHERE status=?"
+        params.append(status)
+      q += " ORDER BY created_at DESC"
+      if limit:
+        q += " LIMIT ?"
+        params.append(limit)
+      rows = conn.execute(q, tuple(params)).fetchall()
+    return [dict(r) for r in rows]
+    
+  def update_summary_status(self, summary_id: str, status: str) -> None:
+    with self._conn() as conn:
+      conn.execute("UPDATE summaries SET status=? WHERE id=?", (status, summary_id))

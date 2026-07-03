@@ -93,8 +93,8 @@ async def process_document(
             await message.answer("Не смог прочитать файл.")
             return
         await process_llm(message, payload)
-    except Exception as e:
-        await message.answer(f"Ошибка файла: {e}")
+    except Exception:
+        await message.answer("Ошибка при обработке файла.")
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)

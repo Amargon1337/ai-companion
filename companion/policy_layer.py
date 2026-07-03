@@ -144,16 +144,15 @@ class PolicyLayer:
 
             UserState.OVERWHELMED: [
                 PolicyDecision(
-                    response_mode=ResponseMode.CONCISE,
+                    response_mode=ResponseMode.EMPATHY,
                     constraints=PolicyConstraints(
-                        avoid_long_text=True,
-                        avoid_questions=True,
-                        reduce_cognitive_load=True,
+                        avoid_questions=False,
+                        reduce_cognitive_load=False,
                         provide_structure=True,
-                        max_questions=0,
+                        max_questions=3,
                         tone="supportive",
                     ),
-                    reasoning="При перегрузке — минимум текста, максимум структуры",
+                    reasoning="При перегрузке — даем развернутую поддержку и структуру",
                     confidence=0.88,
                 )
             ],
@@ -172,12 +171,12 @@ class PolicyLayer:
 
             UserState.NEUTRAL: [
                 PolicyDecision(
-                    response_mode=ResponseMode.CONCISE,
+                    response_mode=ResponseMode.EXPLAIN,
                     constraints=PolicyConstraints(
-                        max_questions=1,
+                        max_questions=3,
                         tone="neutral",
                     ),
-                    reasoning="Нейтральное состояние — адаптивный ответ",
+                    reasoning="Нейтральное состояние — развернутый, глубокий ответ",
                     confidence=0.70,
                 )
             ],
@@ -242,10 +241,13 @@ class PolicyLayer:
                     if not part:
                         continue
                     is_sep = bool(re.match(r'^\s+$', part))
+                    is_question = not is_sep and "?" in part
+                    if is_question and any(x in part.lower() for x in ["http://", "https://", "www."]):
+                        is_question = False
                     line_tokens.append({
                         "text": part,
                         "is_sentence": not is_sep,
-                        "is_question": not is_sep and "?" in part
+                        "is_question": is_question
                     })
                 parsed_lines.append({"type": "normal", "tokens": line_tokens})
 

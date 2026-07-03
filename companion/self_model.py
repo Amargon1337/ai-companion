@@ -65,25 +65,13 @@ class SelfModel:
                 "legal_advice": 0.30,  # низкий - не юрист
             },
 
-            # Карта знаний о пользователе (топики)
-            "knowledge_map": {
-                "deep_knowledge": [
-                    "QA и тестирование",
-                    "Python разработка",
-                    "Тревожное расстройство и лечение",
-                    "Морзик (пёс как якорь)",
-                ],
-                "surface_knowledge": [
-                    "Музыкальные предпочтения",
-                    "Детство и школа",
-                    "Семейные отношения",
-                ],
-                "missing_data": [
-                    "Долгосрочные планы и цели",
-                    "Отношения с родителями (детали)",
-                    "Хобби кроме программирования",
-                ]
-            },
+            # Домены знаний о пользователе (заменяет legacy knowledge_map)
+            "knowledge_domains": [
+                {"domain": "QA и тестирование", "confidence": 0.90},
+                {"domain": "Python разработка", "confidence": 0.85},
+                {"domain": "Тревожное расстройство и лечение", "confidence": 0.80},
+                {"domain": "Музыкальные предпочтения", "confidence": 0.60}
+            ],
 
         }
 
@@ -235,38 +223,16 @@ class SelfModel:
             bar = "█" * int(conf * 10) + "░" * (10 - int(conf * 10))
             parts.append(f"  {domain}: [{bar}] {conf:.0%}")
 
-        # Карта знаний
-        km = self.data["knowledge_map"]
-        if km["deep_knowledge"]:
+        # Новые домены знаний (Phase 5)
+        domains = self.data.get("knowledge_domains", [])
+        if domains:
             parts.append("")
-            parts.append("🗺️ Что я знаю о пользователе:")
-            parts.append("  Глубокое понимание: " + ", ".join(km["deep_knowledge"][:3]))
-            if km["surface_knowledge"]:
-                parts.append("  Поверхностное: " + ", ".join(km["surface_knowledge"][:3]))
-            if km["missing_data"]:
-                parts.append("  Пробелы: " + ", ".join(km["missing_data"][:2]))
+            parts.append("📚 Основные домены знаний:")
+            for d in domains:
+                parts.append(f"  • {d['domain']} ({d['confidence']:.0%})")
 
         return "\n".join(parts)
 
-    def update_knowledge_map(
-        self,
-        topic: str,
-        level: str,  # deep_knowledge | surface_knowledge | missing_data
-    ) -> None:
-        """Обновить карту знаний о пользователе."""
-        km = self.data["knowledge_map"]
-
-        # Удалить из других категорий
-        for key in ["deep_knowledge", "surface_knowledge", "missing_data"]:
-            if topic in km.get(key, []):
-                km[key].remove(topic)
-
-        # Добавить в нужную
-        if level in km:
-            if topic not in km[level]:
-                km[level].append(topic)
-
-        self.save()
 
 # Global singleton
 self_model = SelfModel()

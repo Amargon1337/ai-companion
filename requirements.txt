@@ -7,3 +7,5 @@ yt-dlp
 pypdf
 python-docx
 # SQLite встроен в Python 3 — отдельный пакет не нужен
+numpy
+faiss-cpu

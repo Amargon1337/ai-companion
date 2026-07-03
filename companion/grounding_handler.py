@@ -12,19 +12,20 @@ logger = logging.getLogger(__name__)
 
 async def handle_grounding(message, query: str, ctx_data: dict[str, Any], uid: int,
                            retrieval_mgr, memory_store) -> bool:
-    bundle = retrieval_mgr.select(
-        query=query, facts=ctx_data["facts"], reflections=ctx_data["reflections"],
-        summaries=ctx_data["summaries"], permanent_notes=ctx_data["permanent_notes"],
-        personality_snapshot=ctx_data["personality"], recent_messages=ctx_data["recent"],
-        active_goals=ctx_data.get("active_goals", []),
-        causal_links=ctx_data.get("causal_links", []),
-        predictions=ctx_data.get("predictions", []),
-        world_model_context=ctx_data.get("world_model_context", ""),
-    )
-    ctx = bundle.to_prompt_block()
-    from companion.bot_core import send_typing, send_long_message
-    await send_typing(message)
     try:
+        bundle = retrieval_mgr.select(
+            query=query, facts=ctx_data.get("facts", []), reflections=ctx_data.get("reflections", []),
+            summaries=ctx_data.get("summaries", []), permanent_notes=ctx_data.get("permanent_notes", ""),
+            identity_vault_block=ctx_data.get("identity_vault_block", ""),
+            recent_messages=ctx_data.get("recent", []),
+            active_goals=ctx_data.get("active_goals", []),
+            causal_links=ctx_data.get("causal_links", []),
+            predictions=ctx_data.get("predictions", []),
+            world_model_context=ctx_data.get("world_model_context", ""),
+        )
+        ctx = bundle.to_prompt_block()
+        from companion.bot_core import send_typing, send_long_message
+        await send_typing(message)
         text, sources = await llm.run_llm(llm.search_with_grounding, query, ctx)
         reply = f"\U0001f50d {text}"
         if sources:
@@ -40,21 +41,21 @@ async def handle_grounding(message, query: str, ctx_data: dict[str, Any], uid: i
 
 async def grounding_answer_only(query: str, ctx_data: dict[str, Any],
                                 retrieval_mgr) -> str:
-    bundle = retrieval_mgr.select(
-        query=query,
-        facts=ctx_data["facts"],
-        reflections=ctx_data["reflections"],
-        summaries=ctx_data["summaries"],
-        permanent_notes=ctx_data["permanent_notes"],
-        personality_snapshot=ctx_data["personality"],
-        recent_messages=ctx_data["recent"],
-        active_goals=ctx_data.get("active_goals", []),
-        causal_links=ctx_data.get("causal_links", []),
-        predictions=ctx_data.get("predictions", []),
-        world_model_context=ctx_data.get("world_model_context", ""),
-    )
-    context = bundle.to_prompt_block()
     try:
+        bundle = retrieval_mgr.select(
+            query=query,
+            facts=ctx_data.get("facts", []),
+            reflections=ctx_data.get("reflections", []),
+            summaries=ctx_data.get("summaries", []),
+            permanent_notes=ctx_data.get("permanent_notes", ""),
+            identity_vault_block=ctx_data.get("identity_vault_block", ""),
+            recent_messages=ctx_data.get("recent", []),
+            active_goals=ctx_data.get("active_goals", []),
+            causal_links=ctx_data.get("causal_links", []),
+            predictions=ctx_data.get("predictions", []),
+            world_model_context=ctx_data.get("world_model_context", ""),
+        )
+        context = bundle.to_prompt_block()
         text, sources = await llm.run_llm(llm.search_with_grounding, query, context)
         if sources:
             return f"\U0001f50d {text}\n\n\U0001f4ce Источники:\n{sources}"

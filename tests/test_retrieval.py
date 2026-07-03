@@ -79,6 +79,7 @@ class TestRetrievalBudgetManagerSelect:
             query="посмотри в интернете последние новости о погоде",
             facts=sample_facts,
             reflections=[],
+            faiss_scores={f.id: (0.9 if "погода" in f.fact else 0.0) for f in sample_facts}
         )
         fact_texts = {f.fact for f in bundle.facts}
         # Only weather-related fact should remain

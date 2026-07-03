@@ -14,7 +14,6 @@ os.environ.setdefault("LLM_TIMEOUT", "5")
 os.environ.setdefault("LLM_RETRIES", "1")
 
 from companion.memory.retrieval import RetrievalBudgetManager
-from companion.memory.store import MemoryStore
 from companion.models import Fact
 
 
@@ -56,6 +55,7 @@ def mock_chat():
 def memory_store(tmp_path):
     """MemoryStore with SQLite in temp dir."""
     import companion.config as cfg
+    from companion.memory.store import MemoryStore
     original_data_dir = cfg.DATA_DIR
     original_sqlite = cfg.SQLITE_PATH
     cfg.DATA_DIR = str(tmp_path)

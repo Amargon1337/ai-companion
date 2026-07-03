@@ -121,31 +121,20 @@ class LegacyStorage:
 
     @staticmethod
     def save_event(event: str, imp: int, desc: str) -> None:
-        entry = {
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "event": event,
-            "importance": imp,
-            "description": desc,
-        }
-        with open(TIMELINE_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        from companion.bot_core import memory_store
+        import hashlib
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        h = hashlib.md5(f"{date_str}_{event}".encode("utf-8")).hexdigest()[:12]
+        id_ = f"evt_{h}"
+        memory_store.db.save_event(id_, date_str, event, imp, desc)
 
     @staticmethod
     def load_events(year: int | None = None) -> list[dict]:
-        if not os.path.exists(TIMELINE_PATH):
+        from companion.bot_core import memory_store
+        try:
+            return memory_store.db.load_events(year)
+        except Exception:
             return []
-        events = []
-        with open(TIMELINE_PATH, encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                try:
-                    e = json.loads(line)
-                    if year is None or e["date"].startswith(str(year)):
-                        events.append(e)
-                except json.JSONDecodeError:
-                    pass
-        return sorted(events, key=lambda x: x["date"])
 
     @staticmethod
     def save_mood(score: int, tags: list[str], note: str) -> None:
@@ -209,8 +198,11 @@ class LegacyStorage:
     def load_todos() -> list[dict]:
         if not os.path.exists(TODO_PATH):
             return []
-        with open(TODO_PATH, encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(TODO_PATH, encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return []
 
     @staticmethod
     def save_todos(todos: list[dict]) -> None:
@@ -255,7 +247,9 @@ class LegacyStorage:
                 lines = f.read().strip().split("\n")
             if lines:
                 parts.append("[Дневник]\n" + "\n".join(lines[-100:]))
-        lat = LegacyStorage.load_latest_summary()
+        from companion.bot_core import memory_store
+        lat_list = memory_store.load_recent_summaries(1)
+        lat = lat_list[0] if lat_list else ""
         if lat:
             parts.append(f"[Саммери]\n{lat}")
         return parts

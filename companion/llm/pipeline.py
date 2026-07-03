@@ -1,6 +1,7 @@
 """Memory pipeline: compress → facts → consolidation → reflections → personality."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -16,7 +17,9 @@ from companion.llm.prompts import (
     SUMMARY_PROMPT,
 )
 from companion.memory.store import MemoryStore
+from companion.memory.text_sim import text_overlap
 from companion.models import Fact, FactRelation, Reflection
+from companion.storage.legacy import LegacyStorage
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +30,7 @@ def extract_facts(
     message_ids: list[str] | None = None,
 ) -> list[Fact]:
     known = store.get_active_fact_texts()[-40:]
-    msgs = store.recent_messages(min_importance=5, limit=15)
+    msgs = store.recent_messages(min_importance=3, limit=80)
     msg_text = "\n".join(f"- [{m.id}] [{m.importance}/10] {m.text[:300]}" for m in msgs)
 
     prompt = FACT_EXTRACTION_PROMPT.format(
@@ -36,12 +39,8 @@ def extract_facts(
         messages=msg_text or "нет",
     )
     try:
-        raw = llm.parse_json_array(llm.oneshot(prompt))
-        if not raw:
-            logger.warning(
-                f"Fact extraction returned empty array. "
-                f"Prompt length: {len(prompt)}, Known facts: {len(known)}"
-            )
+        result = llm.oneshot_structured(prompt, llm.FactExtractionResult)
+        raw = [f.model_dump() for f in result.facts]
     except Exception as e:
         logger.error(f"Fact extraction failed: {e}")
         return []
@@ -104,12 +103,8 @@ def consolidate_facts(store: MemoryStore, new_facts: list[Fact]) -> None:
         ),
     )
     try:
-        relations = llm.parse_json_array(llm.oneshot(prompt))
-        if not relations:
-            logger.warning(
-                f"Consolidation returned empty array. "
-                f"New facts: {len(new_facts)}, Existing facts: {len(existing)}"
-            )
+        result = llm.oneshot_structured(prompt, llm.ConsolidationResult)
+        relations = [r.model_dump() for r in result.relations]
     except Exception as e:
         logger.error(f"Consolidation failed: {e}")
         return
@@ -152,7 +147,8 @@ def extract_causal_links(store: MemoryStore, new_facts: list[Fact], summary: str
     )
     
     try:
-        raw = llm.parse_json_array(llm.oneshot(prompt))
+        result = llm.oneshot_structured(prompt, llm.CausalLinkExtractionResult)
+        raw = [l.model_dump() for l in result.links]
     except Exception as e:
         logger.error(f"Causal link extraction failed: {e}")
         return
@@ -182,12 +178,8 @@ def generate_reflections(
         summary=summary,
     )
     try:
-        raw = llm.parse_json_array(llm.oneshot(prompt))
-        if not raw:
-            logger.warning(
-                f"Reflection generation returned empty array. "
-                f"Period: {period}, Facts available: {len(facts)}"
-            )
+        result = llm.oneshot_structured(prompt, llm.ReflectionResult)
+        raw = [r.model_dump() for r in result.reflections]
     except Exception as e:
         logger.error(f"Reflection failed: {e}")
         return []
@@ -196,6 +188,25 @@ def generate_reflections(
     based_on = [f.id for f in facts[:10]]
     for item in raw:
         if not isinstance(item, dict) or not item.get("insight"):
+            continue
+        # Phase 3.4: Deduplicate reflections using FAISS
+        new_insight = str(item["insight"]).strip()
+        results = store.vector.search(new_insight, top_k=1, content_type="reflection")
+        is_duplicate = False
+        
+        if results and results[0]["score"] > 0.85:
+            dup_content = results[0]["content"]
+            existing_reflections = store.list_reflections()
+            for existing in existing_reflections:
+                if existing.insight == dup_content:
+                    is_duplicate = True
+                    logger.info("Skipping duplicate reflection (updating existing): %.50s...", new_insight)
+                    existing.importance = min(10, existing.importance + 1)
+                    existing.created_at = datetime.now().isoformat()
+                    store.update_reflection(existing)
+                    break
+                    
+        if is_duplicate:
             continue
         refl = Reflection(
             insight=str(item["insight"]).strip(),
@@ -209,7 +220,23 @@ def generate_reflections(
     return created
 
 
-def generate_personality_snapshot(store: MemoryStore, summary: str) -> dict[str, Any]:
+def _personality_critical_section(store: MemoryStore, updated: dict[str, Any]) -> dict[str, Any]:
+    """Sync critical section for personality update — runs in thread.
+
+    Phase 1.3: Moved out of asyncio.Lock to avoid freezing event loop
+    during blocking file I/O and embedding API calls.
+    """
+    fresh = store.load_personality()
+    merged = _merge_personality(fresh, updated)
+    merged["last_updated"] = datetime.now().isoformat()
+    store.save_personality(merged)
+    for belief in merged.get("beliefs", [])[:20]:
+        if isinstance(belief, str) and belief.strip():
+            store.add_belief(belief.strip(), [f"personality_{merged['last_updated'][:10]}"])
+    return merged
+
+
+async def generate_personality_snapshot(store: MemoryStore, summary: str) -> dict[str, Any]:
     current = store.load_personality()
     facts = store.list_facts("active")
     top_facts = sorted(facts, key=lambda f: f.importance, reverse=True)[:40]
@@ -224,19 +251,12 @@ def generate_personality_snapshot(store: MemoryStore, summary: str) -> dict[str,
         summary=summary[:2000],
     )
     try:
-        updated = llm.parse_json_object(llm.oneshot(prompt))
-        if not isinstance(updated, dict):
-            raise ValueError("personality not a dict")
+        result = await llm.oneshot_structured_async(prompt, llm.PersonalityPipelineResult)
+        updated = result.model_dump()
 
-        # Merge с текущей personality вместо полной замены
-        merged = _merge_personality(current, updated)
-        merged["last_updated"] = datetime.now().isoformat()
-        store.save_personality(merged)
-
-        # Sync beliefs from personality
-        for belief in merged.get("beliefs", [])[:20]:
-            if isinstance(belief, str) and belief.strip():
-                store.add_belief(belief.strip(), [f"personality_{merged['last_updated'][:10]}"])
+        # Phase 1.3: blocking I/O runs in thread, asyncio.Lock held only briefly
+        async with store.lock:
+            merged = await asyncio.to_thread(_personality_critical_section, store, updated)
         return merged
     except Exception as e:
         logger.error(f"Personality pipeline failed: {e}")
@@ -252,25 +272,28 @@ def _merge_personality(old: dict[str, Any], delta: dict[str, Any]) -> dict[str, 
     interests_delta = delta.get("interests_delta", {})
     if not isinstance(interests_delta, dict):
         interests_delta = {}
-    
+
     new_interests = {}
-    # Применяем дельту к существующим
+    # Phase 4.2: Intelligent interest aging with conditional decay.
     for topic, val in old_interests.items():
         weight = float(val)
         if topic in interests_delta:
             weight += float(interests_delta[topic])
         else:
-            # Применяем decay (-0.2), если интерес НЕ был затронут дельтой
-            weight -= 0.2
-        
-        weight = max(1.0, min(10.0, weight))
-        if weight >= 2.0:
-            new_interests[topic] = weight
+            # No mention in this window — gentle decay.
+            # Deep interests (ever reached >= 7) have a floor of 4.0;
+            # this preserves long-term passions while letting abandoned hobbies fade.
+            floor = 4.0 if weight >= 7.0 else 1.0
+            weight = max(floor, weight - 0.1)
+        new_interests[topic] = max(1.0, min(10.0, weight))
 
-    # Добавляем новые интересы из дельты
+    # Добавляем новые интересы из дельты.
     for topic, val in interests_delta.items():
         if topic not in old_interests:
-            weight = max(1.0, min(10.0, float(val)))
+            try:
+                weight = max(1.0, min(10.0, float(val)))
+            except (TypeError, ValueError):
+                continue
             if weight >= 2.0:
                 new_interests[topic] = weight
 
@@ -341,39 +364,60 @@ def _merge_personality(old: dict[str, Any], delta: dict[str, Any]) -> dict[str, 
     return merged
 
 
-def run_compress_pipeline(
+async def run_compress_pipeline(
     store: MemoryStore,
     chat: Any,
     user_id: int,
 ) -> str | None:
-    """Full compress: summary → facts → consolidate → reflection? → personality."""
+    """Full compress: summary → facts → consolidate → reflection? → personality.
+
+    Все этапы с блокирующим I/O (SQLite, файлы, LLM-вызовы) запускаются через
+    to_thread, чтобы не блокировать event loop. Критическая секция personality
+    защищена store.lock.
+    """
+    def _sync_stages() -> tuple[list[Fact], int, str]:
+        """Синхронные этапы, не требующие локa, — в одном потоке."""
+        new_facts = extract_facts(store, summary)
+        # Phase 2.3: Auto-promote high-value facts to permanent
+        for fact in new_facts:
+            if fact.importance >= 8 and fact.confidence >= 0.8:
+                fact.memory_kind = "permanent"
+                if "auto_promoted" not in fact.tags:
+                    fact.tags.append("auto_promoted")
+                store.db._insert_fact(fact.to_dict())
+                count = int(store.db.get_meta("permanent_promotion_count", "0")) + 1
+                store.db.set_meta("permanent_promotion_count", str(count))
+        promoted_count = sum(1 for f in new_facts if "auto_promoted" in f.tags)
+        if promoted_count:
+            logger.info("Auto-promoted %d high-value facts to permanent", promoted_count)
+        consolidate_facts(store, new_facts)
+        extract_causal_links(store, new_facts, summary)
+        compress_n = store.increment_compress_count()
+        return new_facts, compress_n, summary
+
     try:
-        response = chat.send_message(SUMMARY_PROMPT)
+        response = await llm.run_llm(chat.send_message, SUMMARY_PROMPT)
         summary = response.text or ""
         if not summary:
             return None
 
-        from companion.storage.legacy import LegacyStorage  # noqa: PLC0415
+        await asyncio.to_thread(store.save_summary, summary)
 
-        LegacyStorage.save_summary(summary)
+        new_facts, compress_n, summary = await asyncio.to_thread(_sync_stages)
 
-        new_facts = extract_facts(store, summary)
-        consolidate_facts(store, new_facts)
-        extract_causal_links(store, new_facts, summary)
-
-        compress_n = store.increment_compress_count()
         if compress_n % REFLECTION_EVERY_N == 0:
-            generate_reflections(store, summary)
+            await asyncio.to_thread(generate_reflections, store, summary)
 
-        generate_personality_snapshot(store, summary)
-        store.apply_importance_decay()
+        await generate_personality_snapshot(store, summary)
+        await asyncio.to_thread(store.apply_importance_decay)
+        await asyncio.to_thread(store.analyze_retrieval_effectiveness)
 
-        # Обновить knowledge_map на основе новых фактов
-        _update_knowledge_map(new_facts)
+        # Обновить knowledge_domains на основе новых фактов
+        await _update_knowledge_domains_async(new_facts)
 
         # БЛОК 3: AUTO-UPDATE MASTER SUMMARY
         from companion.llm.master_summary import update_master_summary
-        update_master_summary(summary)
+        await asyncio.to_thread(update_master_summary, summary)
 
         logger.info(
             "Compress #%d: %d new facts, summary saved, master summary updated",
@@ -386,38 +430,24 @@ def run_compress_pipeline(
         return None
 
 
-def _update_knowledge_map(new_facts: list[Fact]) -> None:
-    """Автоматически обновить карту знаний на основе новых фактов."""
+async def _update_knowledge_domains_async(new_facts: list[Fact]) -> None:
+    """Автоматически извлечь домены знаний с помощью LLM."""
+    if not new_facts:
+        return
     try:
         from companion.self_model import self_model
-
-        # Анализируем топики в новых фактах
-        topics_counter = {}
-        for fact in new_facts:
-            # Простая эвристика: ключевые слова
-            text_lower = fact.fact.lower()
-
-            # Определяем топик
-            if any(kw in text_lower for kw in ["qa", "тестирование", "баг", "автотест"]):
-                topics_counter["QA и тестирование"] = topics_counter.get("QA и тестирование", 0) + 1
-            if any(kw in text_lower for kw in ["python", "код", "программ", "разработк"]):
-                topics_counter["Python разработка"] = topics_counter.get("Python разработка", 0) + 1
-            if any(kw in text_lower for kw in ["тревог", "паник", "f41", "амитриптилин", "рисперидон"]):
-                topics_counter["Тревожное расстройство и лечение"] = topics_counter.get("Тревожное расстройство и лечение", 0) + 1
-            if any(kw in text_lower for kw in ["аня", "аню", "ани", "тульп"]):
-                topics_counter["Отношения с Аней (тульпа)"] = topics_counter.get("Отношения с Аней (тульпа)", 0) + 1
-            if any(kw in text_lower for kw in ["морзик", "пёс", "собак"]):
-                topics_counter["Морзик (пёс как якорь)"] = topics_counter.get("Морзик (пёс как якорь)", 0) + 1
-            if any(kw in text_lower for kw in ["музык", "песн", "группа", "альбом"]):
-                topics_counter["Музыкальные предпочтения"] = topics_counter.get("Музыкальные предпочтения", 0) + 1
-
-        # Обновляем knowledge_map
-        for topic, count in topics_counter.items():
-            # Если топик упоминается часто - считаем глубоким знанием
-            if count >= 2:
-                self_model.update_knowledge_map(topic, "deep_knowledge")
-            elif count == 1:
-                self_model.update_knowledge_map(topic, "surface_knowledge")
-
+        
+        prompt = (
+            "Extract 3–5 core knowledge domains of the user based on these facts.\n"
+            "Facts:\n" + "\n".join([f.fact for f in new_facts])
+        )
+        
+        result = await llm.oneshot_structured_async(prompt, llm.KnowledgeDomainsExtractionResult)
+        
+        domains_list = [{"domain": str(d.domain), "confidence": float(d.confidence)} for d in result.domains]
+        self_model.data["knowledge_domains"] = domains_list
+        self_model.save()
+        logger.info("Knowledge domains updated: %s", domains_list)
+        
     except Exception as e:
-        logger.error(f"Knowledge map update error: {e}")
+        logger.error(f"Knowledge domains update error: {e}")

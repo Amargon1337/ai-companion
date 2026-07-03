@@ -1,6 +1,7 @@
 """Memory and timeline services reused by commands and NL intents."""
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from datetime import datetime
@@ -26,8 +27,10 @@ async def remember_text(message: types.Message, note: str) -> None:
         await message.answer("Что запомнить? Используй `/remember <текст>` или напиши `запомни ...`.", parse_mode="Markdown")
         return
 
-    LegacyStorage.save_permanent_note(note)
-    core.memory_store.add_fact(core.fact_from_permanent_note(note))
+    async with core.memory_store.lock:
+        await asyncio.to_thread(LegacyStorage.save_permanent_note, note)
+        fact = core.fact_from_permanent_note(note)
+        await asyncio.to_thread(core.memory_store.add_fact, fact)
     uid = message.from_user.id
     core.user_chats.pop(uid, None)
     core.user_message_counts.pop(uid, None)
@@ -38,7 +41,8 @@ async def show_facts(message: types.Message, query: str = "") -> None:
     store = core.memory_store
     args = query.strip()
     if args:
-        hits = store.search_facts(args, limit=15)
+        results = store.search_facts(args, limit=15)
+        hits = [f for f, _ in results]
         if not hits:
             await message.answer(f"Фактов по '{args}' нет.")
             return
@@ -116,6 +120,8 @@ def auto_add_event_from_message(text: str, importance: int) -> Fact | None:
     if any(e.get("event", "") == title for e in recent[-10:]):
         return None
 
+    # Note: auto_add_event_from_message is synchronous, so it MUST be called via to_thread.
+    # But since it's synchronous, we leave the signature sync, and callers wrap it.
     LegacyStorage.save_event(title, min(10, max(5, importance)), clean[:500])
     fact = Fact(
         fact=clean[:500],

@@ -1,0 +1,401 @@
+================================================================================
+EXOCORTEX (СЫН) - АРХИТЕКТУРНЫЙ АУДИТ И СТРУКТУРА ПРОЕКТА
+================================================================================
+
+1. ДЕРЕВО ДИРЕКТОРИЙ
+--------------------------------------------------------------------------------
+companion/
+├── __init__.py
+├── background_scheduler.py
+├── bot_core.py
+├── config.py
+├── critique_manager.py
+├── documents.py
+├── grounding_handler.py
+├── handlers
+│   ├── __init__.py
+│   ├── chat.py
+│   └── media.py
+├── intents.py
+├── llm
+│   ├── __init__.py
+│   ├── analyzer.py
+│   ├── client.py
+│   ├── grounding.py
+│   ├── master_summary.py
+│   ├── pipeline.py
+│   ├── prompts.py
+│   ├── sessions.py
+│   └── shadow_eval.py
+├── main.py
+├── memory
+│   ├── __init__.py
+│   ├── identity_vault.py
+│   ├── importance.py
+│   ├── retrieval.py
+│   ├── rollback.py
+│   ├── store.py
+│   ├── text_sim.py
+│   ├── unified_profile.py
+│   └── vector_index.py
+├── models.py
+├── policy_layer.py
+├── reasoning.py
+├── runtime_state.py
+├── self_model.py
+├── services
+│   ├── __init__.py
+│   ├── memory_service.py
+│   ├── reasoning_service.py
+│   └── report_service.py
+├── storage
+│   ├── __init__.py
+│   ├── jsonl.py
+│   ├── legacy.py
+│   └── sqlite_db.py
+└── user_model.py
+
+2. СПИСОК МОДУЛЕЙ И ФУНКЦИОНАЛ
+--------------------------------------------------------------------------------
+Модуль: background_scheduler.py (197 строк)
+Роль: Background task scheduler — circuit breaker, reflection, personality micro-update.
+  Ключевые функции:
+    - safe_task: Fire-and-forget with semaphore, exception logging to logger + self_errors.jsonl.
+    - cancel_all_tasks: Cancel all active background tasks and wait for them to finish.
+    - background_user_model_reflection: Фоновое обновление user model через reflection.
+    - background_personality_micro_update: Без описания
+    - run_background_tasks: Без описания
+
+Модуль: bot_core.py (695 строк)
+Роль: Core bot runtime: sessions, LLM routing, compress.
+  Ключевые функции:
+    - proactive_ping_loop: Every 30 min: ping users inactive >12h during daytime.
+    - send_typing: Send typing indicator once.
+    - send_long_message: Без описания
+    - wait_gemini_file_ready: Без описания
+    - compress_and_reset: Без описания
+    - build_context: Unified preprocessing: rate limit, session, retrieval, policy, grounding.
+    - is_explicit_search_request: Без описания
+    - process_llm_request: Без описания
+    - check_rate_limit: Без описания
+    - fact_from_permanent_note: Без описания
+
+Модуль: config.py (163 строк)
+Роль: Configuration, paths, constants.
+
+Модуль: critique_manager.py (45 строк)
+Роль: Self-critique logic — response quality evaluation and adjustment.
+  Ключевые функции:
+    - run_self_critique: Без описания
+    - apply_critique_to_text: Без описания
+
+Модуль: documents.py (100 строк)
+Роль: Document upload processing.
+  Ключевые функции:
+    - read_text_file: Без описания
+    - extract_pdf: Без описания
+    - extract_docx: Без описания
+    - extract_content: Без описания
+    - process_document: Без описания
+
+Модуль: grounding_handler.py (74 строк)
+Роль: Grounding handler — search_with_grounding integration and fallback.
+  Ключевые функции:
+    - handle_grounding: Без описания
+    - grounding_answer_only: Без описания
+    - should_retry_with_grounding: Без описания
+
+Модуль: intents.py (7 строк)
+Роль: Intent routing — replaced by LLM-based analyzer in companion.llm.analyzer. This file is kept for backward...
+
+Модуль: main.py (141 строк)
+Роль: Application entry — bot startup.
+  Классы:
+    - AuthMiddleware: Без описания
+  Ключевые функции:
+    - run: Без описания
+    - main: Без описания
+
+Модуль: models.py (181 строк)
+Роль: Data models for memory architecture.
+  Классы:
+    - Fact: Без описания
+    - FactRelation: Без описания
+    - MessageRecord: Без описания
+    - Reflection: Без описания
+    - ContextBundle: Selected context for a single LLM request.
+
+Модуль: policy_layer.py (444 строк)
+Роль: Policy Layer — выбор поведения, а не текста. Вместо: LLM → генерирует текст Нужно: State → Policy → Action Пример:...
+  Классы:
+    - UserState: Состояние пользователя.
+    - ResponseMode: Режим ответа.
+    - PolicyConstraints: Ограничения на поведение.
+    - PolicyDecision: Решение о поведении.
+    - PolicyLayer: Слой выбора поведения.
+
+Модуль: reasoning.py (558 строк)
+Роль: Reasoning Engine — активная модель мира, цели, причинно-следственные связи.
+  Классы:
+    - Goal: Долговременная цель пользователя.
+    - CausalLink: Причинно-следственная связь между событиями.
+    - Prediction: Прогноз о будущем состоянии.
+    - ReasoningEngine: Движок разума — модель мира, цели, причинность, прогнозы.
+
+Модуль: runtime_state.py (21 строк)
+Роль: RuntimeState — state object for passing data between modules.
+  Классы:
+    - RuntimeState: Без описания
+
+Модуль: self_model.py (245 строк)
+Роль: Self-awareness model — бот знает о себе, своих ошибках и ограничениях.
+  Классы:
+    - SelfModel: Модель самосознания бота.
+
+Модуль: user_model.py (336 строк)
+Роль: User Model — целостная модель пользователя как системы.
+  Классы:
+    - UserModel: Целостная модель пользователя как системы.
+
+Модуль: __init__.py (3 строк)
+Роль: Personal AI companion — memory architecture.
+
+Модуль: handlers\chat.py (173 строк)
+Роль: Chat handlers — public companion command surface and text ingress.
+  Ключевые функции:
+    - get_main_keyboard: Без описания
+    - register: Без описания
+
+Модуль: handlers\media.py (108 строк)
+Роль: Media handlers — voice, photo, video, document, tiktok.
+  Ключевые функции:
+    - register: Без описания
+
+Модуль: handlers\__init__.py (28 строк)
+Роль: Telegram handlers package.
+  Ключевые функции:
+    - register_handlers: Без описания
+    - setup_bot_commands: Без описания
+
+Модуль: llm\analyzer.py (88 строк)
+Роль: Unified LLM-based message analyzer — replaces mood_lite, importance heuristics, intent regex.
+  Ключевые функции:
+    - analyze_message: Analyze user message using Gemini structured output.
+
+Модуль: llm\client.py (437 строк)
+Роль: Gemini API client wrapper.
+  Классы:
+    - UserMood: Без описания
+    - MessageAnalysis: Без описания
+    - FactItem: Без описания
+    - FactExtractionResult: Без описания
+    - ConsolidationItem: Без описания
+    - ConsolidationResult: Без описания
+    - CausalLinkItem: Без описания
+    - CausalLinkExtractionResult: Без описания
+    - ReflectionItem: Без описания
+    - ReflectionResult: Без описания
+    - PersonalityPipelineResult: Без описания
+    - KnowledgeDomainItem: Без описания
+    - KnowledgeDomainsExtractionResult: Без описания
+  Ключевые функции:
+    - make_config: Без описания
+    - make_search_config: Без описания
+    - history_item: Без описания
+    - oneshot: Без описания
+    - parse_json_array: Без описания
+    - parse_json_object: Без описания
+    - format_grounding_sources: Без описания
+    - search_with_grounding: Google Search с grounding через Gemini 2.5 Flash.
+    - upload_file: Без описания
+    - get_file: Без описания
+
+Модуль: llm\grounding.py (67 строк)
+Роль: Search Grounding Router — memory | world | mixed.
+  Ключевые функции:
+    - classify_intent: Return intent and confidence 0..1.
+
+Модуль: llm\master_summary.py (113 строк)
+Роль: Master Summary Management — БЛОК 3: Tier 3 долговременный контекст.
+  Ключевые функции:
+    - update_master_summary: БЛОК 3: AUTO-UPDATE MASTER SUMMARY
+
+Модуль: llm\pipeline.py (453 строк)
+Роль: Memory pipeline: compress → facts → consolidation → reflections → personality.
+  Ключевые функции:
+    - extract_facts: Без описания
+    - consolidate_facts: Без описания
+    - extract_causal_links: Без описания
+    - generate_reflections: Без описания
+    - generate_personality_snapshot: Без описания
+    - run_compress_pipeline: Full compress: summary → facts → consolidate → reflection? → personality.
+
+Модуль: llm\prompts.py (200 строк)
+Роль: System prompts and LLM task templates.
+
+Модуль: llm\sessions.py (127 строк)
+Роль: Chat session management with retrieval-augmented system prompts.
+  Ключевые функции:
+    - build_system_instruction: Без описания
+    - create_default_session: Без описания
+
+Модуль: llm\shadow_eval.py (32 строк)
+Роль: Shadow evaluation (вторая модель проверяет первую).
+  Ключевые функции:
+    - evaluate_identity_change: Shadow evaluates if a proposed identity change is valid or a [...]
+
+Модуль: llm\__init__.py (39 строк)
+Роль: LLM integration.
+
+Модуль: memory\identity_vault.py (177 строк)
+Роль: IdentityVault - Phase 2 Memory Preservation system.
+  Классы:
+    - IdentityVault: Без описания
+
+Модуль: memory\importance.py (98 строк)
+Роль: Importance scoring and decay — never delete, only lower relevance.
+  Ключевые функции:
+    - score_message_importance: Heuristic importance 1-10 for a single message.
+    - decay_factor: Returns multiplier 0..1. Permanent facts barely decay.
+    - days_since: Без описания
+    - retrieval_score: Без описания
+
+Модуль: memory\retrieval.py (243 строк)
+Роль: Retrieval Budget Manager — ranked context within token budget.
+  Классы:
+    - RetrievalBudgetManager: Без описания
+  Ключевые функции:
+    - mood_to_retrieval_boost: Преобразует mood в retrieval boost для факта.
+
+Модуль: memory\rollback.py (133 строк)
+Роль: Git-like rollback for memory state using the audit_log.
+  Классы:
+    - RollbackManager: Без описания
+
+Модуль: memory\store.py (477 строк)
+Роль: Unified memory store — facts, messages, relations, reflections, beliefs.
+  Классы:
+    - MemoryStore: Без описания
+
+Модуль: memory\text_sim.py (32 строк)
+Роль: Lightweight Russian-friendly text similarity via character n-grams.
+  Ключевые функции:
+    - get_ngrams: Без описания
+    - get_mixed_ngrams: 2- и 3-граммы — лучше ловят русские окончания.
+    - text_overlap: Без описания
+
+Модуль: memory\unified_profile.py (152 строк)
+Роль: Unified Profile — Phase 4 Shadow Mode.
+  Классы:
+    - UnifiedProfile: Merges UserModel and Personality in shadow mode.
+
+Модуль: memory\vector_index.py (323 строк)
+Роль: Vector index — embedding caching and cosine similarity search via Gemini API.
+  Классы:
+    - VectorIndex: Manages embedding storage in SQLite and provides vector search.
+  Ключевые функции:
+    - get_embedding_stats: Без описания
+    - cosine_similarity: Без описания
+
+Модуль: memory\__init__.py (3 строк)
+Роль: Инициализатор пакета.
+
+Модуль: services\memory_service.py (136 строк)
+Роль: Memory and timeline services reused by commands and NL intents.
+  Ключевые функции:
+    - parse_year_from_text: Без описания
+    - remember_text: Без описания
+    - show_facts: Без описания
+    - show_notes: Без описания
+    - add_diary_entry: Без описания
+    - export_diary: Без описания
+    - show_timeline: Без описания
+    - show_year: Без описания
+    - auto_add_event_from_message: Без описания
+
+Модуль: services\reasoning_service.py (169 строк)
+Роль: Reasoning and task services for NL intents and runtime integration.
+  Ключевые функции:
+    - reset_context: Без описания
+    - show_goals: Без описания
+    - add_goal_from_text: Без описания
+    - show_reasoning_state: Без описания
+    - show_todos: Без описания
+    - add_todo: Без описания
+    - complete_todo: Без описания
+    - delete_todo: Без описания
+    - clear_done_todos: Без описания
+    - show_self_description: Без описания
+
+Модуль: services\report_service.py (137 строк)
+Роль: Report and profile services reused by commands and NL intents.
+  Ключевые функции:
+    - show_summary: Без описания
+    - show_personality: Без описания
+    - show_selfie: Без описания
+    - show_week_digest: Без описания
+    - show_monthbook: Без описания
+    - show_retrospective: Без описания
+    - show_context: Без описания
+
+Модуль: services\__init__.py (1 строк)
+Роль: Service layer for AI Companion First flows.
+
+Модуль: storage\jsonl.py (79 строк)
+Роль: Append-only JSONL utilities.
+  Ключевые функции:
+    - read_jsonl: Без описания
+    - append_jsonl: Без описания
+    - rotate_jsonl: Rotate JSONL file if it exceeds size or line count. Archive old file(s).
+
+Модуль: storage\legacy.py (259 строк)
+Роль: Legacy file storage — diary, summaries, timeline, mood, etc.
+  Классы:
+    - LegacyStorage: Без описания
+
+Модуль: storage\sqlite_db.py (578 строк)
+Роль: SQLite backend — Phase 5, used as primary store with jsonl mirror.
+  Классы:
+    - MemoryDatabase: Без описания
+
+Модуль: storage\__init__.py (10 строк)
+Роль: Инициализатор пакета.
+
+3. ВЗАИМОСВЯЗИ И ЗАВИСИМОСТИ
+--------------------------------------------------------------------------------
+АРХИТЕКТУРНЫЕ СЛОИ И ПОТОКИ ДАННЫХ:
+1. Точки входа (Entry Points):
+   - main.py: Инициализирует бота (Aiogram), поднимает планировщик задач, запускает polling.
+   - handlers/chat.py & media.py: Принимают пользовательские сообщения, формируют базовый запрос.
+
+2. Ядро и Память (Core & Memory):
+   - memory/store.py (MemoryStore): Централизованный фасад. Использует storage/sqlite_db.py для SQL-хранения.
+   - memory/vector_index.py: Интеграция с FAISS для семантического поиска.
+   - memory/rollback.py: Обеспечивает транзакционность и согласованность между SQL и векторным индексом.
+
+3. Контекст и Рассуждение (Reasoning):
+   - bot_core.py: Содержит тяжелую логику агрегации контекста (_load_retrieval_context), работает в thread pool.
+   - services/reasoning_service.py: Анализирует цели, причинно-следственные связи.
+   - llm/pipeline.py: Сборка промптов, вызов LLM (llm/client.py) и обработка structured output.
+
+4. Модели пользователя и личности (Identity):
+   - user_model.py: Анализирует взаимодействие, формирует портрет собеседника.
+   - self_model.py: Формирует самосознание бота, его архитектурную и личностную идентичность.
+
+5. Фоновые процессы (Background Tasks):
+   - background_scheduler.py: Регулярное микро-обновление личности и рефлексия без блокировки основного event loop.
+
+4. СТАТИСТИКА ПРОЕКТА
+--------------------------------------------------------------------------------
+Общий объём Python-кода (в companion/): 8082 строк.
+Топ-10 самых крупных модулей:
+  - bot_core.py: 695 строк
+  - storage\sqlite_db.py: 578 строк
+  - reasoning.py: 558 строк
+  - memory\store.py: 477 строк
+  - llm\pipeline.py: 453 строк
+  - policy_layer.py: 444 строк
+  - llm\client.py: 437 строк
+  - user_model.py: 336 строк
+  - memory\vector_index.py: 323 строк
+  - storage\legacy.py: 259 строк

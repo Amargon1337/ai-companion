@@ -19,15 +19,48 @@ _LLM_PARSE_OBJ_RETURN = {
     "habits_delta": {}
 }
 
+class MockStructuredResult:
+    def __init__(self, data):
+        self.data = data
+        if "interests_delta" in data:
+            for k, v in data.items():
+                setattr(self, k, v)
+        else:
+            class MockFact:
+                def __init__(self, d): self.d = d
+                def model_dump(self): return self.d
+            self.facts = [MockFact(d) for d in data]
+
+    def model_dump(self):
+        return self.data
+
+def mock_oneshot_structured(prompt, schema, *args, **kwargs):
+    schema_name = getattr(schema, "__name__", str(schema))
+    if "FactExtractionResult" in schema_name:
+        return MockStructuredResult(_LLM_PARSE_RETURN)
+    elif "ConsolidationResult" in schema_name:
+        class MockConsolidation:
+            relations = []
+        return MockConsolidation()
+    elif "CausalLinkExtractionResult" in schema_name:
+        class MockLinks:
+            links = []
+        return MockLinks()
+    elif "KnowledgeDomainsExtractionResult" in schema_name:
+        class MockDomains:
+            domains = []
+        return MockDomains()
+    return MockStructuredResult(_LLM_PARSE_OBJ_RETURN)
 
 @patch("companion.llm.client.parse_json_object", return_value=_LLM_PARSE_OBJ_RETURN)
 @patch("companion.llm.client.parse_json_array", return_value=_LLM_PARSE_RETURN)
-@patch("companion.llm.client.oneshot", return_value=_LLM_ONESHOT_RETURN)
+@patch("companion.llm.client.oneshot_structured", side_effect=mock_oneshot_structured)
 def test_run_compress_pipeline_returns_summary(mock_oneshot, mock_parse, mock_parse_obj, mock_chat, memory_store):
-    with patch("companion.storage.legacy.LegacyStorage.save_summary") as mock_save, \
-         patch("companion.storage.legacy.LegacyStorage.load_master_summary", return_value=""), \
-         patch("companion.storage.legacy.LegacyStorage.save_master_summary"):
-        result = run_compress_pipeline(memory_store, mock_chat, 12345)
+    with patch.object(memory_store, "save_summary") as mock_save, \
+         patch.object(memory_store, "load_master_summary", return_value=""), \
+         patch.object(memory_store, "save_master_summary"):
+        import asyncio
+        result = asyncio.run(run_compress_pipeline(memory_store, mock_chat, 12345))
 
     assert result == "Test summary response."
     mock_chat.send_message.assert_called_once()
@@ -36,38 +69,47 @@ def test_run_compress_pipeline_returns_summary(mock_oneshot, mock_parse, mock_pa
 
 @patch("companion.llm.client.parse_json_object", return_value=_LLM_PARSE_OBJ_RETURN)
 @patch("companion.llm.client.parse_json_array", return_value=_LLM_PARSE_RETURN)
-@patch("companion.llm.client.oneshot", return_value=_LLM_ONESHOT_RETURN)
+@patch("companion.llm.client.oneshot_structured", side_effect=mock_oneshot_structured)
 def test_run_compress_pipeline_empty_response(mock_oneshot, mock_parse, mock_parse_obj, memory_store):
     chat = MagicMock()
     response = MagicMock()
     response.text = ""
-    chat.send_message.return_value = response
+    # Use AsyncMock for send_message if run_llm makes it async, or normal mock if not.
+    # Wait, run_llm awaits chat.send_message, so it should return an awaitable.
+    async def mock_send(*args, **kwargs):
+        return response
+    chat.send_message = mock_send
 
-    result = run_compress_pipeline(memory_store, chat, 12345)
+    import asyncio
+    result = asyncio.run(run_compress_pipeline(memory_store, chat, 12345))
     assert result is None
 
 
 @patch("companion.llm.client.parse_json_object", return_value=_LLM_PARSE_OBJ_RETURN)
 @patch("companion.llm.client.parse_json_array", return_value=_LLM_PARSE_RETURN)
-@patch("companion.llm.client.oneshot", return_value=_LLM_ONESHOT_RETURN)
+@patch("companion.llm.client.oneshot_structured", side_effect=mock_oneshot_structured)
 def test_run_compress_pipeline_increments_count(mock_oneshot, mock_parse, mock_parse_obj, mock_chat, memory_store):
-    with patch("companion.storage.legacy.LegacyStorage.save_summary"), \
-         patch("companion.storage.legacy.LegacyStorage.load_master_summary", return_value=""), \
-         patch("companion.storage.legacy.LegacyStorage.save_master_summary"):
+    with patch.object(memory_store, "save_summary"), \
+         patch.object(memory_store, "load_master_summary", return_value=""), \
+         patch.object(memory_store, "save_master_summary"):
+        import asyncio
         c0 = memory_store.get_compress_count()
-        run_compress_pipeline(memory_store, mock_chat, 12345)
+        asyncio.run(run_compress_pipeline(memory_store, mock_chat, 12345))
         c1 = memory_store.get_compress_count()
     assert c1 == c0 + 1
 
 
 @patch("companion.llm.client.parse_json_object", return_value=_LLM_PARSE_OBJ_RETURN)
 @patch("companion.llm.client.parse_json_array", return_value=_LLM_PARSE_RETURN)
-@patch("companion.llm.client.oneshot", return_value=_LLM_ONESHOT_RETURN)
+@patch("companion.llm.client.oneshot_structured", side_effect=mock_oneshot_structured)
 def test_run_compress_pipeline_error_handling(mock_oneshot, mock_parse, mock_parse_obj, memory_store):
     chat = MagicMock()
-    chat.send_message.side_effect = RuntimeError("API failure")
+    async def mock_send(*args, **kwargs):
+        raise RuntimeError("API failure")
+    chat.send_message = mock_send
 
-    result = run_compress_pipeline(memory_store, chat, 12345)
+    import asyncio
+    result = asyncio.run(run_compress_pipeline(memory_store, chat, 12345))
     assert result is None
 
 
@@ -110,8 +152,8 @@ def test_merge_personality_differential_and_decay():
     assert merged["interests"]["QA и автоматизация"] == 9.0
     # Python: 5.0 - 2.0 = 3.0
     assert merged["interests"]["Python"] == 3.0
-    # История: not in delta, decay -0.2 applied -> 2.1 - 0.2 = 1.9 (< 2.0, so pruned)
-    assert "История" not in merged["interests"]
+    # История: not in delta, decay -0.1 applied -> 2.1 - 0.1 = 2.0
+    assert merged["interests"]["История"] == pytest.approx(2.0)
     # Философия: new interest -> 3.0
     assert merged["interests"]["Философия"] == 3.0
 

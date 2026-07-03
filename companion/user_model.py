@@ -71,6 +71,8 @@ class UserModel:
     """Целостная модель пользователя как системы."""
 
     def __init__(self):
+        import threading
+        self._lock = threading.RLock()
         self.data: dict[str, Any] = {
             "identity": {
                 "who_they_are": "",
@@ -104,9 +106,10 @@ class UserModel:
 
     def to_prompt_block(self) -> str:
         """Сборка профиля пользователя для промпта."""
-        identity = self.data.get("identity", {})
-        patterns = self.data.get("patterns", {})
-        timeline = self.data.get("emotional_timeline", {})
+        with self._lock:
+            identity = self.data.get("identity", {})
+            patterns = self.data.get("patterns", {})
+            timeline = self.data.get("emotional_timeline", {})
 
         parts = []
 
@@ -200,82 +203,128 @@ class UserModel:
             raw = await aio_oneshot(prompt, MODEL_NAME)
             res = parse_json_object(raw)
 
-            # Apply updates
+            # --- SHADOW EVALUATION (Drift Control) ---
+            from companion.llm.shadow_eval import evaluate_identity_change
             identity_updates = res.get("identity_updates", {})
-            patterns_updates = res.get("patterns_updates", {})
-            emotional_updates = res.get("emotional_updates", {})
+            who_new = identity_updates.get("who_they_are")
+            if who_new:
+                with self._lock:
+                    who_old = self.data.get("identity", {}).get("who_they_are", "")
+                is_valid = await evaluate_identity_change("core_identity", who_old, who_new)
+                if not is_valid:
+                    identity_updates["who_they_are"] = "" # Block drift
+                    res.setdefault("reflection", {}).setdefault("discoveries", []).append("ShadowEvaluator blocked core_identity drift.")
+            # -----------------------------------------
 
-            # 1. Identity
-            identity = self.data.setdefault("identity", {})
-            if identity_updates.get("who_they_are"):
-                identity["who_they_are"] = identity_updates["who_they_are"]
-            if identity_updates.get("who_they_think_they_are"):
-                identity["who_they_think_they_are"] = identity_updates["who_they_think_they_are"]
-            if identity_updates.get("who_they_want_to_be"):
-                identity["who_they_want_to_be"] = identity_updates["who_they_want_to_be"]
-            if identity_updates.get("who_they_fear_becoming"):
-                identity["who_they_fear_becoming"] = identity_updates["who_they_fear_becoming"]
+            with self._lock:
+                # identity_updates already resolved (with shadow eval applied)
+                patterns_updates = res.get("patterns_updates", {})
+                emotional_updates = res.get("emotional_updates", {})
 
-            # Lists to append (with deduplication)
-            for key, updates_key in [("core_traits", "core_traits_to_add"),
-                                     ("values", "values_to_add"),
-                                     ("roles", "roles_to_add")]:
-                lst = identity.setdefault(key, [])
-                for item in identity_updates.get(updates_key, []):
-                    if item and item not in lst:
-                        lst.append(item)
+                # 1. Identity
+                identity = self.data.setdefault("identity", {})
+                if identity_updates.get("who_they_are"):
+                    identity["who_they_are"] = identity_updates["who_they_are"]
+                if identity_updates.get("who_they_think_they_are"):
+                    identity["who_they_think_they_are"] = identity_updates["who_they_think_they_are"]
+                if identity_updates.get("who_they_want_to_be"):
+                    identity["who_they_want_to_be"] = identity_updates["who_they_want_to_be"]
+                if identity_updates.get("who_they_fear_becoming"):
+                    identity["who_they_fear_becoming"] = identity_updates["who_they_fear_becoming"]
 
-            # 2. Patterns
-            patterns = self.data.setdefault("patterns", {})
-            for key, updates_key in [("actions", "actions_to_add"),
-                                     ("mistakes", "mistakes_to_add"),
-                                     ("coping_mechanisms", "coping_mechanisms_to_add")]:
-                lst = patterns.setdefault(key, [])
-                for item in patterns_updates.get(updates_key, []):
-                    if item and item not in lst:
-                        lst.append(item)
+                # Lists to append (with deduplication)
+                for key, updates_key in [("core_traits", "core_traits_to_add"),
+                                         ("values", "values_to_add"),
+                                         ("roles", "roles_to_add")]:
+                    lst = identity.setdefault(key, [])
+                    for item in identity_updates.get(updates_key, []):
+                        if item and item not in lst:
+                            lst.append(item)
 
-            # 3. Emotional Timeline
-            timeline = self.data.setdefault("emotional_timeline", {})
-            for key, updates_key in [("improvement_triggers", "improvement_triggers_to_add"),
-                                     ("deterioration_triggers", "deterioration_triggers_to_add")]:
-                lst = timeline.setdefault(key, [])
-                for item in emotional_updates.get(updates_key, []):
-                    if item and item not in lst:
-                        lst.append(item)
-            if emotional_updates.get("baseline_state"):
-                timeline["baseline_state"] = emotional_updates["baseline_state"]
+                # 2. Patterns
+                patterns = self.data.setdefault("patterns", {})
+                for key, updates_key in [("actions", "actions_to_add"),
+                                         ("mistakes", "mistakes_to_add"),
+                                         ("coping_mechanisms", "coping_mechanisms_to_add")]:
+                    lst = patterns.setdefault(key, [])
+                    for item in patterns_updates.get(updates_key, []):
+                        if item and item not in lst:
+                            lst.append(item)
 
-            # Populate reflection log
-            res_reflection = res.get("reflection", {})
-            for k in ["discoveries", "confirmations", "falsifications", "belief_changes",
-                      "pattern_observations", "emotional_notes", "recurring_themes"]:
-                reflection[k] = res_reflection.get(k, [])
+                # 3. Emotional Timeline
+                timeline = self.data.setdefault("emotional_timeline", {})
+                for key, updates_key in [("improvement_triggers", "improvement_triggers_to_add"),
+                                         ("deterioration_triggers", "deterioration_triggers_to_add")]:
+                    lst = timeline.setdefault(key, [])
+                    for item in emotional_updates.get(updates_key, []):
+                        if item and item not in lst:
+                            lst.append(item)
+                if emotional_updates.get("baseline_state"):
+                    timeline["baseline_state"] = emotional_updates["baseline_state"]
+
+                # Populate reflection log
+                res_reflection = res.get("reflection", {})
+                for k in ["discoveries", "confirmations", "falsifications", "belief_changes",
+                          "pattern_observations", "emotional_notes", "recurring_themes"]:
+                    reflection[k] = res_reflection.get(k, [])
 
         except Exception as e:
             logger.error("Failed to perform user model reflection via LLM: %s", e)
             reflection["discoveries"].append(f"Reflection LLM failed: {e}")
 
-        # Update metadata
-        self.data["total_interactions"] += 1
-        self.data["last_updated"] = datetime.now().isoformat()
-        self._save_model()
-        self._log_reflection(reflection)
+        with self._lock:
+            # Update metadata
+            self.data["total_interactions"] += 1
+            self.data["last_updated"] = datetime.now().isoformat()
+            self._save_model()
+            self._log_reflection(reflection)
+
+            # Sync to IdentityVault
+            from companion.bot_core import memory_store
+            ident = self.data.get("identity", {})
+            if ident.get("who_they_are"):
+                memory_store.identity.update_identity("core_identity", ident["who_they_are"], explicit_overwrite=True)
+            if ident.get("who_they_want_to_be"):
+                memory_store.identity.update_identity("ambitions", ident["who_they_want_to_be"], explicit_overwrite=True)
+            if ident.get("who_they_fear_becoming"):
+                memory_store.identity.update_identity("fears", ident["who_they_fear_becoming"], explicit_overwrite=True)
+            if ident.get("core_traits"):
+                memory_store.identity.update_identity("core_traits", ", ".join(ident["core_traits"]), explicit_overwrite=True)
+            if ident.get("values"):
+                memory_store.identity.update_identity("values", ", ".join(ident["values"]), explicit_overwrite=True)
+            if ident.get("roles"):
+                memory_store.identity.update_identity("roles", ", ".join(ident["roles"]), explicit_overwrite=True)
 
         return reflection
 
     def _save_model(self):
-        os.makedirs(os.path.dirname(USER_MODEL_PATH) or ".", exist_ok=True)
-        with open(USER_MODEL_PATH, "w", encoding="utf-8") as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=2)
+        from companion.storage.sqlite_db import MemoryDatabase
+        db = MemoryDatabase()
+        db.set_meta("user_model", json.dumps(self.data, ensure_ascii=False))
 
     def _load_model(self):
+        from companion.storage.sqlite_db import MemoryDatabase
+        db = MemoryDatabase()
+        val = db.get_meta("user_model", "")
+        if val:
+            try:
+                self.data = json.loads(val)
+                return
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to load user model from DB: {e}")
+        
+        # Migrate from legacy file
         if os.path.exists(USER_MODEL_PATH):
             try:
                 with open(USER_MODEL_PATH, encoding="utf-8") as f:
                     self.data = json.load(f)
+                self._save_model()
+                try:
+                    os.remove(USER_MODEL_PATH)
+                except OSError:
+                    pass
             except (OSError, json.JSONDecodeError) as e:
-                logger.error(f"Failed to load user model: {e}")
+                logger.error(f"Failed to migrate user model: {e}")
 
     def _log_reflection(self, reflection: dict[str, Any]):
         append_jsonl(MODEL_UPDATES_LOG, reflection)
