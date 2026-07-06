@@ -23,3 +23,8 @@ anya_memory.json
 permanent_notes.txt
 master_summary.txt
 yearbook_*.txt
+*.log
+*.db
+*.db-wal
+*.db-shm
+data/
