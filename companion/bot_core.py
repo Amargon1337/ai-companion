@@ -553,19 +553,23 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
 
     desired_model = "gemini-3.1-flash-lite" if force_flash else "gemma-4-31b-it"
     current_model = getattr(chat, "model", None)
+    
+    # We must unconditionally recreate the chat session on every turn to inject the updated RAG context
+    # into the system_instruction, because we no longer inject it into the user_block.
     if current_model != desired_model:
-        logger.info(f"[ROUTER] Recreating chat session: switching model from {current_model} to {desired_model}")
-        history = chat.get_history()
-        from companion.llm.sessions import build_system_instruction
-        chat = llm.client.chats.create(
-            model=desired_model,
-            history=history,
-            config=llm.make_config(
-                system_instruction=build_system_instruction(memory_store, retrieval_mgr, query),
-                temperature=0.7,
-            )
+        logger.info(f"[ROUTER] Switching model from {current_model} to {desired_model}")
+        
+    history = chat.get_history() if hasattr(chat, "get_history") else getattr(chat, "history", getattr(chat, "_curated_history", []))
+    from companion.llm.sessions import build_system_instruction
+    chat = llm.client.chats.create(
+        model=desired_model,
+        history=history,
+        config=llm.make_config(
+            system_instruction=build_system_instruction(memory_store, retrieval_mgr, query),
+            temperature=0.7,
         )
-        user_chats[uid] = chat
+    )
+    user_chats[uid] = chat
 
     try:
         async def typing_loop():
@@ -739,6 +743,6 @@ def _build_user_prompt_block(content_payload: str, reasoning_context: dict[str, 
         parts.append("[Режим reasoning]\nПользователь спрашивает о причинах. Используй причинно-следственный анализ, если контекст это поддерживает.")
     if reasoning_context.get("future_trigger"):
         parts.append("[Режим reasoning]\nПользователь спрашивает о будущем. Учитывай прогнозы, условия и степень неопределенности.")
-    if retrieval_context:
-        parts.append(f"[Релевантная память для контекста]\n{retrieval_context}")
+    # REMOVED: Do not inject retrieval_context into the user message history to prevent 429 quota exhaustion and 260k context limit violation.
+    # It is already injected into the system instruction.
     return "\n\n".join(parts)

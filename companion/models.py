@@ -148,34 +148,44 @@ class ContextBundle:
     def to_prompt_block(self) -> str:
         parts: list[str] = []
         if self.identity_vault_block:
-            parts.append(self.identity_vault_block)
+            parts.append(f"<system_identity>\n{self.identity_vault_block}\n</system_identity>")
+        
+        user_profile_parts = []
         if self.personality_snapshot:
-            parts.append(self.personality_snapshot)
+            user_profile_parts.append(self.personality_snapshot)
         if self.user_model_context:
-            parts.append(self.user_model_context)
+            user_profile_parts.append(self.user_model_context)
         if self.unified_profile_block:
-            parts.append(self.unified_profile_block)
+            user_profile_parts.append(self.unified_profile_block)
+        if user_profile_parts:
+            parts.append("<user_profile>\n" + "\n\n".join(user_profile_parts) + "\n</user_profile>")
+            
+        memory_parts = []
         if self.permanent_notes:
-            parts.append(f"[Постоянная память]\n{self.permanent_notes}")
+            memory_parts.append(f"[Постоянная память]\n{self.permanent_notes}")
         if self.recent_messages:
-            parts.append("[Недавние реплики]\n" + "\n".join(self.recent_messages))
+            memory_parts.append("[Недавние реплики]\n" + "\n".join(self.recent_messages))
         if self.active_goals:
-            parts.append("[Активные цели]\n" + "\n".join(self.active_goals))
+            memory_parts.append("[Активные цели]\n" + "\n".join(self.active_goals))
         if self.causal_links:
-            parts.append("[Причинно-следственный контекст]\n" + "\n".join(self.causal_links))
+            memory_parts.append("[Причинно-следственный контекст]\n" + "\n".join(self.causal_links))
         if self.predictions:
-            parts.append("[Прогнозы и ожидания]\n" + "\n".join(self.predictions))
+            memory_parts.append("[Прогнозы и ожидания]\n" + "\n".join(self.predictions))
         if self.world_model_context:
-            parts.append(f"[Модель мира]\n{self.world_model_context}")
+            memory_parts.append(f"[Модель мира]\n{self.world_model_context}")
         if self.reflections:
             lines = [f"• {r.insight}" for r in self.reflections]
-            parts.append("[Выводы о пользователе]\n" + "\n".join(lines))
+            memory_parts.append("[Выводы о пользователе]\n" + "\n".join(lines))
         if self.facts:
             lines = [
                 f"• [{f.memory_kind}|{f.importance}/10] {f.fact}"
                 for f in self.facts
             ]
-            parts.append("[Релевантные факты]\n" + "\n".join(lines))
+            memory_parts.append("[Релевантные факты]\n" + "\n".join(lines))
         if self.summaries:
-            parts.append("[Контекст саммари]\n" + "\n".join(self.summaries))
+            memory_parts.append("[Контекст саммари]\n" + "\n".join(self.summaries))
+            
+        if memory_parts:
+            parts.append("<conversational_memory>\n" + "\n\n".join(memory_parts) + "\n</conversational_memory>")
+            
         return "\n\n".join(parts)

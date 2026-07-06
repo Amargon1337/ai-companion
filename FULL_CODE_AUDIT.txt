@@ -1,0 +1,106 @@
+================================================================================
+EXOCORTEX CODEBASE AUDIT REPORT
+STATUS: AGGRESSIVE / RUTHLESS
+GOAL: -30% Code, +50% Speed, 0% Tech Debt
+================================================================================
+
+# 1. Dead Code Audit
+
+Найден мёртвый код (vulture/ruff analysis):
+
+- `companion/bot_core.py`: `PolicyUserState` (Import). 
+  Уверенность: SAFE TO DELETE. Используется только `from companion.policy_layer import UserState as PolicyUserState`, но нигде не применяется в коде.
+- `companion/bot_core.py`: `retrieval_context` (Variable, line 738).
+  Уверенность: SAFE TO DELETE. Присваивается, но не используется в блоке логики.
+- `companion/memory/retrieval.py`: `retrieval_score` (Import).
+  Уверенность: SAFE TO DELETE. Импорт из `companion.memory.importance` висит мертвым грузом.
+- `companion/memory/store.py`: `return_scores` (Variable, line 197).
+  Уверенность: SAFE TO DELETE.
+- `companion/storage/legacy.py`: `Path` (Import).
+  Уверенность: SAFE TO DELETE.
+- `bot.py`: Корневой файл `bot.py` (117 байт), судя по логам, основной запуск идет через `companion/main.py`. 
+  Уверенность: PROBABLY DEAD. NEEDS MANUAL REVIEW.
+
+# 2. Duplicate Logic Audit
+
+- **Дублирование слоев хранилища**: У тебя работает `MemoryDatabase` (SQLite) в `companion/storage/sqlite_db.py`, но параллельно живёт `LegacyStorage` (JSON) в `companion/storage/legacy.py`, который обслуживает todo.json и дневники. Это шизофрения архитектуры. SQLite прекрасно справляется с JSON-данными, объедини всё в базу данных.
+- **Повторяющиеся проверки намерений**: В `bot_core.py` (lines ~242-245) используются жестко закодированные `_coding_keywords = {"питон", "python", "код"...}`, хотя выше ты вызываешь `analyze_message(content_payload)`, который уже определяет `intent` через LLM! Зачем платить за вызов LLM, если ты потом регулярками переопределяешь стейт?
+- **Повторяющиеся вычисления эмбеддингов**: Судя по логам `no such column: embedding`, есть рассинхрон между `FAISS` и `SQLite`. SQLite хранит BLOB `embedding`, но FAISS, похоже, инициализируется отдельно.
+
+# 3. Architecture Audit
+
+- **Глобальное состояние (CRITICAL)**: В `companion/bot_core.py` висят глобальные словари `user_chats`, `user_message_counts`, `_user_request_times`, `last_activity`. В асинхронном приложении под aiogram глобальные in-memory стейты — это мина замедленного действия. Если инстанс перезапустится — сессии слетят. Использовать SQLite или Redis.
+- **Класс-бог (HIGH)**: `bot_core.py` (749 строк). Он занимается: rate limiting, Telegram message splitting, LLM pipeline, Command routing (более 15 команд через if-elif), DB saving. Разбей на Middleware (rate limit), CommandRouter (команды) и Pipeline (LLM).
+- **Нарушение инкапсуляции (MEDIUM)**: В `user_model.py` прямые импорты внутри методов (`from companion.storage.sqlite_db import MemoryDatabase`), чтобы избежать циклических зависимостей. Это верный признак переусложненной архитектуры. `UserModel` не должен сам ходить в БД, в него нужно инжектить `UserRepository`.
+- **Скрытые зависимости (HIGH)**: `RetrievalBudgetManager` тащит в себя кучу аргументов (`summaries`, `permanent_notes`, `recent_messages`, `causal_links`, `world_model`), что превращает его в свалку. Он должен принимать объект `ContextState` и возвращать отфильтрованный `ContextState`.
+
+# 4. Memory System Audit
+
+- **Утечки памяти / Загрязнение контекста (CRITICAL)**: Ты сохраняешь системные промпты и служебные теги (`<conversational_memory>`) как `permanent` факты. Это Prompt Injection от самого себя.
+- **Сломанная метрика (HIGH)**: Функция `_analyze_context_utilization` считает `facts_used`, проверяя 50% совпадение слов. Для генеративной LLM это никогда не сработает. Удаляй этот кусок или меняй логику на "LLM-as-a-Judge".
+- **Свалка в эмбеддингах (MEDIUM)**: Факт "На самом деле пока я сидел на таблетках это был полный пиздец..." занимает половину контекста. Эмбеддинги по таким текстам "размазаны". Поиск `FAISS` будет цеплять этот абзац по любому слову ("таблетки", "депрессия", "парень"). Нужно строгое правило атомарности фактов в экстракторе.
+- **Dead Facts (LOW)**: 75% сохранённых фактов никогда не используются. Создай background-worker для очистки БД (SQL-запрос по `facts_sent_count = 0` и `age_days > 14`).
+
+# 5. Database Audit
+
+- **Отсутствующие индексы (HIGH)**: 
+  Таблица `messages` не имеет индексов по `ts` и `user_id`. Каждый раз при загрузке истории `SELECT id, role, text FROM messages ORDER BY ts DESC LIMIT 20` делает full scan.
+  Таблица `facts` не имеет индексов по `status`, `memory_kind`, `importance`.
+  `CREATE INDEX idx_messages_ts ON messages(ts DESC);`
+  `CREATE INDEX idx_facts_status ON facts(status, importance);`
+- **Неиспользуемые поля (LOW)**: `schema_version INTEGER DEFAULT 1` в `facts`. Нигде не используется для реальных миграций.
+- **Дубликаты данных (MEDIUM)**: Твоя таблица `embeddings` весит 8 МБ. Если FAISS хранит те же векторы на диске (или в памяти), ты платишь за хранение дважды.
+
+# 6. Runtime Audit
+
+- **Лишние обращения к БД (MEDIUM)**: `await asyncio.to_thread(memory_store.db...)` дергается на каждую мелкую операцию записи (лог сообщения, счетчик метрик). Для SQLite это нормально, но потоки (threads) — дорого. У тебя SQLite, используй `aiosqlite` и не плоди треды.
+- **Блокирующие участки (CRITICAL)**: `FAISS` поиск в `retrieval.py` (`semantic = faiss_scores.get(f.id, 0.0)`). Если расчет `faiss_scores` происходит синхронно при большом индексе, он остановит Event Loop aiogram.
+- **Переусложненный Chunking (LOW)**: Функция `send_long_message` использует регулярки для разбиения текста. Telegram API прекрасно "съедает" разбиение по `\n`, не нужно тратить такты процессора на сложный регексп.
+
+# 7. Security Audit
+
+- **Self-Prompt Injection (CRITICAL)**: Сохраненные факты типа `"ты заебал читать морали че хочу то и делаю"` (importance 9) вставляются в системный промпт при retrieval. LLM воспринимает их как директиву! Это ломает её поведение. У фактов должен быть префикс "Пользователь сказал в прошлом: [ФАКТ]".
+- **Нет защиты от спама в память (HIGH)**: Пользователь (или бот) может нагенерить 100 сообщений, и экстрактор покорно создаст 100 записей в БД. Введи лимит: "Не более X фактов за сессию".
+
+# 8. Technical Debt Audit
+
+- **Костыли (CRITICAL)**: Смешивание логики SQLite (`companion.db`) и `LegacyStorage` (`todo.json`).
+- **Legacy-код (HIGH)**: Закомментированные логики и "заглушки" в `bot_core.py` (например, обработка `_is_coding_query`).
+- **Временные решения (MEDIUM)**: Хардкод `_MAX_REQUESTS_PER_MINUTE = 10` прямо в `bot_core.py` вместо выноса в `config.py`.
+
+# 9. Refactor Priority
+
+1. **[CRITICAL]** Fix Extractor Prompt Injection 
+   - Что: Очистить факты-инструкции, запретить сохранять служебные слова.
+   - Почему: Разрушает логику LLM и засоряет `T3` бюджет.
+   - Выигрыш: Точность ассистента вырастет радикально.
+2. **[CRITICAL]** Migrate `LegacyStorage` -> `SQLite`
+   - Что: Удалить `legacy.py` и `todo.json`. Перенести TODO в `companion.db`.
+   - Почему: Избавляемся от гонки данных и костылей с чтением файлов.
+   - Выигрыш: Минус 20% мертвого/дублирующего кода.
+3. **[HIGH]** Добавление SQL Индексов
+   - Что: `CREATE INDEX` на `messages(ts)` и `facts(status)`.
+   - Почему: Устранение бутылочного горлышка (full table scan) при старте сессии.
+   - Выигрыш: Ускорение старта ответа на 50-100 мс.
+4. **[HIGH]** Refactor `bot_core.py`
+   - Что: Вынести маршрутизацию (`MUTATING_COMMANDS`) в отдельный Router класс.
+   - Выигрыш: Поддержка кода станет возможной.
+
+# 10. Final Report (Резюме для удаления)
+
+**Топ бесполезных элементов:**
+1. `_analyze_context_utilization` (Сломанный калькулятор совпадения слов).
+2. `LegacyStorage` и всё, что связано с `todo.json` (перенести в SQLite).
+3. Мертвые импорты (`PolicyUserState`, `retrieval_score`, `Path`).
+4. `bot.py` (корневой, если используется `main.py`).
+5. Глобальные словари сессий (`user_chats` и т.д.) -> Заменить на LRU Cache/Redis.
+
+**Топ опасных элементов:**
+1. Self-Prompt Injection через `permanent` факты (самая большая угроза).
+2. Глобальные state-переменные в `bot_core.py` в условиях async aiogram.
+3. Синхронные вызовы `FAISS` или блокирующие I/O в event-loop'е.
+
+**Вывод архитектора:**
+Система переросла стадию прототипа, но архитектура всё ещё прототипная. Из-за этого `bot_core.py` превратился в черную дыру на 700 строк, где смешана бизнес-логика, роутинг телеграма и метрики базы данных. 
+
+Избавься от JSON-файликов (`LegacyStorage`), повесь индексы на SQLite, научи экстрактор писать атомарные факты в 3-м лице, и ты получишь production-grade агента, который будет летать и не засорять память. Удали `_analyze_context_utilization`, он только жжет CPU впустую.

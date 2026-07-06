@@ -31,7 +31,7 @@ def extract_facts(
 ) -> list[Fact]:
     known = store.get_active_fact_texts()[-40:]
     msgs = store.recent_messages(min_importance=3, limit=80)
-    msg_text = "\n".join(f"- [{m.id}] [{m.importance}/10] {m.text[:300]}" for m in msgs)
+    msg_text = "\n".join(f"- [{m.id}] [{m.role.upper()}] [{m.importance}/10] {m.text[:300]}" for m in msgs)
 
     prompt = FACT_EXTRACTION_PROMPT.format(
         known_facts="\n".join(f"- {f}" for f in known) or "нет",

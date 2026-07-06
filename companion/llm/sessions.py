@@ -89,10 +89,16 @@ Use each section only for its defined purpose.
         
     # Context assembly (not cached because it changes every request)
     memory_block = ""
+    if ivan:
+        memory_block += f"<system_identity>\n[ivan.txt — статичная персона]\n{ivan}\n</system_identity>\n\n"
+    
+    if ctx:
+        memory_block += ctx
+    elif pers_snapshot:
+        memory_block += f"\n<user_profile>\n{pers_snapshot}\n</user_profile>\n\n"
+        
     if master_summary:
-        memory_block += f"[Master Summary — долговременный контекст]\n{master_summary[:2000]}\n\n"
-    memory_block += (ctx if ctx else pers_snapshot)
-    memory_block += f"\n\n[ivan.txt — статичная персона]\n{ivan}"
+        memory_block += f"\n<conversational_memory>\n[Master Summary — долговременный контекст]\n{master_summary[:2000]}\n</conversational_memory>\n"
 
     final_system_prompt = _PROMPT_CACHE["default"]["compiled_prompt"] + f"\n# 4. CONTEXT\n{memory_block}\n"
     

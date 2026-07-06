@@ -406,7 +406,8 @@ class MemoryStore:
 
         reflections = self.list_reflections()
         refl_texts = [r.insight for r in reflections if r.insight.strip()]
-        self.vector.compute_and_cache_batch(refl_texts, content_type="reflection")
+        # REMOVED: Reflections should not be in semantic search to prevent recursive self-contamination
+        # self.vector.compute_and_cache_batch(refl_texts, content_type="reflection")
         counts["reflections"] = len(refl_texts)
 
         from companion.reasoning import reasoning_engine
