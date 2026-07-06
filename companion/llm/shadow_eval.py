@@ -29,4 +29,4 @@ Reply with exactly valid JSON: {{"is_valid": true}} or {{"is_valid": false, "rea
         return is_valid
     except Exception as e:
         logger.error(f"ShadowEvaluator failed: {e}")
-        return True  # Default to allow if eval fails
+        return False  # Identity changes should not apply when validation is unavailable.

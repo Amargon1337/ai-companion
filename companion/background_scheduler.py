@@ -96,7 +96,7 @@ async def background_user_model_reflection(state, store) -> None:
         return
 
     try:
-        recent_facts = store.list_facts("active")[-10:]
+        recent_facts = store.recent_facts(10)
 
         reflection = await user_model.reflect_after_interaction(
             user_message=state.user_message,

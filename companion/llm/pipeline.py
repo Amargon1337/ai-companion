@@ -31,7 +31,7 @@ def extract_facts(
     summary: str,
     message_ids: list[str] | None = None,
 ) -> list[Fact]:
-    known = store.get_active_fact_texts()[-40:]
+    known = store.get_active_fact_texts()[:40]
     msgs = store.recent_messages(min_importance=3, limit=80)
     msg_text = "\n".join(f"- [{m.id}] [{m.role.upper()}] [{m.importance}/10] {m.text[:300]}" for m in msgs)
 
@@ -100,7 +100,7 @@ def consolidate_facts(store: MemoryStore, new_facts: list[Fact]) -> None:
     active_new_facts = [f for f in new_facts if f.status == "active"]
     if not active_new_facts:
         return
-    existing = store.list_facts("active")[-60:]
+    existing = store.recent_facts(60)
     prompt = CONSOLIDATION_PROMPT.format(
         new_facts=json.dumps(
             [{"index": i, "fact": f.fact, "id": f.id} for i, f in enumerate(active_new_facts)],
@@ -215,6 +215,16 @@ def generate_reflections(
                 if existing.insight == dup_content:
                     is_duplicate = True
                     logger.info("Skipping duplicate reflection (updating existing): %.50s...", new_insight)
+                    existing.importance = min(10, existing.importance + 1)
+                    existing.created_at = datetime.now().isoformat()
+                    store.update_reflection(existing)
+                    break
+
+        if not is_duplicate:
+            new_norm = store._normalize(new_insight)
+            for existing in store.list_reflections():
+                if text_overlap(new_norm, store._normalize(existing.insight)) > 0.72:
+                    is_duplicate = True
                     existing.importance = min(10, existing.importance + 1)
                     existing.created_at = datetime.now().isoformat()
                     store.update_reflection(existing)
@@ -400,6 +410,8 @@ async def run_compress_pipeline(
                 fact.memory_kind = "permanent"
                 if "auto_promoted" not in fact.tags:
                     fact.tags.append("auto_promoted")
+                if any(t in {"core_identity", "anchor", "pinned"} for t in fact.tags):
+                    fact.tags.append("profile_fact")
                 store.db._insert_fact(fact.to_dict())
                 count = int(store.db.get_meta("permanent_promotion_count", "0")) + 1
                 store.db.set_meta("permanent_promotion_count", str(count))

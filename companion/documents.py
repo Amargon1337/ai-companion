@@ -78,7 +78,7 @@ async def process_document(
         tg_file = await bot.get_file(doc.file_id)
         await bot.download_file(tg_file.file_path, file_path)
         text, gemini_file = await extract_content(file_path, file_name, doc.mime_type)
-        ctx = store.build_personality_snapshot_text()
+        ctx = store.build_canonical_profile_text()
         user_prompt = message.caption or "Проанализируй с учётом личности пользователя."
         if gemini_file:
             from companion.bot_core import wait_gemini_file_ready

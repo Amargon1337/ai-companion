@@ -84,29 +84,58 @@ class MemoryStore:
         """Save personality to SQLite DB."""
         self.db.set_meta("personality", json.dumps(data, ensure_ascii=False))
 
-    def build_personality_snapshot_text(self) -> str:
-        """Build a text representation of personality for prompts.
+    def build_canonical_profile_text(self) -> str:
+        """Build one canonical user profile for prompts.
 
-        Combines IdentityVault (core facts) with personality.json (interests/habits).
+        IdentityVault is the identity source of truth. Personality and UserModel
+        add non-identity enrichment so prompt sections do not fight each other.
         """
         parts: list[str] = []
-        # Primary: IdentityVault
         vault_block = self.identity.to_prompt_block()
         if vault_block:
             parts.append(vault_block)
-        # Secondary: personality.json enrichment
+
         pers = self.load_personality()
         interests = pers.get("interests", {})
         if interests:
             top = sorted(interests.items(), key=lambda x: x[1], reverse=True)[:7]
             parts.append("[Интересы]\n" + ", ".join(f"{k}({v})" for k, v in top))
+        for field, title in [
+            ("values", "Ценности"),
+            ("fears", "Страхи"),
+            ("motivation", "Мотивация"),
+            ("strengths", "Сильные стороны"),
+            ("weaknesses", "Уязвимости"),
+        ]:
+            items = [str(x).strip() for x in pers.get(field, []) if str(x).strip()]
+            if items:
+                parts.append(f"[{title}]\n" + "\n".join(f"- {x}" for x in items[:8]))
         relationships = pers.get("relationships", {})
         if relationships:
             parts.append("[Отношения]\n" + "\n".join(f"- {k}: {v}" for k, v in relationships.items()))
         habits = pers.get("habits", {})
         if habits:
             parts.append("[Привычки]\n" + "\n".join(f"- {k}: {v}" for k, v in habits.items()))
+        addictions = pers.get("addictions", {})
+        if addictions:
+            parts.append("[Зависимости/рисковые паттерны]\n" + "\n".join(f"- {k}: {v}" for k, v in addictions.items()))
+        changes = [str(x).strip() for x in pers.get("changes", []) if str(x).strip()]
+        if changes:
+            parts.append("[Недавние изменения]\n" + "\n".join(f"- {x}" for x in changes[-8:]))
+
+        try:
+            from companion.user_model import user_model
+            user_model_block = user_model.to_prompt_block(include_identity=False)
+            if user_model_block:
+                parts.append(user_model_block)
+        except Exception as exc:
+            logger.debug("UserModel profile enrichment skipped: %s", exc)
+
         return "\n\n".join(parts)
+
+    def build_personality_snapshot_text(self) -> str:
+        """Backward-compatible name for the canonical prompt profile."""
+        return self.build_canonical_profile_text()
 
     def load_master_summary(self) -> str:
         """Load master summary from SQLite DB (meta table). Migrates from file if needed."""
@@ -186,6 +215,9 @@ class MemoryStore:
         rows = self.db.list_facts(status=status)
         return [Fact.from_dict(r) for r in rows]
 
+    def recent_facts(self, limit: int = 50, status: str = "active") -> list[Fact]:
+        return self.list_facts(status)[:limit]
+
     def list_all_facts(self) -> list[Fact]:
         rows = self.db.list_all_facts()
         return [Fact.from_dict(r) for r in rows]
@@ -229,6 +261,8 @@ class MemoryStore:
                     if f and f.id not in seen:
                         from companion.config import DORMANT_REVIVAL_THRESHOLD
                         if r["score"] >= DORMANT_REVIVAL_THRESHOLD:
+                            self.revive_dormant_fact(f.id)
+                            f.status = "active"
                             seen.add(f.id)
                             hits.append((f, r["score"]))
                                 
@@ -270,6 +304,22 @@ class MemoryStore:
             old_fact = self.get_fact(rel.to_id)
             if old_fact and old_fact.fact:
                 self.vector.delete_for_content(old_fact.fact)
+        elif rel.relation == "contradicts":
+            old_fact = self.get_fact(rel.to_id)
+            if not old_fact:
+                return
+            protected = old_fact.memory_kind == "permanent" or any(
+                t.lower() in {"anchor", "core_identity", "pinned"} for t in old_fact.tags
+            )
+            new_conf = max(0.1, old_fact.confidence - max(0.1, rel.confidence) * 0.25)
+            new_status = old_fact.status
+            if new_conf < 0.5 and not protected:
+                new_status = "pending_review"
+            with self.db._conn() as conn:
+                conn.execute(
+                    "UPDATE facts SET confidence=?, status=? WHERE id=?",
+                    (new_conf, new_status, rel.to_id),
+                )
 
     def get_active_fact_texts(self) -> list[str]:
         return [f.fact for f in self.list_facts("active")]
@@ -303,13 +353,28 @@ class MemoryStore:
         return [Reflection.from_dict(r) for r in rows]
 
     def search_reflections(self, query: str, limit: int = 10) -> list[Reflection]:
+        active = self.list_reflections("active")
         if not query:
-            return self.list_reflections("active")[:limit]
-        results = self.vector.search(query, top_k=limit, content_type="reflection")
-        if not results:
-            return []
-        hit_hashes = {r["content_hash"] for r in results}
-        return [r for r in self.list_reflections("active") if self.vector._content_hash(r.insight) in hit_hashes]
+            return active[:limit]
+        try:
+            results = self.vector.search(query, top_k=limit, content_type="reflection")
+            if results:
+                hit_hashes = {r["content_hash"] for r in results}
+                found = [r for r in active if self.vector._content_hash(r.insight) in hit_hashes]
+                if found:
+                    return found[:limit]
+        except Exception as exc:
+            logger.debug("Reflection vector search unavailable: %s", exc)
+
+        q_norm = self._normalize(query)
+        scored = []
+        for r in active:
+            overlap = text_overlap(q_norm, self._normalize(r.insight))
+            score = overlap + (r.importance / 10) * 0.25
+            if overlap > 0 or score >= 0.2:
+                scored.append((score, r))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [r for _, r in scored[:limit]]
 
     def search_summaries(self, query: str, limit: int = 3) -> list[str]:
         if not query:
@@ -477,12 +542,8 @@ class MemoryStore:
                     if kind == "permanent" or any(t in tags for t in ["anchor", "core_identity", "pinned"]):
                         continue
                         
-                    if sent > 10 and used == 0:
-                        new_imp = max(3, imp - 1)
-                        if new_imp != imp:
-                            conn.execute("UPDATE facts SET importance=?, facts_sent_count=0 WHERE id=?", (new_imp, fid))
-                            logger.info("memory_feedback_loop_applied: %s lowered from %d to %d", fid, imp, new_imp)
-                            adjusted["lowered"] += 1
+                    if sent > 20 and used == 0:
+                        conn.execute("UPDATE facts SET facts_sent_count=0 WHERE id=?", (fid,))
                     elif sent > 5 and used > 3:
                         new_imp = min(8, imp + 1)
                         if new_imp != imp:

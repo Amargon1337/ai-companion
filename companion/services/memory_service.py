@@ -51,11 +51,11 @@ async def show_facts(message: types.Message, query: str = "") -> None:
         await core.send_long_message(message, f"Факты по '{args}':\n\n" + "\n".join(lines))
         return
 
-    facts = store.list_facts("active")[-20:]
+    facts = store.recent_facts(20)
     if not facts:
         await message.answer("Fact Store пуст. Поговори — факты появятся при сжатии.")
         return
-    lines = [f"• [{f.memory_kind}|{f.importance}/10] {f.fact}" for f in reversed(facts)]
+    lines = [f"• [{f.memory_kind}|{f.importance}/10] {f.fact}" for f in facts]
     await core.send_long_message(message, "Последние факты:\n\n" + "\n".join(lines))
 
 

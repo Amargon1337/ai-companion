@@ -85,6 +85,8 @@ class RetrievalBudgetManager:
         active_goals = active_goals or []
         causal_links = causal_links or []
         predictions = predictions or []
+        # Disabled until the prediction system has a producer+verifier loop.
+        predictions = []
         faiss_scores = faiss_scores or {}
 
         active_facts = [
@@ -163,7 +165,7 @@ class RetrievalBudgetManager:
 
         picked_messages: list[str] = []
         if recent_messages:
-            for msg in recent_messages[-7:]:
+            for msg in reversed(recent_messages[:7]):
                 if msg.importance >= 6 and msg.role == "user":
                     picked_messages.append(f"[{msg.ts[:16]}] {msg.text[:200]}")
 
@@ -251,7 +253,7 @@ class RetrievalBudgetManager:
 
             if any(tag in tags_lower for tag in ["pinned", "core_identity", "anchor"]):
                 pinned.append(f)
-            elif f.memory_kind == "permanent":
+            elif f.memory_kind == "permanent" and "profile_fact" in tags_lower:
                 pinned.append(f)
 
         # Phase 2.4: Pinned facts are identity and must be fully preserved

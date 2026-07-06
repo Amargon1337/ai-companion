@@ -109,7 +109,7 @@ def register(dp, bot) -> None:
                 recent_messages=ctx_data["recent"],
                 active_goals=ctx_data.get("active_goals", []),
                 causal_links=ctx_data.get("causal_links", []),
-                predictions=ctx_data.get("predictions", []),
+                predictions=[],
                 world_model_context=ctx_data.get("world_model_context", ""),
                 user_model_context=ctx_data.get("user_model_context", ""),
             ).to_prompt_block()
@@ -119,7 +119,7 @@ def register(dp, bot) -> None:
             if sources:
                 reply += f"\n\n📎 Источники:\n{sources}"
             await core.send_long_message(message, reply)
-            store.log_message(role="assistant", text=text[:500], importance=5, mode="search", user_id=message.from_user.id)
+            store.log_message(role="assistant", text=text, importance=5, mode="search", user_id=message.from_user.id)
         except Exception as e:
             logger.error("Search error: %s", e, exc_info=True)
             await message.answer("Произошла ошибка поиска. Подробности в логах.")

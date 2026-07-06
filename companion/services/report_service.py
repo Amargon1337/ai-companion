@@ -31,11 +31,11 @@ async def show_summary(message: types.Message) -> None:
 
 async def show_personality(message: types.Message) -> None:
     store = core.memory_store
-    identity_block = store.identity.to_prompt_block()
+    profile_block = store.build_canonical_profile_text()
     latest_list = store.load_recent_summaries(1)
     summary = latest_list[0] if latest_list else ""
     prompt = PERSONALITY_REPORT_PROMPT.format(
-        personality=identity_block,
+        personality=profile_block,
         summary=summary,
     )
     await core.send_typing(message)
@@ -132,6 +132,6 @@ async def _build_monthbook(store, ym: str) -> str:
         parts.append("[События]\n" + "\n".join(f"{e['date']}: {e['event']}" for e in events))
     if not parts:
         return ""
-    personality = store.build_personality_snapshot_text()
+    personality = store.build_canonical_profile_text()
     prompt = f"Данные за {ym}:\n\n{chr(10).join(parts)}\n\n{personality}\n\nГлава автобиографии. Третье лицо. Грязный реализм."
     return await llm.run_llm(llm.oneshot, prompt)

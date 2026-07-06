@@ -19,35 +19,40 @@ def build_system_instruction(
     store: MemoryStore,
     retrieval: RetrievalBudgetManager,
     query: str = "",
+    precomputed_context: str | None = None,
 ) -> str:
     PROMPT_VERSION = "v6"
     
     notes = LegacyStorage.load_permanent_notes()
-    pers_snapshot = store.build_personality_snapshot_text()
+    pers_snapshot = store.build_canonical_profile_text()
     ivan = LegacyStorage.load_memory()
 
     # БЛОК 3: SUMMARY STACK - включаем Tier 3 (master summary)
     master_summary = store.load_master_summary()
-    active_goals = reasoning_engine.get_goal_snapshot(query)
-    causal_links = reasoning_engine.get_relevant_causal_context(query)
-    predictions = reasoning_engine.get_prediction_context(query)
-    world_model_context = reasoning_engine.get_world_model_context(query)
 
-    bundle = retrieval.select(
-        query=query,
-        facts=store.list_facts("active"),
-        reflections=store.list_reflections(),
-        summaries=store.load_recent_summaries(5),
-        permanent_notes=notes,
-        identity_vault_block=store.identity.to_prompt_block(),
-        personality_snapshot=pers_snapshot,
-        active_goals=active_goals,
-        causal_links=causal_links,
-        predictions=predictions,
-        world_model_context=world_model_context,
-        user_model_context=user_model.to_prompt_block(),
-    )
-    ctx = bundle.to_prompt_block()
+    if precomputed_context is not None:
+        ctx = precomputed_context
+    else:
+        active_goals = reasoning_engine.get_goal_snapshot(query)
+        causal_links = reasoning_engine.get_relevant_causal_context(query)
+        predictions = []
+        world_model_context = reasoning_engine.get_world_model_context(query)
+
+        bundle = retrieval.select(
+            query=query,
+            facts=store.list_facts("active"),
+            reflections=store.list_reflections(),
+            summaries=store.load_recent_summaries(5),
+            permanent_notes=notes,
+            identity_vault_block="",
+            personality_snapshot=pers_snapshot,
+            active_goals=active_goals,
+            causal_links=causal_links,
+            predictions=predictions,
+            world_model_context=world_model_context,
+            user_model_context="",
+        )
+        ctx = bundle.to_prompt_block()
 
     # --- Policy Engine (Dynamic Tone V6) ---
     raw_state = user_model.data.get("emotional_timeline", {}).get("baseline_state", "neutral").lower()
@@ -90,7 +95,7 @@ Use each section only for its defined purpose.
     # Context assembly (not cached because it changes every request)
     memory_block = ""
     if ivan:
-        memory_block += f"<system_identity>\n[ivan.txt — статичная персона]\n{ivan}\n</system_identity>\n\n"
+        memory_block += f"<legacy_profile_input>\n[ivan.txt — статичная персона]\n{ivan}\n</legacy_profile_input>\n\n"
     
     if ctx:
         memory_block += ctx
@@ -167,7 +172,7 @@ def _reconstruct_recent_history(store: MemoryStore, limit: int = 30) -> list[dic
 
     # Конвертируем в формат Gemini history
     history = []
-    for msg in recent:
+    for msg in reversed(recent):
         role = "model" if msg.role == "assistant" else msg.role
         history.append({
             "role": role,

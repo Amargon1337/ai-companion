@@ -17,11 +17,13 @@ async def handle_grounding(message, query: str, ctx_data: dict[str, Any], uid: i
             query=query, facts=ctx_data.get("facts", []), reflections=ctx_data.get("reflections", []),
             summaries=ctx_data.get("summaries", []), permanent_notes=ctx_data.get("permanent_notes", ""),
             identity_vault_block=ctx_data.get("identity_vault_block", ""),
+            personality_snapshot=ctx_data.get("personality", ""),
             recent_messages=ctx_data.get("recent", []),
             active_goals=ctx_data.get("active_goals", []),
             causal_links=ctx_data.get("causal_links", []),
-            predictions=ctx_data.get("predictions", []),
+            predictions=[],
             world_model_context=ctx_data.get("world_model_context", ""),
+            user_model_context=ctx_data.get("user_model_context", ""),
         )
         ctx = bundle.to_prompt_block()
         from companion.bot_core import send_typing, send_long_message
@@ -49,11 +51,13 @@ async def grounding_answer_only(query: str, ctx_data: dict[str, Any],
             summaries=ctx_data.get("summaries", []),
             permanent_notes=ctx_data.get("permanent_notes", ""),
             identity_vault_block=ctx_data.get("identity_vault_block", ""),
+            personality_snapshot=ctx_data.get("personality", ""),
             recent_messages=ctx_data.get("recent", []),
             active_goals=ctx_data.get("active_goals", []),
             causal_links=ctx_data.get("causal_links", []),
-            predictions=ctx_data.get("predictions", []),
+            predictions=[],
             world_model_context=ctx_data.get("world_model_context", ""),
+            user_model_context=ctx_data.get("user_model_context", ""),
         )
         context = bundle.to_prompt_block()
         text, sources = await llm.run_llm(llm.search_with_grounding, query, context)

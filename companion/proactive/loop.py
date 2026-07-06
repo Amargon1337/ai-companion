@@ -1,7 +1,7 @@
 import time
 import logging
 from companion.user_model import user_model
-from companion.bot_core import bot, bot_config, last_activity
+from companion.config import ADMIN_IDS
 from companion.proactive.engagement import evaluate_engagement, record_ping_sent as engagement_record_ping
 from companion.proactive.reasons import select_reason, PingReason, ReasonDecision
 from companion.proactive.collector import collect_context
@@ -10,7 +10,7 @@ from companion.proactive.telemetry import record_ping_sent as telemetry_record_p
 
 logger = logging.getLogger(__name__)
 
-async def run_proactive_loop(debug: bool = False):
+async def run_proactive_loop(bot, debug: bool = False):
     """
     Главный цикл проактивности бота.
     1. Оценивает, стоит ли отправлять сообщение.
@@ -23,7 +23,8 @@ async def run_proactive_loop(debug: bool = False):
     
     # 1. Engagement Gate
     # Ищем last_activity для главного пользователя (для V1 используем ADMIN_ID или первый доступный)
-    target_user_id = bot_config.ADMIN_ID
+    from companion.bot_core import last_activity  # lazy import: избегаем циклического импорта
+    target_user_id = ADMIN_IDS[0] if ADMIN_IDS else 0
     if target_user_id == 0:
         logger.warning("run_proactive_loop: ADMIN_ID not configured.")
         return
@@ -52,15 +53,15 @@ async def run_proactive_loop(debug: bool = False):
     payload = collect_context(selected_reason, user_model)
     
     # 4. Policy Engine V6 -> Formatter
-    from companion.llm.sessions import _resolve_strategy, _resolve_tone
+    from companion.llm.prompts import STRATEGY_PROFILES, TONE_PROFILES
     state = user_model.data.get("emotional_timeline", {}).get("baseline_state", "neutral")
-    strategy_profile = _resolve_strategy(state)
-    tone_profile = _resolve_tone(state)
+    strategy_profile = STRATEGY_PROFILES.get(state, STRATEGY_PROFILES["neutral"])
+    tone_profile = TONE_PROFILES.get(state, TONE_PROFILES["neutral"])
     
     message = await format_ping(
         payload=payload,
-        strategy=strategy_profile.directives,
-        tone=tone_profile.directives,
+        strategy=strategy_profile,
+        tone=tone_profile,
         debug=debug
     )
     

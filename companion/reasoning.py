@@ -292,7 +292,7 @@ class ReasoningEngine:
         return {
             "active_goals": self.get_goal_snapshot(query),
             "causal_links": self.get_relevant_causal_context(query),
-            "predictions": self.get_prediction_context(query),
+            "predictions": [],
             "world_model_context": self.get_world_model_context(query),
             "causal_trigger": self._is_causal_query(query),
             "future_trigger": self._is_future_query(query),

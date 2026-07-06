@@ -119,7 +119,7 @@ class UserModel:
         }
         self._load_model()
 
-    def to_prompt_block(self) -> str:
+    def to_prompt_block(self, include_identity: bool = True) -> str:
         """Сборка профиля пользователя для промпта."""
         with self._lock:
             identity = self.data.get("identity", {})
@@ -128,33 +128,33 @@ class UserModel:
 
         parts = []
 
-        # Identity
-        who = identity.get("who_they_are", "")
-        think = identity.get("who_they_think_they_are", "")
-        want = identity.get("who_they_want_to_be", "")
-        fear = identity.get("who_they_fear_becoming", "")
-        traits = identity.get("core_traits", [])
-        values = identity.get("values", [])
-        roles = identity.get("roles", [])
+        if include_identity:
+            who = identity.get("who_they_are", "")
+            think = identity.get("who_they_think_they_are", "")
+            want = identity.get("who_they_want_to_be", "")
+            fear = identity.get("who_they_fear_becoming", "")
+            traits = identity.get("core_traits", [])
+            values = identity.get("values", [])
+            roles = identity.get("roles", [])
 
-        identity_lines = []
-        if who:
-            identity_lines.append(f"- Описание: {who}")
-        if think:
-            identity_lines.append(f"- Самовосприятие: {think}")
-        if want:
-            identity_lines.append(f"- Стремления: {want}")
-        if fear:
-            identity_lines.append(f"- Страхи: {fear}")
-        if traits:
-            identity_lines.append(f"- Ключевые черты: {', '.join(traits)}")
-        if values:
-            identity_lines.append(f"- Ценности: {', '.join(values)}")
-        if roles:
-            identity_lines.append(f"- Роли: {', '.join(roles)}")
+            identity_lines = []
+            if who:
+                identity_lines.append(f"- Описание: {who}")
+            if think:
+                identity_lines.append(f"- Самовосприятие: {think}")
+            if want:
+                identity_lines.append(f"- Стремления: {want}")
+            if fear:
+                identity_lines.append(f"- Страхи: {fear}")
+            if traits:
+                identity_lines.append(f"- Ключевые черты: {', '.join(traits)}")
+            if values:
+                identity_lines.append(f"- Ценности: {', '.join(values)}")
+            if roles:
+                identity_lines.append(f"- Роли: {', '.join(roles)}")
 
-        if identity_lines:
-            parts.append("Идентичность:\n" + "\n".join(identity_lines))
+            if identity_lines:
+                parts.append("Идентичность:\n" + "\n".join(identity_lines))
 
         # Patterns
         actions = patterns.get("actions", [])
@@ -180,6 +180,16 @@ class UserModel:
         signals = timeline.get("signals", [])
         if signals:
             parts.append(f"Эмоциональные маркеры (сигналы): {', '.join(signals)}")
+
+        improve = timeline.get("improvement_triggers", [])
+        deteriorate = timeline.get("deterioration_triggers", [])
+        trigger_lines = []
+        if improve:
+            trigger_lines.append("- Что улучшает состояние: " + ", ".join(improve[:8]))
+        if deteriorate:
+            trigger_lines.append("- Что ухудшает состояние: " + ", ".join(deteriorate[:8]))
+        if trigger_lines:
+            parts.append("Триггеры состояния:\n" + "\n".join(trigger_lines))
 
         if parts:
             return "[Модель пользователя]\n" + "\n\n".join(parts)
@@ -364,17 +374,17 @@ class UserModel:
             # Sync to IdentityVault
             from companion.bot_core import memory_store
             if snapshot.get("who_they_are"):
-                memory_store.identity.update_identity("core_identity", snapshot["who_they_are"], explicit_overwrite=True)
+                memory_store.identity.update_identity("core_identity", snapshot["who_they_are"], confidence=0.85, source="user_model_reflection")
             if snapshot.get("who_they_want_to_be"):
-                memory_store.identity.update_identity("ambitions", snapshot["who_they_want_to_be"], explicit_overwrite=True)
+                memory_store.identity.update_identity("ambitions", snapshot["who_they_want_to_be"], confidence=0.85, source="user_model_reflection")
             if snapshot.get("who_they_fear_becoming"):
-                memory_store.identity.update_identity("fears", snapshot["who_they_fear_becoming"], explicit_overwrite=True)
+                memory_store.identity.update_identity("fears", snapshot["who_they_fear_becoming"], confidence=0.85, source="user_model_reflection")
             if snapshot.get("core_traits"):
-                memory_store.identity.update_identity("core_traits", ", ".join(snapshot["core_traits"]), explicit_overwrite=True)
+                memory_store.identity.update_identity("core_traits", ", ".join(snapshot["core_traits"]), confidence=0.85, source="user_model_reflection")
             if snapshot.get("values"):
-                memory_store.identity.update_identity("values", ", ".join(snapshot["values"]), explicit_overwrite=True)
+                memory_store.identity.update_identity("values", ", ".join(snapshot["values"]), confidence=0.85, source="user_model_reflection")
             if snapshot.get("roles"):
-                memory_store.identity.update_identity("roles", ", ".join(snapshot["roles"]), explicit_overwrite=True)
+                memory_store.identity.update_identity("roles", ", ".join(snapshot["roles"]), confidence=0.85, source="user_model_reflection")
 
         await asyncio.to_thread(_sync_io, ident_snapshot, reflection)
 

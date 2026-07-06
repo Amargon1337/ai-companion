@@ -72,7 +72,7 @@ async def proactive_ping_loop(bot):
                 continue
                 
             # Запуск нового детерминированного лупа
-            await run_proactive_loop(debug=False)
+            await run_proactive_loop(bot, debug=False)
             
         except asyncio.CancelledError:
             break
@@ -470,8 +470,6 @@ def _get_policy_decision(state: RuntimeState, query: str) -> Any | None:
 async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, Any] | None = None):
     """All operations here are blocking I/O (SQLite, file reads, embedding API).
     Must run via to_thread to avoid freezing the event loop."""
-    from companion.user_model import user_model
-
     def _load_sync() -> dict[str, Any]:
         all_facts = memory_store.list_facts("active")
         if query:
@@ -494,13 +492,13 @@ async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, 
             "reflections": memory_store.search_reflections(query, limit=10) if query else memory_store.list_reflections("active")[:10],
             "summaries": memory_store.search_summaries(query, limit=3) if query else memory_store.load_recent_summaries(3),
             "permanent_notes": LegacyStorage.load_permanent_notes(),
-            "identity_vault_block": memory_store.identity.to_prompt_block(),
-            "personality": memory_store.build_personality_snapshot_text(),
-            "user_model_context": user_model.to_prompt_block(),
+            "identity_vault_block": "",
+            "personality": memory_store.build_canonical_profile_text(),
+            "user_model_context": "",
             "recent": memory_store.recent_messages(min_importance=6, limit=10),
             "active_goals": reasoning_context.get("active_goals", []) if reasoning_context else [],
             "causal_links": reasoning_context.get("causal_links", []) if reasoning_context else [],
-            "predictions": reasoning_context.get("predictions", []) if reasoning_context else [],
+            "predictions": [],
             "world_model_context": reasoning_context.get("world_model_context", "") if reasoning_context else "",
             "faiss_scores": faiss_scores,
         }
@@ -526,6 +524,7 @@ async def _init_user_session(uid, query):
 
 async def _generate_and_send_response(message, chat, state, content_payload, query, ctx_data, policy_decision, uid, force_flash: bool = False):
     bundle = None
+    ctx_block = None
     if isinstance(content_payload, str) and query:
         bundle = retrieval_mgr.select(
             query=query, facts=ctx_data["facts"], reflections=ctx_data["reflections"],
@@ -534,15 +533,15 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             personality_snapshot=ctx_data["personality"], recent_messages=ctx_data["recent"],
             active_goals=ctx_data.get("active_goals", []),
             causal_links=ctx_data.get("causal_links", []),
-            predictions=ctx_data.get("predictions", []),
+            predictions=[],
             world_model_context=ctx_data.get("world_model_context", ""),
             user_model_context=ctx_data.get("user_model_context", ""),
             unified_profile_block=ctx_data.get("unified_profile_block", ""),
             mood=state.mood_state,
             faiss_scores=ctx_data.get("faiss_scores", {}),
         )
-        ctx = bundle.to_prompt_block()
-        user_block = _build_user_prompt_block(content_payload, state.reasoning_context, ctx)
+        ctx_block = bundle.to_prompt_block()
+        user_block = _build_user_prompt_block(content_payload, state.reasoning_context, ctx_block)
         if state.policy_constraints and policy_decision:
             content_payload = policy_layer.format_prompt_with_policy(
                 base_prompt=user_block,
@@ -565,7 +564,9 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
         model=desired_model,
         history=history,
         config=llm.make_config(
-            system_instruction=build_system_instruction(memory_store, retrieval_mgr, query),
+            system_instruction=build_system_instruction(
+                memory_store, retrieval_mgr, query, precomputed_context=ctx_block
+            ),
             temperature=0.7,
         )
     )
@@ -596,7 +597,9 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
                         model="gemini-3.1-flash-lite",
                         history=history,
                         config=llm.make_config(
-                            system_instruction=build_system_instruction(memory_store, retrieval_mgr, query),
+                            system_instruction=build_system_instruction(
+                                memory_store, retrieval_mgr, query, precomputed_context=ctx_block
+                            ),
                             temperature=0.7,
                         )
                     )
@@ -634,11 +637,11 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
         if text:
             msg_rec = await asyncio.to_thread(
                 memory_store.log_message,
-                "assistant", text[:500], 4, "default", [], uid
+                "assistant", text, 5, "default", [], uid
             )
         state.llm_response = text
 
-        if bundle and msg_rec and text:
+        if bundle and ctx_block and msg_rec and text:
             try:
                 fs, fu, gs, gu, rs, ru = _analyze_context_utilization(text, bundle)
                 await asyncio.to_thread(
