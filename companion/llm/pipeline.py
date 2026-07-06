@@ -23,6 +23,8 @@ from companion.storage.legacy import LegacyStorage
 
 logger = logging.getLogger(__name__)
 
+from companion.security.sanitizer import _looks_like_injection
+
 
 def extract_facts(
     store: MemoryStore,
@@ -52,6 +54,10 @@ def extract_facts(
         if not isinstance(item, dict) or not item.get("fact"):
             continue
         text = str(item["fact"]).strip()
+        from companion.security.sanitizer import sanitize_markup
+        text = sanitize_markup(text).strip()
+        if not text:
+            continue
         if store.find_similar_fact(text):
             continue
 
@@ -71,6 +77,7 @@ def extract_facts(
                 tags.append("core_identity")
 
         evidence_list = [str(e) for e in item.get("evidence_messages", [])]
+        status = "pending_review" if _looks_like_injection(text) else "active"
 
         fact = Fact(
             fact=text,
@@ -82,6 +89,7 @@ def extract_facts(
             memory_kind=item.get("memory_kind", "event"),
             tags=tags,
             evidence=evidence_list,
+            status=status,
         )
         store.add_fact(fact)
         created.append(fact)
@@ -89,16 +97,17 @@ def extract_facts(
 
 
 def consolidate_facts(store: MemoryStore, new_facts: list[Fact]) -> None:
-    if not new_facts:
+    active_new_facts = [f for f in new_facts if f.status == "active"]
+    if not active_new_facts:
         return
     existing = store.list_facts("active")[-60:]
     prompt = CONSOLIDATION_PROMPT.format(
         new_facts=json.dumps(
-            [{"index": i, "fact": f.fact, "id": f.id} for i, f in enumerate(new_facts)],
+            [{"index": i, "fact": f.fact, "id": f.id} for i, f in enumerate(active_new_facts)],
             ensure_ascii=False,
         ),
         existing_facts=json.dumps(
-            [{"id": f.id, "fact": f.fact} for f in existing if f.id not in {n.id for n in new_facts}],
+            [{"id": f.id, "fact": f.fact} for f in existing if f.id not in {n.id for n in active_new_facts}],
             ensure_ascii=False,
         ),
     )
@@ -115,9 +124,9 @@ def consolidate_facts(store: MemoryStore, new_facts: list[Fact]) -> None:
         idx = rel.get("new_fact_index")
         existing_id = rel.get("existing_fact_id")
         relation = rel.get("relation", "related_to")
-        if idx is None or not existing_id or idx >= len(new_facts):
+        if idx is None or not existing_id or idx >= len(active_new_facts):
             continue
-        new_f = new_facts[int(idx)]
+        new_f = active_new_facts[int(idx)]
         store.add_relation(
             FactRelation(
                 from_id=new_f.id,
@@ -129,7 +138,8 @@ def consolidate_facts(store: MemoryStore, new_facts: list[Fact]) -> None:
         )
 
 def extract_causal_links(store: MemoryStore, new_facts: list[Fact], summary: str) -> None:
-    if not new_facts:
+    active_new_facts = [f for f in new_facts if f.status == "active"]
+    if not active_new_facts:
         return
     from companion.llm.prompts import CAUSAL_EXTRACTION_PROMPT
     from companion.reasoning import CausalLink, reasoning_engine
@@ -139,7 +149,7 @@ def extract_causal_links(store: MemoryStore, new_facts: list[Fact], summary: str
     
     prompt = CAUSAL_EXTRACTION_PROMPT.format(
         new_facts=json.dumps(
-            [{"id": f.id, "fact": f.fact} for f in new_facts],
+            [{"id": f.id, "fact": f.fact} for f in active_new_facts],
             ensure_ascii=False
         ),
         summary=summary,
@@ -190,7 +200,11 @@ def generate_reflections(
         if not isinstance(item, dict) or not item.get("insight"):
             continue
         # Phase 3.4: Deduplicate reflections using FAISS
+        from companion.security.sanitizer import sanitize_markup, _looks_like_injection
         new_insight = str(item["insight"]).strip()
+        new_insight = sanitize_markup(new_insight).strip()
+        if not new_insight:
+            continue
         results = store.vector.search(new_insight, top_k=1, content_type="reflection")
         is_duplicate = False
         
@@ -208,12 +222,14 @@ def generate_reflections(
                     
         if is_duplicate:
             continue
+        status = "pending_review" if _looks_like_injection(new_insight) else "active"
         refl = Reflection(
-            insight=str(item["insight"]).strip(),
+            insight=new_insight,
             based_on=based_on,
             period=period,
             importance=max(1, min(10, int(item.get("importance", 7)))),
             confidence=float(item.get("confidence", 0.75)),
+            status=status,
         )
         store.add_reflection(refl)
         created.append(refl)
@@ -380,7 +396,7 @@ async def run_compress_pipeline(
         new_facts = extract_facts(store, summary)
         # Phase 2.3: Auto-promote high-value facts to permanent
         for fact in new_facts:
-            if fact.importance >= 8 and fact.confidence >= 0.8:
+            if fact.status == "active" and fact.importance >= 8 and fact.confidence >= 0.8:
                 fact.memory_kind = "permanent"
                 if "auto_promoted" not in fact.tags:
                     fact.tags.append("auto_promoted")

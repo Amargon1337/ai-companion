@@ -22,7 +22,8 @@ def parse_year_from_text(text: str) -> int:
 
 
 async def remember_text(message: types.Message, note: str) -> None:
-    note = note.strip()
+    from companion.security.sanitizer import sanitize_markup
+    note = sanitize_markup(note).strip() if note else ""
     if not note:
         await message.answer("Что запомнить? Используй `/remember <текст>` или напиши `запомни ...`.", parse_mode="Markdown")
         return
@@ -101,7 +102,8 @@ async def show_year(message: types.Message, year: int) -> None:
 
 
 def auto_add_event_from_message(text: str, importance: int) -> Fact | None:
-    clean = text.strip()
+    from companion.security.sanitizer import sanitize_markup
+    clean = sanitize_markup(text).strip() if text else ""
     if importance < 8 or len(clean) < 20:
         return None
     lowered = clean.lower()

@@ -188,7 +188,8 @@ class ReasoningEngine:
             os.replace(tmp, WORLD_MODEL_PATH)
 
     def update_world_model_from_message(self, text: str, importance: int = 5) -> None:
-        clean = text.strip()
+        from companion.security.sanitizer import sanitize_markup
+        clean = sanitize_markup(text).strip() if text else ""
         if len(clean) < 8:
             return
         with self._lock:
@@ -273,7 +274,8 @@ class ReasoningEngine:
             match = re.search(pattern, text, re.IGNORECASE)
             if not match:
                 continue
-            title = match.group(1).strip(" .")[:160]
+            from companion.security.sanitizer import sanitize_markup
+            title = sanitize_markup(match.group(1)).strip(" .")[:160]
             if not title:
                 continue
             for existing in self.list_goals("active"):

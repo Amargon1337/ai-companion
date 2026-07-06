@@ -104,6 +104,8 @@ class IdentityVault:
         source: str = "system",
         explicit_overwrite: bool = False,
     ) -> str:
+        from companion.security.sanitizer import sanitize_markup
+        value = sanitize_markup(value).strip() if value else ""
         if category not in self.ALLOWED_CATEGORIES:
             raise ValueError(f"Category '{category}' not allowed.")
 

@@ -89,7 +89,7 @@ class RetrievalBudgetManager:
 
         active_facts = [
             f for f in facts
-            if f.status == "active" or (include_archived and f.status != "inactive")
+            if f.status == "active" or (include_archived and f.status == "archived")
         ]
 
         # БЛОК 2: PINNED FACTS GUARANTEE
@@ -252,8 +252,6 @@ class RetrievalBudgetManager:
             if any(tag in tags_lower for tag in ["pinned", "core_identity", "anchor"]):
                 pinned.append(f)
             elif f.memory_kind == "permanent":
-                pinned.append(f)
-            elif f.importance >= 9:
                 pinned.append(f)
 
         # Phase 2.4: Pinned facts are identity and must be fully preserved

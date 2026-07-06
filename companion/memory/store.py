@@ -150,9 +150,11 @@ class MemoryStore:
         signals: list[str] | None = None,
         user_id: int | None = None,
     ) -> MessageRecord:
+        from companion.security.sanitizer import sanitize_markup
+        sanitized_text = sanitize_markup(text) or ""
         msg = MessageRecord(
             role=role,
-            text=text,
+            text=sanitized_text,
             importance=importance,
             mode=mode,
             signals=signals or [],
@@ -190,6 +192,10 @@ class MemoryStore:
 
     def revive_dormant_fact(self, fact_id: str) -> None:
         """Promote a dormant fact back to active status."""
+        fact = self.get_fact(fact_id)
+        if not fact or fact.status != "dormant":
+            logger.warning("Attempted to revive non-dormant fact %s (status: %s)", fact_id, fact.status if fact else "None")
+            return
         with self.db._conn() as conn:
             conn.execute("UPDATE facts SET status='active', facts_sent_count=0 WHERE id=?", (fact_id,))
         logger.info("dormant_auto_revival: Fact %s promoted to active", fact_id)
@@ -246,6 +252,17 @@ class MemoryStore:
         return [(f, 0.0) for f in hits_fallback[:limit]]
 
     def add_relation(self, rel: FactRelation) -> None:
+        from_fact = self.get_fact(rel.from_id)
+        to_fact = self.get_fact(rel.to_id)
+        if not from_fact or not to_fact:
+            return
+        if from_fact.status != "active" or to_fact.status != "active":
+            logger.warning(
+                "Relation check failed: either source %s (%s) or target %s (%s) is not active",
+                rel.from_id, from_fact.status, rel.to_id, to_fact.status
+            )
+            return
+
         d = rel.to_dict()
         self.db._insert_relation(d)
         if rel.relation == "supersedes":
@@ -332,18 +349,23 @@ class MemoryStore:
     # ── Beliefs ───────────────────────────────────────────────────────
 
     def add_belief(self, belief: str, based_on: list[str], importance: int = 6) -> None:
+        from companion.security.sanitizer import sanitize_markup, _looks_like_injection
+        belief = sanitize_markup(belief).strip() if belief else ""
+        if not belief:
+            return
         # Дедуп: не вставляем убеждение, если идентичное (нормализованное) уже есть.
         # Раньше каждый compress переписывал те же beliefs → 405 строк при 20 уникальных.
         norm = self._normalize(belief)
         for existing in self.list_beliefs():
             if self._normalize(existing.get("belief", "")) == norm:
                 return
+        status = "pending_review" if _looks_like_injection(belief) else "active"
         d = {
             "id": f"belief_{uuid.uuid4().hex[:10]}",
             "belief": belief,
             "based_on": based_on,
             "importance": importance,
-            "status": "active",
+            "status": status,
             "created_at": datetime.now().isoformat(),
         }
         self.db._insert_belief(d)
@@ -376,7 +398,7 @@ class MemoryStore:
         to_dormant: list[str] = []
 
         for f in self.list_facts("active"):
-            if f.importance >= 8 or f.memory_kind == "permanent" or any(
+            if f.memory_kind == "permanent" or any(
                 t.lower() in ["anchor", "core_identity", "pinned"] for t in f.tags
             ):
                 continue

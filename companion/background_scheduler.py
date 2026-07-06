@@ -156,9 +156,11 @@ async def background_personality_micro_update(state, store) -> None:
 
         new_change = None
         if state.message_importance >= 7:
+            from companion.security.sanitizer import sanitize_markup
+            observation = sanitize_markup(state.user_message or "")[:150]
             new_change = {
                 "date": datetime.now().strftime("%Y-%m-%d"),
-                "observation": (state.user_message or "")[:150],
+                "observation": observation,
             }
 
         if not interests_delta and not new_change:

@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 MemoryKind = Literal["permanent", "state", "event"]
-FactStatus = Literal["active", "superseded", "inactive", "archived", "dormant"]
+FactStatus = Literal["active", "superseded", "inactive", "archived", "dormant", "pending_review"]
 RelationType = Literal["supersedes", "contradicts", "confirms", "related_to"]
 QueryIntent = Literal["memory", "world", "mixed"]
 
@@ -146,44 +146,54 @@ class ContextBundle:
     unified_profile_block: str = ""
 
     def to_prompt_block(self) -> str:
+        from companion.security.sanitizer import sanitize_markup
+
         parts: list[str] = []
         if self.identity_vault_block:
-            parts.append(f"<system_identity>\n{self.identity_vault_block}\n</system_identity>")
+            sanitized_id = sanitize_markup(self.identity_vault_block) or ""
+            parts.append(f"<system_identity>\n{sanitized_id}\n</system_identity>")
         
         user_profile_parts = []
         if self.personality_snapshot:
-            user_profile_parts.append(self.personality_snapshot)
+            user_profile_parts.append(sanitize_markup(self.personality_snapshot) or "")
         if self.user_model_context:
-            user_profile_parts.append(self.user_model_context)
+            user_profile_parts.append(sanitize_markup(self.user_model_context) or "")
         if self.unified_profile_block:
-            user_profile_parts.append(self.unified_profile_block)
+            user_profile_parts.append(sanitize_markup(self.unified_profile_block) or "")
         if user_profile_parts:
             parts.append("<user_profile>\n" + "\n\n".join(user_profile_parts) + "\n</user_profile>")
             
         memory_parts = []
         if self.permanent_notes:
-            memory_parts.append(f"[Постоянная память]\n{self.permanent_notes}")
+            sanitized_notes = sanitize_markup(self.permanent_notes) or ""
+            memory_parts.append(f"[Постоянная память]\n{sanitized_notes}")
         if self.recent_messages:
-            memory_parts.append("[Недавние реплики]\n" + "\n".join(self.recent_messages))
+            sanitized_msgs = [sanitize_markup(m) or "" for m in self.recent_messages]
+            memory_parts.append("[Недавние реплики]\n" + "\n".join(sanitized_msgs))
         if self.active_goals:
-            memory_parts.append("[Активные цели]\n" + "\n".join(self.active_goals))
+            sanitized_goals = [sanitize_markup(g) or "" for g in self.active_goals]
+            memory_parts.append("[Активные цели]\n" + "\n".join(sanitized_goals))
         if self.causal_links:
-            memory_parts.append("[Причинно-следственный контекст]\n" + "\n".join(self.causal_links))
+            sanitized_links = [sanitize_markup(c) or "" for c in self.causal_links]
+            memory_parts.append("[Причинно-следственный контекст]\n" + "\n".join(sanitized_links))
         if self.predictions:
-            memory_parts.append("[Прогнозы и ожидания]\n" + "\n".join(self.predictions))
+            sanitized_pred = [sanitize_markup(p) or "" for p in self.predictions]
+            memory_parts.append("[Прогнозы и ожидания]\n" + "\n".join(sanitized_pred))
         if self.world_model_context:
-            memory_parts.append(f"[Модель мира]\n{self.world_model_context}")
+            sanitized_wm = sanitize_markup(self.world_model_context) or ""
+            memory_parts.append(f"[Модель мира]\n{sanitized_wm}")
         if self.reflections:
-            lines = [f"• {r.insight}" for r in self.reflections]
+            lines = [f"• {sanitize_markup(r.insight) or ''}" for r in self.reflections]
             memory_parts.append("[Выводы о пользователе]\n" + "\n".join(lines))
         if self.facts:
             lines = [
-                f"• [{f.memory_kind}|{f.importance}/10] {f.fact}"
+                f"• [{f.memory_kind}|{f.importance}/10] {sanitize_markup(f.fact) or ''}"
                 for f in self.facts
             ]
             memory_parts.append("[Релевантные факты]\n" + "\n".join(lines))
         if self.summaries:
-            memory_parts.append("[Контекст саммари]\n" + "\n".join(self.summaries))
+            sanitized_sum = [sanitize_markup(s) or "" for s in self.summaries]
+            memory_parts.append("[Контекст саммари]\n" + "\n".join(sanitized_sum))
             
         if memory_parts:
             parts.append("<conversational_memory>\n" + "\n\n".join(memory_parts) + "\n</conversational_memory>")
