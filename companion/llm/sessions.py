@@ -19,6 +19,7 @@ def build_system_instruction(
     store: MemoryStore,
     retrieval: RetrievalBudgetManager,
     query: str = "",
+    precomputed_context: str | None = None,
 ) -> str:
     PROMPT_VERSION = "v6"
     
@@ -28,26 +29,32 @@ def build_system_instruction(
 
     # БЛОК 3: SUMMARY STACK - включаем Tier 3 (master summary)
     master_summary = store.load_master_summary()
-    active_goals = reasoning_engine.get_goal_snapshot(query)
-    causal_links = reasoning_engine.get_relevant_causal_context(query)
-    predictions = reasoning_engine.get_prediction_context(query)
-    world_model_context = reasoning_engine.get_world_model_context(query)
 
-    bundle = retrieval.select(
-        query=query,
-        facts=store.list_facts("active"),
-        reflections=store.list_reflections(),
-        summaries=store.load_recent_summaries(5),
-        permanent_notes=notes,
-        identity_vault_block=store.identity.to_prompt_block(),
-        personality_snapshot=pers_snapshot,
-        active_goals=active_goals,
-        causal_links=causal_links,
-        predictions=predictions,
-        world_model_context=world_model_context,
-        user_model_context=user_model.to_prompt_block(),
-    )
-    ctx = bundle.to_prompt_block()
+    if precomputed_context is not None:
+        # У-1 FIX: используем bundle, собранный в bot_core с FAISS-scores и mood-boost,
+        # вместо повторного retrieval без семантического ранжирования.
+        ctx = precomputed_context
+    else:
+        active_goals = reasoning_engine.get_goal_snapshot(query)
+        causal_links = reasoning_engine.get_relevant_causal_context(query)
+        predictions = reasoning_engine.get_prediction_context(query)
+        world_model_context = reasoning_engine.get_world_model_context(query)
+
+        bundle = retrieval.select(
+            query=query,
+            facts=store.list_facts("active"),
+            reflections=store.list_reflections(),
+            summaries=store.load_recent_summaries(5),
+            permanent_notes=notes,
+            identity_vault_block=store.identity.to_prompt_block(),
+            personality_snapshot=pers_snapshot,
+            active_goals=active_goals,
+            causal_links=causal_links,
+            predictions=predictions,
+            world_model_context=world_model_context,
+            user_model_context=user_model.to_prompt_block(),
+        )
+        ctx = bundle.to_prompt_block()
 
     # --- Policy Engine (Dynamic Tone V6) ---
     raw_state = user_model.data.get("emotional_timeline", {}).get("baseline_state", "neutral").lower()

@@ -72,7 +72,7 @@ async def proactive_ping_loop(bot):
                 continue
                 
             # Запуск нового детерминированного лупа
-            await run_proactive_loop(debug=False)
+            await run_proactive_loop(bot, debug=False)
             
         except asyncio.CancelledError:
             break
@@ -526,6 +526,7 @@ async def _init_user_session(uid, query):
 
 async def _generate_and_send_response(message, chat, state, content_payload, query, ctx_data, policy_decision, uid, force_flash: bool = False):
     bundle = None
+    ctx_block = None  # У-1: prompt-блок bundle с FAISS-scores и mood — единственный источник контекста
     if isinstance(content_payload, str) and query:
         bundle = retrieval_mgr.select(
             query=query, facts=ctx_data["facts"], reflections=ctx_data["reflections"],
@@ -541,8 +542,8 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             mood=state.mood_state,
             faiss_scores=ctx_data.get("faiss_scores", {}),
         )
-        ctx = bundle.to_prompt_block()
-        user_block = _build_user_prompt_block(content_payload, state.reasoning_context, ctx)
+        ctx_block = bundle.to_prompt_block()
+        user_block = _build_user_prompt_block(content_payload, state.reasoning_context, ctx_block)
         if state.policy_constraints and policy_decision:
             content_payload = policy_layer.format_prompt_with_policy(
                 base_prompt=user_block,
@@ -565,7 +566,9 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
         model=desired_model,
         history=history,
         config=llm.make_config(
-            system_instruction=build_system_instruction(memory_store, retrieval_mgr, query),
+            system_instruction=build_system_instruction(
+                memory_store, retrieval_mgr, query, precomputed_context=ctx_block
+            ),
             temperature=0.7,
         )
     )
@@ -596,7 +599,9 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
                         model="gemini-3.1-flash-lite",
                         history=history,
                         config=llm.make_config(
-                            system_instruction=build_system_instruction(memory_store, retrieval_mgr, query),
+                            system_instruction=build_system_instruction(
+                                memory_store, retrieval_mgr, query, precomputed_context=ctx_block
+                            ),
                             temperature=0.7,
                         )
                     )
@@ -632,13 +637,20 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
         await send_long_message(message, text)
         msg_rec = None
         if text:
+            # Б-2 FIX: importance=5, чтобы ответы бота проходили фильтр
+            # min_importance=5 в _reconstruct_recent_history и переживали рестарт.
+            # Б-3 FIX: без обрезки [:500] — episodic memory и compress-пайплайн
+            # должны видеть полный текст ответа, иначе summary строится по огрызкам.
             msg_rec = await asyncio.to_thread(
                 memory_store.log_message,
-                "assistant", text[:500], 4, "default", [], uid
+                "assistant", text, 5, "default", [], uid
             )
         state.llm_response = text
 
-        if bundle and msg_rec and text:
+        # У-2 FIX: метрики пишутся только если bundle реально был инжектирован
+        # в system_instruction (ctx_block is not None), иначе самообучение
+        # analyze_retrieval_effectiveness калибруется по выброшенному контексту.
+        if bundle and ctx_block and msg_rec and text:
             try:
                 fs, fu, gs, gu, rs, ru = _analyze_context_utilization(text, bundle)
                 await asyncio.to_thread(

@@ -229,6 +229,11 @@ class MemoryStore:
                     if f and f.id not in seen:
                         from companion.config import DORMANT_REVIVAL_THRESHOLD
                         if r["score"] >= DORMANT_REVIVAL_THRESHOLD:
+                            # Б-7 FIX: факт прошёл порог revival — переводим в active,
+                            # иначе он навсегда остаётся dormant и отфильтровывается
+                            # последующими проверками status == "active".
+                            self.revive_dormant_fact(f.id)
+                            f.status = "active"
                             seen.add(f.id)
                             hits.append((f, r["score"]))
                                 

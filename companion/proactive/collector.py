@@ -13,11 +13,11 @@ class ContextPayload:
 
 def collect_goal_context(decision: ReasonDecision, user_model: UserModel) -> ContextPayload:
     from companion.reasoning import reasoning_engine
-    # For V1, get string snapshot and pack as fact
+    # get_goal_snapshot возвращает list[str] — склеиваем в один факт
     goal_snapshot = reasoning_engine.get_goal_snapshot("")
     facts = []
-    if goal_snapshot.strip():
-        facts.append("Найдены активные цели:\n" + goal_snapshot)
+    if goal_snapshot:
+        facts.append("Найдены активные цели:\n" + "\n".join(goal_snapshot))
     
     return ContextPayload(
         reason=decision.reason,
@@ -34,7 +34,8 @@ def collect_conversation_context(decision: ReasonDecision, user_model: UserModel
     recent_summaries = memory_store.load_recent_summaries(1)
     facts = []
     if recent_summaries:
-        facts.append("Недавний контекст:\n" + recent_summaries)
+        # load_recent_summaries возвращает list[str] — берём последнее саммери
+        facts.append("Недавний контекст:\n" + recent_summaries[0])
         
     return ContextPayload(
         reason=decision.reason,
