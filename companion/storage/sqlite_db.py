@@ -135,7 +135,8 @@ class MemoryDatabase:
           created_at TEXT,
           updated_at TEXT,
           version INTEGER DEFAULT 1,
-          superseded_by TEXT DEFAULT ''
+          superseded_by TEXT DEFAULT '',
+          last_confirmed_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_patterns_status ON patterns(status, importance);
 
@@ -386,6 +387,14 @@ class MemoryDatabase:
           if col not in cols:
             conn.execute(ddl)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_retrieval_v2 ON facts(status, archived, anchor_flag, importance, last_accessed)")
+        # Pattern freshness (Reliability Layer): дата последнего подтверждения.
+        try:
+          p_cols = [r[1] for r in conn.execute("PRAGMA table_info(patterns)").fetchall()]
+          if "last_confirmed_at" not in p_cols:
+            conn.execute("ALTER TABLE patterns ADD COLUMN last_confirmed_at TEXT")
+            conn.execute("UPDATE patterns SET last_confirmed_at = created_at WHERE created_at IS NOT NULL")
+        except sqlite3.OperationalError:
+          pass
         conn.execute("UPDATE facts SET anchor_flag=1 WHERE anchor_flag=0 AND (tags LIKE '%anchor%' OR tags LIKE '%core_identity%' OR tags LIKE '%pinned%' OR memory_kind='permanent')")
         conn.execute("UPDATE facts SET archived=1 WHERE archived=0 AND status='archived'")
       except sqlite3.OperationalError:
@@ -949,14 +958,15 @@ class MemoryDatabase:
     with self._conn() as conn:
       conn.execute(
         """INSERT OR IGNORE INTO patterns
-           (id, pattern, category, evidence, importance, confidence, status, created_at, version, superseded_by)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+           (id, pattern, category, evidence, importance, confidence, status, created_at, version, superseded_by, last_confirmed_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
         (
           row["id"], row.get("pattern"), row.get("category", "behavior"),
           json.dumps(row.get("evidence", []), ensure_ascii=False),
           row.get("importance", 6), row.get("confidence", 0.7),
           row.get("status", "active"), row.get("created_at"),
           row.get("version", 1), row.get("superseded_by", ""),
+          row.get("last_confirmed_at") or row.get("created_at"),
         ),
       )
 
@@ -965,7 +975,7 @@ class MemoryDatabase:
       conn.execute("UPDATE patterns SET status=? WHERE id=?", (status, pattern_id))
 
   def update_pattern_fields(self, pattern_id: str, fields: dict[str, Any]) -> None:
-    allowed = {"pattern", "category", "importance", "confidence", "status", "evidence", "version", "superseded_by"}
+    allowed = {"pattern", "category", "importance", "confidence", "status", "evidence", "version", "superseded_by", "last_confirmed_at"}
     sets = {k: v for k, v in fields.items() if k in allowed}
     if not sets:
       return

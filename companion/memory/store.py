@@ -519,6 +519,7 @@ class MemoryStore:
                 for r in results:
                     p = by_hash.get(r["content_hash"])
                     if p:
+                        self.touch_pattern(p.id)  # подтверждение при реальном use
                         hits.append((p, r["score"]))
                 if hits:
                     return hits[:limit]
@@ -526,6 +527,8 @@ class MemoryStore:
             logger.debug("Pattern vector search unavailable, falling back to keyword: %s", exc)
         q = query.lower()
         fallback = [p for p in active if q in p.pattern.lower()]
+        for p in fallback[:limit]:
+            self.touch_pattern(p.id)
         return [(p, 0.0) for p in fallback[:limit]]
 
     def find_similar_pattern(self, text: str, threshold: float = 0.55) -> "Pattern | None":
@@ -574,6 +577,20 @@ class MemoryStore:
             self.vector.delete_for_content(old.pattern)
         return self.db.delete_pattern(pattern_id)
 
+    def touch_pattern(self, pattern_id: str) -> None:
+        """Reliability Layer: подтверждение паттерна (bump last_confirmed_at).
+
+        Вызывается при реальном использовании/нахождении паттерна в retrieval,
+        чтобы он не 'старел' зря. Не меняет сам вывод, только свежесть.
+        """
+        old = self.get_pattern(pattern_id)
+        if old is None:
+            return
+        self.db.update_pattern_fields(pattern_id, {
+            "last_confirmed_at": datetime.now().isoformat(),
+            "version": old.version + 1,
+        })
+
     # ── Communication prefs (Уровень 4) ─────────────────────────────
 
     def get_comm_pref(self) -> "CommPref":
@@ -615,25 +632,42 @@ class MemoryStore:
         return HumanModel.from_dict(row)
 
     def upsert_human_model(self, delta: "HumanModel") -> None:
-        """Merge delta-обновление модели человека (авто-эволюция выводов).
+        """Merge delta-выводов в модель человека (Reliability Layer).
 
-        Списочные поля объединяются (union, дедуп), чтобы долгосрочные
-        тенденции/цели НЕ терялись между окнами — модель накапливается, а не
-        перезаписывается целиком. Версию инкрементируем при реальном изменении.
+        Каждый элемент delta — HumanModelInsight. Логика:
+        - совпадение по нормализованному тексту в той же dimension →
+          ПОДТВЕРЖДЕНИЕ: bump last_supported_at + evidence_count, НЕ дубликат;
+        - иначе → новый инсайт (status active).
+        Старение (active→aging→stale) считается лениво в compute_insight_status,
+        без мутации здесь — поэтому история не теряется. Версия растёт.
         """
-        from companion.models import HumanModel
+        from companion.models import HumanModel, HumanModelInsight
         current = self.get_human_model()
-        _merge = lambda a, b: list(dict.fromkeys((a or []) + (b or [])))[:25]
+        dims = ("goals", "fears", "strengths", "recurring_mistakes", "long_term_trends")
+        now = datetime.now().isoformat()
 
-        merged = HumanModel(
-            goals=_merge(current.goals, delta.goals),
-            fears=_merge(current.fears, delta.fears),
-            strengths=_merge(current.strengths, delta.strengths),
-            recurring_mistakes=_merge(current.recurring_mistakes, delta.recurring_mistakes),
-            long_term_trends=_merge(current.long_term_trends, delta.long_term_trends),
-            updated_at=datetime.now().isoformat(),
-            version=current.version + 1,
-        )
+        def _norm(t: str) -> str:
+            return self._normalize(t or "")
+
+        merged = HumanModel(version=current.version + 1, updated_at=now)
+        for dim in dims:
+            existing: list[HumanModelInsight] = list(getattr(current, dim))
+            seen = {_norm(e.text) for e in existing}
+            for inc in getattr(delta, dim):
+                n = _norm(inc.text)
+                match = next((e for e in existing if _norm(e.text) == n), None)
+                if match is not None:
+                    # подтверждение: обновляем свежесть, не плодим дубликат
+                    match.last_supported_at = now
+                    match.evidence_count = (match.evidence_count or 1) + 1
+                    if inc.confidence:
+                        match.confidence = max(match.confidence, inc.confidence)
+                else:
+                    seen.add(n)
+                    inc.last_supported_at = now
+                    existing.append(inc)
+            # мягкий кап роста, без удаления статусов
+            setattr(merged, dim, existing[:50])
         self.db.upsert_human_model(merged.to_dict())
 
     def save_summary(self, content: str) -> None:

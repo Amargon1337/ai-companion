@@ -21,7 +21,7 @@ from companion.llm.prompts import (
 )
 from companion.memory.store import MemoryStore
 from companion.memory.text_sim import text_overlap
-from companion.models import Fact, FactRelation, Reflection, Pattern, CommPref, HumanModel
+from companion.models import Fact, FactRelation, Reflection, Pattern, CommPref, HumanModel, HumanModelInsight
 
 logger = logging.getLogger(__name__)
 
@@ -368,12 +368,17 @@ def extract_human_model(
         item = result.human_model
         def _clean(lst):
             return [str(t).strip() for t in (lst or []) if str(t).strip()]
+        def _ins(ls, dim):
+            return [HumanModelInsight(text=t, dimension=dim, confidence=0.7,
+                                      created_at=datetime.now().isoformat(),
+                                      last_supported_at=datetime.now().isoformat())
+                    for t in _clean(ls)]
         delta = HumanModel(
-            goals=_clean(item.goals),
-            fears=_clean(item.fears),
-            strengths=_clean(item.strengths),
-            recurring_mistakes=_clean(item.recurring_mistakes),
-            long_term_trends=_clean(item.long_term_trends),
+            goals=_ins(item.goals, "goals"),
+            fears=_ins(item.fears, "fears"),
+            strengths=_ins(item.strengths, "strengths"),
+            recurring_mistakes=_ins(item.recurring_mistakes, "recurring_mistakes"),
+            long_term_trends=_ins(item.long_term_trends, "long_term_trends"),
         )
         if not any([delta.goals, delta.fears, delta.strengths,
                     delta.recurring_mistakes, delta.long_term_trends]):

@@ -148,6 +148,7 @@ class Pattern:
     status: FactStatus = "active"
     id: str = ""
     created_at: str = ""
+    last_confirmed_at: str = ""   # Reliability Layer: дата последнего подтверждения
     version: int = 1
     superseded_by: str = ""
 
@@ -156,6 +157,8 @@ class Pattern:
             self.id = _new_id("pat")
         if not self.created_at:
             self.created_at = datetime.now().isoformat()
+        if not self.last_confirmed_at:
+            self.last_confirmed_at = self.created_at
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -199,24 +202,77 @@ class CommPref:
         return cls(**{k: v for k, v in data.items() if k in known})
 
 
-@dataclass
-class HumanModel:
-    """Уровень 6: самостоятельная модель человека — единая всегда-активная
-    запись. Хранится как ОДНА строка (key="global"), а не список: модель
-    человека эволюционирует, а не копится. Авто-обновляется на каждом compress
-    через merge delta-обновлений (extract_human_model).
+# ── Memory Reliability Layer: статусы старения выводов ──
+InsightStatus = Literal["active", "aging", "stale", "superseded"]
 
-    Заполняется ВЫВОДАМИ ( inferences), а не фактами (facts): это то, что бот
-    понял о человеке, а не сухие события. Долгосрочные тенденции (long_term_
-    trends) — именно то, что просил юзер: 'за 8 месяцев регулярно возвращается
-    к теме одиночества' — это вывод, не факт.
+
+@dataclass
+class HumanModelInsight:
+    """Один вывод о человеке с метаданными свежести (Reliability Layer).
+
+    Это НЕ факт. Это инференс. Система не говорит 'этого не было' — она
+    говорит 'это больше не подтверждалось'. Поэтому выводы не удаляются,
+    а переходят active → aging → stale по времени без подтверждения.
     """
 
-    goals: list[str] = field(default_factory=list)          # цели пользователя
-    fears: list[str] = field(default_factory=list)          # страхи
-    strengths: list[str] = field(default_factory=list)      # сильные стороны
-    recurring_mistakes: list[str] = field(default_factory=list)  # повторяющиеся ошибки
-    long_term_trends: list[str] = field(default_factory=list)    # долгосрочные тенденции
+    text: str
+    dimension: str = "general"   # goals|fears|strengths|recurring_mistakes|long_term_trends
+    confidence: float = 0.7
+    created_at: str = ""
+    last_supported_at: str = ""
+    evidence_count: int = 1
+    status: InsightStatus = "active"
+    id: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            self.id = _new_id("hm")
+        now = datetime.now().isoformat()
+        if not self.created_at:
+            self.created_at = now
+        if not self.last_supported_at:
+            self.last_supported_at = self.created_at
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "HumanModelInsight":
+        known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+        d = {k: v for k, v in data.items() if k in known}
+        # int(json) / str guards for robustness across migrations
+        if "evidence_count" in d and not isinstance(d["evidence_count"], int):
+            try:
+                d["evidence_count"] = int(d["evidence_count"])
+            except (TypeError, ValueError):
+                d["evidence_count"] = 1
+        if "confidence" in d and not isinstance(d["confidence"], float):
+            try:
+                d["confidence"] = float(d["confidence"])
+            except (TypeError, ValueError):
+                d["confidence"] = 0.7
+        return cls(**d)
+
+
+@dataclass
+class HumanModel:
+    """Уровень 6 + Reliability Layer: самостоятельная модель человека.
+
+    Это выводы (inferences), не факты. Единая запись (key="global"),
+    но внутри — список HumanModelInsight с метаданными свежести.
+    Авто-обновляется на каждом compress через merge delta-выводов
+    (extract_human_model → upsert_human_model), где каждый новый вывод
+    либо создаёт инсайт, либо подтверждает существующий (bump
+    last_supported_at + evidence_count). Старение (active→aging→stale)
+    считается лениво в compute_status() по last_supported_at, без
+    мутации БД — поэтому история не теряется.
+    """
+
+    goals: list[HumanModelInsight] = field(default_factory=list)
+    fears: list[HumanModelInsight] = field(default_factory=list)
+    strengths: list[HumanModelInsight] = field(default_factory=list)
+    recurring_mistakes: list[HumanModelInsight] = field(default_factory=list)
+    long_term_trends: list[HumanModelInsight] = field(default_factory=list)
     updated_at: str = ""
     version: int = 1
 
@@ -224,13 +280,69 @@ class HumanModel:
         if not self.updated_at:
             self.updated_at = datetime.now().isoformat()
 
+    def all_insights(self) -> list[HumanModelInsight]:
+        return self.goals + self.fears + self.strengths + self.recurring_mistakes + self.long_term_trends
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "goals": [i.to_dict() for i in self.goals],
+            "fears": [i.to_dict() for i in self.fears],
+            "strengths": [i.to_dict() for i in self.strengths],
+            "recurring_mistakes": [i.to_dict() for i in self.recurring_mistakes],
+            "long_term_trends": [i.to_dict() for i in self.long_term_trends],
+            "updated_at": self.updated_at,
+            "version": self.version,
+        }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> HumanModel:
+    def from_dict(cls, data: dict[str, Any]) -> "HumanModel":
         known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
-        return cls(**{k: v for k, v in data.items() if k in known})
+        def _as_list(v):
+            return [HumanModelInsight.from_dict(x) if isinstance(x, dict) else
+                    HumanModelInsight(text=str(x)) for x in (v or [])]
+        return cls(
+            goals=_as_list(data.get("goals")),
+            fears=_as_list(data.get("fears")),
+            strengths=_as_list(data.get("strengths")),
+            recurring_mistakes=_as_list(data.get("recurring_mistakes")),
+            long_term_trends=_as_list(data.get("long_term_trends")),
+            updated_at=data.get("updated_at", ""),
+            version=int(data.get("version", 1) or 1),
+        )
+
+
+def compute_insight_status(insight: "HumanModelInsight") -> str:
+    """Лениво считает актуальный статус старения по last_supported_at.
+
+    Не мутирует БД — стареют только метаданные в памяти. explicit
+    'superseded' сохраняется (его выставил extractor при прямом
+    противоречии). active → aging → stale по дням без подтверждения.
+    """
+    if insight.status == "superseded":
+        return "superseded"
+    from companion.config import HM_AGING_DAYS, HM_STALE_DAYS
+    from companion.memory.importance import days_since
+    age = days_since(insight.last_supported_at or insight.created_at)
+    if age >= HM_STALE_DAYS:
+        return "stale"
+    if age >= HM_AGING_DAYS:
+        return "aging"
+    return "active"
+
+
+def compute_pattern_status(pattern, confirmed: bool = False) -> str:
+    """Лениво считает статус старения паттерна по last_confirmed_at."""
+    if getattr(pattern, "status", "active") == "superseded":
+        return "superseded"
+    from companion.config import PATTERN_AGING_DAYS, PATTERN_STALE_DAYS
+    from companion.memory.importance import days_since
+    ref = getattr(pattern, "last_confirmed_at", "") or getattr(pattern, "created_at", "")
+    age = days_since(ref)
+    if age >= PATTERN_STALE_DAYS:
+        return "stale"
+    if age >= PATTERN_AGING_DAYS:
+        return "aging"
+    return "active"
 
 
 @dataclass
@@ -288,33 +400,39 @@ class ContextBundle:
             if lines:
                 parts.append("[Предпочтения общения пользователя]\n" + "\n".join(lines))
 
-        # Уровень 6: модель человека — выводы о человеке (не факты).
+        # Уровень 6 + Reliability Layer: модель человека — выводы (не факты).
         # Всегда-активный блок, до <user_profile>, не вытесняется эвикшеном.
+        # Группируем по уверенности: active (Высокая) vs aging/stale (Устаревающие).
         if self.human_model is not None:
             hm = self.human_model
-            hm_lines = []
-            if hm.goals:
-                goals = "; ".join(sanitize_markup(g) or "" for g in hm.goals[:15] if g)
-                if goals.strip():
-                    hm_lines.append(f"Цели: {goals}")
-            if hm.fears:
-                fears = "; ".join(sanitize_markup(f) or "" for f in hm.fears[:15] if f)
-                if fears.strip():
-                    hm_lines.append(f"Страхи: {fears}")
-            if hm.strengths:
-                strengths = "; ".join(sanitize_markup(s) or "" for s in hm.strengths[:15] if s)
-                if strengths.strip():
-                    hm_lines.append(f"Сильные стороны: {strengths}")
-            if hm.recurring_mistakes:
-                mistakes = "; ".join(sanitize_markup(m) or "" for m in hm.recurring_mistakes[:15] if m)
-                if mistakes.strip():
-                    hm_lines.append(f"Повторяющиеся ошибки: {mistakes}")
-            if hm.long_term_trends:
-                trends = "; ".join(sanitize_markup(t) or "" for t in hm.long_term_trends[:15] if t)
-                if trends.strip():
-                    hm_lines.append(f"Долгосрочные тенденции: {trends}")
+            from companion.models import compute_insight_status  # local import guard
+            def _label(ins: "Any") -> str:
+                st = compute_insight_status(ins)
+                if st == "stale":
+                    return " [давно не подтверждалось]"
+                if st == "aging":
+                    return " [подтверждалось давно]"
+                return ""
+            confident: list[str] = []
+            aging: list[str] = []
+            for dim in ("goals", "fears", "strengths", "recurring_mistakes", "long_term_trends"):
+                for ins in getattr(hm, dim):
+                    text = sanitize_markup(ins.text) or ""
+                    if not text:
+                        continue
+                    if compute_insight_status(ins) == "active":
+                        confident.append(f"• {text}")
+                    else:
+                        aging.append(f"• {text}{_label(ins)}")
+            hm_lines = ["ВНИМАНИЕ: это НЕ факты. Это долгосрочные выводы о пользователе с разной степенью уверенности."]
+            if confident:
+                hm_lines.append("Высокая уверенность (недавно подтверждалось):")
+                hm_lines.extend(confident[:15])
+            if aging:
+                hm_lines.append("Устаревающие (давно не подтверждалось — не факт, что устарело):")
+                hm_lines.extend(aging[:15])
             if hm_lines:
-                parts.append("[Модель человека (выводы)]\n" + "\n".join(hm_lines))
+                parts.append("[Модель человека — выводы]\n" + "\n".join(hm_lines))
 
         user_profile_parts = []
         if self.personality_snapshot:
@@ -349,15 +467,23 @@ class ContextBundle:
             lines = [f"• {sanitize_markup(r.insight) or ''}" for r in self.reflections]
             memory_parts.append("[Выводы о пользователе]\n" + "\n".join(lines))
         if self.patterns:
+            from companion.models import compute_pattern_status  # local import
             lines = []
             for p in self.patterns:
-                lines.append(f"• {sanitize_markup(p.pattern) or ''}")
+                st = compute_pattern_status(p)
+                suffix = ""
+                if st == "stale":
+                    suffix = " [давно не подтверждалось]"
+                elif st == "aging":
+                    suffix = " [подтверждалось давно]"
+                lines.append(f"• {sanitize_markup(p.pattern) or ''}{suffix}")
                 ev = getattr(p, "evidence", None) or []
                 if ev:
                     joined = "; ".join(str(sanitize_markup(str(e)) or "") for e in ev)
                     if joined.strip():
                         lines.append(f"  Основано на: {joined}")
             memory_parts.append("[Паттерны поведения пользователя]\n" + "\n".join(lines))
+
         if self.facts:
             lines = [
                 f"• [{f.memory_kind}|{f.importance}/10] {sanitize_markup(f.fact) or ''}"

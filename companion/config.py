@@ -117,6 +117,15 @@ MAX_DOCUMENT_CHARS = 120_000
 RETRIEVAL_CHAR_BUDGET = 50_000
 RETRIEVAL_MAX_FACTS = 25  # Увеличено с 15 до 25
 RETRIEVAL_MAX_REFLECTIONS = 5
+
+# ── Memory Reliability Layer (старение выводов, не удаление) ──
+# Полувремени (дни) без подтверждения до перехода active→aging→stale.
+# Выводы о человеке стареют медленнее фактов (это долгосрочные инференсы),
+# но не вечно — именно эту дыру закрывает слой надёжности.
+HM_AGING_DAYS = int(os.getenv("HM_AGING_DAYS", "90"))    # active -> aging
+HM_STALE_DAYS = int(os.getenv("HM_STALE_DAYS", "240"))   # aging -> stale
+PATTERN_AGING_DAYS = int(os.getenv("PATTERN_AGING_DAYS", "120"))
+PATTERN_STALE_DAYS = int(os.getenv("PATTERN_STALE_DAYS", "360"))
 MAX_VIDEO_DOWNLOAD_BYTES = int(os.getenv("MAX_VIDEO_DOWNLOAD_BYTES", str(50 * 1024 * 1024)))
 SPEECH_RECOGNITION_LANGUAGE = os.getenv("SPEECH_RECOGNITION_LANGUAGE", "ru-RU")
 
