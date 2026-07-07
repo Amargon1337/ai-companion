@@ -8,6 +8,7 @@ import os
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any
 
 
@@ -121,6 +122,33 @@ class MemoryDatabase:
           importance INTEGER DEFAULT 6,
           status TEXT DEFAULT 'active',
           created_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS patterns (
+          id TEXT PRIMARY KEY,
+          pattern TEXT NOT NULL,
+          category TEXT DEFAULT 'behavior',
+          evidence TEXT DEFAULT '[]',
+          importance INTEGER DEFAULT 6,
+          confidence REAL DEFAULT 0.7,
+          status TEXT DEFAULT 'active',
+          created_at TEXT,
+          updated_at TEXT,
+          version INTEGER DEFAULT 1,
+          superseded_by TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_patterns_status ON patterns(status, importance);
+
+        CREATE TABLE IF NOT EXISTS communication_prefs (
+          id TEXT PRIMARY KEY,
+          style TEXT DEFAULT '',
+          formality TEXT DEFAULT '',
+          humor TEXT DEFAULT '',
+          language TEXT DEFAULT '',
+          liked_topics TEXT DEFAULT '[]',
+          avoided_topics TEXT DEFAULT '[]',
+          updated_at TEXT,
+          version INTEGER DEFAULT 1
         );
 
         CREATE TABLE IF NOT EXISTS timeline (
@@ -341,6 +369,8 @@ class MemoryDatabase:
           "last_accessed": "ALTER TABLE facts ADD COLUMN last_accessed TEXT",
           "access_count": "ALTER TABLE facts ADD COLUMN access_count INTEGER DEFAULT 0",
           "decay_exempt": "ALTER TABLE facts ADD COLUMN decay_exempt INTEGER DEFAULT 0",
+          "version": "ALTER TABLE facts ADD COLUMN version INTEGER DEFAULT 1",
+          "superseded_by": "ALTER TABLE facts ADD COLUMN superseded_by TEXT DEFAULT ''",
         }.items():
           if col not in cols:
             conn.execute(ddl)
@@ -599,16 +629,6 @@ class MemoryDatabase:
         ),
       )
 
-  def update_fact_embedding(self, fact_id: str, embedding: bytes) -> None:
-    with self._conn() as conn:
-      conn.execute("UPDATE facts SET embedding=? WHERE id=?", (embedding, fact_id))
-
-  def update_fact_embeddings(self, rows: list[tuple[str, bytes]]) -> None:
-    if not rows:
-      return
-    with self._conn() as conn:
-      conn.executemany("UPDATE facts SET embedding=? WHERE id=?", [(blob, fact_id) for fact_id, blob in rows])
-
   def _insert_relation(self, row: dict[str, Any]) -> None:
     with self._conn() as conn:
       conn.execute(
@@ -823,7 +843,41 @@ class MemoryDatabase:
 
   def update_fact_status(self, fact_id: str, status: str) -> None:
     with self._conn() as conn:
-      conn.execute("UPDATE facts SET status=? WHERE id=?", (status, fact_id))
+      conn.execute("UPDATE facts SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (status, fact_id))
+
+  def update_fact_fields(self, fact_id: str, fields: dict[str, Any]) -> None:
+    """Update a subset of mutable fact columns atomically."""
+    allowed = {
+      "fact", "date", "importance", "confidence", "tags", "status",
+      "valid_from", "valid_until", "evidence", "version", "superseded_by",
+      "memory_kind", "source", "source_type", "anchor_flag", "manual_lock",
+    }
+    sets = {k: v for k, v in fields.items() if k in allowed}
+    if not sets:
+      return
+    if "tags" in sets:
+      sets["tags"] = json.dumps(sets["tags"], ensure_ascii=False)
+    if "evidence" in sets:
+      sets["evidence"] = json.dumps(sets["evidence"], ensure_ascii=False)
+    sets["updated_at"] = fields.get("updated_at") or datetime.now().isoformat()
+    assignments = ", ".join(f"{k}=?" for k in sets)
+    params = list(sets.values()) + [fact_id]
+    with self._conn() as conn:
+      conn.execute(f"UPDATE facts SET {assignments} WHERE id=?", params)
+
+  def get_fact_relations(self, fact_id: str) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      rows = conn.execute(
+        "SELECT * FROM fact_relations WHERE from_id=? OR to_id=? ORDER BY created_at ASC",
+        (fact_id, fact_id),
+      ).fetchall()
+    return [dict(r) for r in rows]
+
+  def delete_fact(self, fact_id: str) -> bool:
+    with self._conn() as conn:
+      cur = conn.execute("DELETE FROM facts WHERE id=?", (fact_id,))
+      conn.execute("DELETE FROM fact_relations WHERE from_id=? OR to_id=?", (fact_id, fact_id))
+      return cur.rowcount > 0
 
   def _row_fact(self, row: sqlite3.Row) -> dict[str, Any]:
     d = dict(row)
@@ -862,6 +916,105 @@ class MemoryDatabase:
       result.append(d)
     return result
 
+  def list_patterns(self, status: str = "active") -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      if status is None:
+        rows = conn.execute(
+          "SELECT * FROM patterns ORDER BY importance DESC, created_at DESC"
+        ).fetchall()
+      else:
+        rows = conn.execute(
+          "SELECT * FROM patterns WHERE status=? ORDER BY importance DESC, created_at DESC",
+          (status,),
+        ).fetchall()
+    result = []
+    for r in rows:
+      d = dict(r)
+      d["evidence"] = json.loads(d.get("evidence") or "[]")
+      result.append(d)
+    return result
+
+  def add_pattern(self, row: dict[str, Any]) -> None:
+    with self._conn() as conn:
+      conn.execute(
+        """INSERT OR IGNORE INTO patterns
+           (id, pattern, category, evidence, importance, confidence, status, created_at, version, superseded_by)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (
+          row["id"], row.get("pattern"), row.get("category", "behavior"),
+          json.dumps(row.get("evidence", []), ensure_ascii=False),
+          row.get("importance", 6), row.get("confidence", 0.7),
+          row.get("status", "active"), row.get("created_at"),
+          row.get("version", 1), row.get("superseded_by", ""),
+        ),
+      )
+
+  def update_pattern_status(self, pattern_id: str, status: str) -> None:
+    with self._conn() as conn:
+      conn.execute("UPDATE patterns SET status=? WHERE id=?", (status, pattern_id))
+
+  def update_pattern_fields(self, pattern_id: str, fields: dict[str, Any]) -> None:
+    allowed = {"pattern", "category", "importance", "confidence", "status", "evidence", "version", "superseded_by"}
+    sets = {k: v for k, v in fields.items() if k in allowed}
+    if not sets:
+      return
+    if "evidence" in sets:
+      sets["evidence"] = json.dumps(sets["evidence"], ensure_ascii=False)
+    sets["updated_at"] = datetime.now().isoformat()
+    assignments = ", ".join(f"{k}=?" for k in sets)
+    params = list(sets.values()) + [pattern_id]
+    with self._conn() as conn:
+      conn.execute(f"UPDATE patterns SET {assignments} WHERE id=?", params)
+
+  def delete_pattern(self, pattern_id: str) -> bool:
+    with self._conn() as conn:
+      cur = conn.execute("DELETE FROM patterns WHERE id=?", (pattern_id,))
+      return cur.rowcount > 0
+
+  # ── Communication prefs (Уровень 4) ──────────────────────────────
+
+  def get_comm_pref(self, pref_id: str = "global") -> dict[str, Any] | None:
+    with self._conn() as conn:
+      row = conn.execute(
+        "SELECT * FROM communication_prefs WHERE id=?", (pref_id,)
+      ).fetchone()
+    if row is None:
+      return None
+    d = dict(row)
+    d["liked_topics"] = json.loads(d.get("liked_topics") or "[]")
+    d["avoided_topics"] = json.loads(d.get("avoided_topics") or "[]")
+    return d
+
+  def upsert_comm_pref(self, row: dict[str, Any]) -> None:
+    liked = row.get("liked_topics", [])
+    avoided = row.get("avoided_topics", [])
+    liked_json = json.dumps(liked, ensure_ascii=False) if not isinstance(liked, str) else liked
+    avoided_json = json.dumps(avoided, ensure_ascii=False) if not isinstance(avoided, str) else avoided
+    with self._conn() as conn:
+      conn.execute(
+        """
+        INSERT INTO communication_prefs
+          (id, style, formality, humor, language, liked_topics, avoided_topics, updated_at, version)
+        VALUES (?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+          style=excluded.style, formality=excluded.formality, humor=excluded.humor,
+          language=excluded.language, liked_topics=excluded.liked_topics,
+          avoided_topics=excluded.avoided_topics, updated_at=excluded.updated_at,
+          version=excluded.version
+        """,
+        (
+          row.get("id", "global"),
+          row.get("style", ""),
+          row.get("formality", ""),
+          row.get("humor", ""),
+          row.get("language", ""),
+          liked_json,
+          avoided_json,
+          row.get("updated_at"),
+          int(row.get("version", 1)),
+        ),
+      )
+
   def list_beliefs(self, status: str = "active") -> list[dict[str, Any]]:
     with self._conn() as conn:
       rows = conn.execute(
@@ -899,14 +1052,6 @@ class MemoryDatabase:
         "SELECT user_id, message_count FROM sessions ORDER BY last_active DESC"
       ).fetchall()
     return {r["user_id"]: r["message_count"] for r in rows}
-
-  def delete_session(self, user_id: int) -> None:
-    with self._conn() as conn:
-      conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
-
-  def count_sessions(self) -> int:
-    with self._conn() as conn:
-      return conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
 
   def count_facts(self, status: str | None = None) -> int:
     with self._conn() as conn:

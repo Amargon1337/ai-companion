@@ -57,6 +57,7 @@ def build_system_instruction(
             world_model_context=world_model_context,
             user_model_context="",
             runtime_context_block=runtime_context_block,
+            comm_prefs=store.get_comm_pref(),
         )
         ctx = bundle.to_prompt_block()
 

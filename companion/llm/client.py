@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from typing import Any
 
@@ -300,10 +301,27 @@ from companion.config import LLM_RETRIES, LLM_RETRY_DELAY, LLM_TIMEOUT
 async def run_llm(
     sync_func, *args, timeout: int = LLM_TIMEOUT, retries: int = LLM_RETRIES, **kwargs
 ):
-    """Run a sync LLM function in a thread with timeout and retry with exponential backoff."""
+    """Run an LLM call (sync OR async) with timeout + exponential backoff retry.
+
+    `sync_func` may be:
+      * a blocking function  -> run in a worker thread (default path), or
+      * an async coroutine function -> awaited directly on the event loop.
+
+    This keeps run_llm version-agnostic across google-genai releases where the
+    same client method (e.g. ``chat.send_message``) switched between a sync
+    signature and an async one. Without this check, an async function passed to
+    asyncio.to_thread returns an un-awaited coroutine, so ``await run_llm(...)``
+    yields the coroutine and downstream ``.text`` access crashes the caller
+    (e.g. the compress pipeline).
+    """
     last_exc = None
     for attempt in range(retries):
         try:
+            if inspect.iscoroutinefunction(sync_func):
+                coro = sync_func(*args, **kwargs)
+                if timeout:
+                    return await asyncio.wait_for(coro, timeout=timeout)
+                return await coro
             return await asyncio.wait_for(
                 asyncio.to_thread(sync_func, *args, **kwargs),
                 timeout=timeout,
@@ -346,14 +364,15 @@ class FactItem(BaseModel):
     importance: int = Field(default=5, ge=1, le=10)
     confidence: float = Field(default=0.75, ge=0.0, le=1.0)
     tags: List[str] = Field(default_factory=list)
-    evidence_messages: List[str] = Field(default_factory=list)
+
 
 class FactExtractionResult(BaseModel):
     facts: List[FactItem]
 
+
 class ConsolidationItem(BaseModel):
-    new_fact_index: int
-    existing_fact_id: str
+    relation: Literal["supersedes", "contradicts", "confirms", "related_to"]
+    reason: str = Field(default="")
     relation: Literal["supersedes", "contradicts", "confirms", "related_to"]
     reason: str = Field(default="")
 
@@ -377,6 +396,28 @@ class ReflectionItem(BaseModel):
 
 class ReflectionResult(BaseModel):
     reflections: List[ReflectionItem]
+
+class PatternItem(BaseModel):
+    pattern: str
+    category: str = Field(default="behavior")  # behavior | coping | mistake | relationship | trend
+    evidence: List[str] = Field(default_factory=list)
+    importance: int = Field(default=6, ge=1, le=10)
+    confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+
+class PatternExtractionResult(BaseModel):
+    patterns: List[PatternItem]
+
+class CommPrefItem(BaseModel):
+    """Уровень 4: одно предпочтение общения. Пустое поле = 'не менялось'."""
+    style: str = Field(default="")        # желаемый стиль общения
+    formality: str = Field(default="")    # уровень формальности
+    humor: str = Field(default="")        # отношение к юмору
+    language: str = Field(default="")     # предпочтительный язык
+    liked_topics: List[str] = Field(default_factory=list)
+    avoided_topics: List[str] = Field(default_factory=list)
+
+class CommPrefExtractionResult(BaseModel):
+    comm_pref: CommPrefItem
 
 class PersonalityPipelineResult(BaseModel):
     interests_delta: Dict[str, int] = Field(default_factory=dict)

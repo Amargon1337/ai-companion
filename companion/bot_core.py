@@ -394,13 +394,6 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
 
 from companion.config import LLM_COMMAND_CONFIDENCE_THRESHOLD
 
-SAFE_COMMANDS = {
-    "show_facts", "show_notes", "export_diary", "show_timeline",
-    "show_context", "week_digest", "retrospective", "selfie",
-    "show_goals", "show_reasoning", "self_description",
-    "knowledge_map", "show_todos", "monthbook", "show_year"
-}
-
 MUTATING_COMMANDS = {
     "reset_context", "clear_done", "complete_todo",
     "delete_todo", "add_goal", "diary_entry", "add_todo"
@@ -646,11 +639,13 @@ async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, 
         return {
             "facts": facts_list,
             "reflections": memory_store.search_reflections(query, limit=10) if query else memory_store.list_reflections("active")[:10],
+            "patterns": memory_store.search_patterns(query, limit=10) if query else memory_store.list_patterns("active")[:10],
             "summaries": memory_store.search_summaries(query, limit=3) if query else memory_store.load_recent_summaries(3),
             "permanent_notes": "\n".join(memory_store.db.list_permanent_notes()),
             "identity_vault_block": "",
             "personality": memory_store.build_canonical_profile_text(),
             "user_model_context": "",
+            "comm_prefs": memory_store.get_comm_pref(),
             "recent": memory_store.recent_messages(min_importance=6, limit=10),
             "active_goals": reasoning_context.get("active_goals", []) if reasoning_context else [],
             "causal_links": reasoning_context.get("causal_links", []) if reasoning_context else [],
@@ -685,6 +680,7 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
     if isinstance(content_payload, str) and query:
         bundle = retrieval_mgr.select(
             query=query, facts=ctx_data["facts"], reflections=ctx_data["reflections"],
+            patterns=ctx_data.get("patterns", []),
             summaries=ctx_data["summaries"], permanent_notes=ctx_data["permanent_notes"],
             identity_vault_block=ctx_data.get("identity_vault_block", ""),
             personality_snapshot=ctx_data["personality"], recent_messages=ctx_data["recent"],
@@ -697,9 +693,10 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             mood=state.mood_state,
             faiss_scores=ctx_data.get("faiss_scores", {}),
             runtime_context_block=ctx_data.get("runtime_context_block", ""),
+            comm_prefs=ctx_data.get("comm_prefs"),
         )
         ctx_block = bundle.to_prompt_block()
-        user_block = _build_user_prompt_block(content_payload, state.reasoning_context, ctx_block)
+        user_block = _build_user_prompt_block(content_payload, state.reasoning_context)
         if state.policy_constraints and policy_decision:
             content_payload = policy_layer.format_prompt_with_policy(
                 base_prompt=user_block,
@@ -915,7 +912,7 @@ def fact_from_permanent_note(note: str) -> Fact:
     )
 
 
-def _build_user_prompt_block(content_payload: str, reasoning_context: dict[str, Any], retrieval_context: str) -> str:
+def _build_user_prompt_block(content_payload: str, reasoning_context: dict[str, Any]) -> str:
     now = datetime.now()
     parts = [f"[Системное время: {now.strftime('%Y-%m-%d %H:%M')}]"]
     parts.append(f"[Сообщение пользователя]\n{content_payload}")

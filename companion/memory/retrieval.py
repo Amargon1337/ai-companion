@@ -77,6 +77,7 @@ class RetrievalBudgetManager:
         query: str,
         facts: list[Fact],
         reflections: list[Reflection],
+        patterns: list = None,
         summaries: list[str] | None = None,
         permanent_notes: str = "",
         identity_vault_block: str = "",
@@ -92,6 +93,7 @@ class RetrievalBudgetManager:
         mood: dict | None = None,
         faiss_scores: dict[str, float] | None = None,
         runtime_context_block: str = "",
+        comm_prefs: "Any" = None,
     ) -> ContextBundle:
         summaries = summaries or []
         active_goals = active_goals or []
@@ -210,9 +212,23 @@ class RetrievalBudgetManager:
         t4_budget = 8000
         causal_links = limit_list(causal_links, 4000, lambda c: str(c))
         t4_budget -= sum(len(str(c)) for c in causal_links)
-        
+
         ranked_refl = ranked_refl[:self.max_reflections]
         ranked_refl = limit_list(ranked_refl, t4_budget, lambda r: r.insight)
+
+        # T4.5: Behavior patterns (Уровень 2) — inferences over facts.
+        # Normalize: search_patterns returns (Pattern, score) tuples; list_patterns
+        # returns Pattern objects. Keep only Pattern instances.
+        raw_patterns = patterns or []
+        norm_patterns: list = []
+        for p in raw_patterns:
+            if isinstance(p, tuple):
+                p = p[0]
+            if hasattr(p, "pattern"):
+                norm_patterns.append(p)
+        ranked_patterns = sorted(
+            norm_patterns, key=lambda p: getattr(p, "importance", 5), reverse=True
+        )[: self.max_reflections]
 
         # T5: Historical summaries (2000 tokens = 8000 chars)
         summaries = limit_list(summaries, 8000, lambda s: s)
@@ -220,6 +236,7 @@ class RetrievalBudgetManager:
         bundle = ContextBundle(
             facts=ranked_facts,
             reflections=ranked_refl,
+            patterns=ranked_patterns,
             summaries=summaries,
             permanent_notes=permanent_notes,
             identity_vault_block=identity_vault_block,
@@ -232,6 +249,7 @@ class RetrievalBudgetManager:
             user_model_context=user_model_context,
             unified_profile_block=unified_profile_block,
             runtime_context_block=runtime_context_block,
+            comm_prefs=comm_prefs,
         )
 
         # Global Overflow Eviction: T5 -> T4 -> T3
@@ -242,6 +260,10 @@ class RetrievalBudgetManager:
             elif bundle.reflections or bundle.causal_links:
                 if bundle.causal_links: bundle.causal_links.pop()
                 elif bundle.reflections: bundle.reflections.pop()
+            elif bundle.patterns:
+                # T4.5: паттерны урезаются ДО фактов — интерпретация не
+                # вытесняет сырые факты (тем более защищённые anchors).
+                bundle.patterns.pop()
             elif any(f.id not in pinned_ids for f in bundle.facts):
                 for i in range(len(bundle.facts) - 1, -1, -1):
                     if bundle.facts[i].id not in pinned_ids:

@@ -17,7 +17,7 @@ from companion.memory.semantic_ranker import SemanticImportanceRanker
 from companion.memory.text_sim import text_overlap
 from companion.memory.vector_index import VectorIndex
 from companion.memory.identity_vault import IdentityVault
-from companion.models import Fact, FactRelation, MessageRecord, Reflection
+from companion.models import Fact, FactRelation, MessageRecord, Reflection, Pattern
 from companion.storage.sqlite_db import MemoryDatabase
 
 logger = logging.getLogger(__name__)
@@ -204,6 +204,12 @@ class MemoryStore:
     # ── Facts ─────────────────────────────────────────────────────────
 
     def add_fact(self, fact: Fact) -> Fact:
+        # Dedup gate: block duplicates against already active/dormant facts.
+        existing = self.find_similar_fact_any_status(fact.fact)
+        if existing is not None:
+            logger.debug("Dedup: skipping fact similar to %s", existing.id)
+            return existing
+
         d = fact.to_dict()
         self.db._insert_fact(d)
         self.vector.compute_and_cache(fact.fact, content_type="fact", fact_id=fact.id)
@@ -212,6 +218,65 @@ class MemoryStore:
     def get_fact(self, fact_id: str) -> Fact | None:
         row = self.db.get_fact(fact_id)
         return Fact.from_dict(row) if row else None
+
+    def update_fact(
+        self,
+        fact_id: str,
+        *,
+        fact: str | None = None,
+        importance: int | None = None,
+        confidence: float | None = None,
+        tags: list[str] | None = None,
+        memory_kind: str | None = None,
+        date: str | None = None,
+    ) -> bool:
+        """Edit a fact in place. Keeps FAISS and DB in sync.
+
+        If the fact text changes, the stale FAISS vector is dropped and the
+        new text is (re)embedded — otherwise semantic search keeps serving the
+        old wording.
+        """
+        old = self.get_fact(fact_id)
+        if old is None:
+            return False
+        fields: dict[str, Any] = {"version": old.version + 1}
+        old_text = old.fact
+        if fact is not None:
+            fields["fact"] = fact
+        if importance is not None:
+            fields["importance"] = max(1, min(10, int(importance)))
+        if confidence is not None:
+            fields["confidence"] = max(0.0, min(1.0, float(confidence)))
+        if tags is not None:
+            fields["tags"] = tags
+        if memory_kind is not None:
+            fields["memory_kind"] = memory_kind
+        if date is not None:
+            fields["date"] = date
+        self.db.update_fact_fields(fact_id, fields)
+
+        # FAISS resync if the wording changed.
+        if fact is not None and fact.strip() and fact.strip() != old_text.strip():
+            if old_text.strip():
+                self.vector.delete_for_content(old_text)
+            self.vector.compute_and_cache(fact, content_type="fact", fact_id=fact_id)
+        return True
+
+    def delete_fact(self, fact_id: str) -> bool:
+        """Hard-delete a fact and its FAISS vector + relations.
+
+        Prefer marking `superseded`/`dormant` for knowledge that merely went
+        stale; reserve this for genuinely wrong/duplicate data.
+        """
+        old = self.get_fact(fact_id)
+        if old is None:
+            return False
+        if old.fact.strip():
+            self.vector.delete_for_content(old.fact)
+        return self.db.delete_fact(fact_id)
+
+    def get_fact_relations(self, fact_id: str) -> list[dict[str, Any]]:
+        return self.db.get_fact_relations(fact_id)
 
     def list_facts(self, status: str = "active") -> list[Fact]:
         rows = self.db.list_facts(status=status)
@@ -234,7 +299,7 @@ class MemoryStore:
             conn.execute("UPDATE facts SET status='active', facts_sent_count=0 WHERE id=?", (fact_id,))
         logger.info("dormant_auto_revival: Fact %s promoted to active", fact_id)
 
-    def search_facts(self, query: str, limit: int = 20, return_scores: bool = False) -> list[tuple[Fact, float]]:
+    def search_facts(self, query: str, limit: int = 20) -> list[tuple[Fact, float]]:
         active_facts = self.list_facts("active")
         dormant_facts = self.list_facts("dormant")
         
@@ -305,6 +370,10 @@ class MemoryStore:
             self.db.update_fact_status(rel.to_id, "superseded")
             old_fact = self.get_fact(rel.to_id)
             if old_fact and old_fact.fact:
+                self.db.update_fact_fields(
+                    rel.to_id,
+                    {"superseded_by": rel.from_id, "version": old_fact.version + 1},
+                )
                 self.vector.delete_for_content(old_fact.fact)
         elif rel.relation == "contradicts":
             old_fact = self.get_fact(rel.to_id)
@@ -313,15 +382,18 @@ class MemoryStore:
             protected = old_fact.memory_kind == "permanent" or any(
                 t.lower() in {"anchor", "core_identity", "pinned"} for t in old_fact.tags
             )
-            new_conf = max(0.1, old_fact.confidence - max(0.1, rel.confidence) * 0.25)
-            new_status = old_fact.status
-            if new_conf < 0.5 and not protected:
-                new_status = "pending_review"
-            with self.db._conn() as conn:
-                conn.execute(
-                    "UPDATE facts SET confidence=?, status=? WHERE id=?",
-                    (new_conf, new_status, rel.to_id),
+            if protected:
+                return
+            # Newer fact wins: the old one is superseded (autonomous memory,
+            # no human review). Mirror the `supersedes` branch — hide it AND
+            # drop its stale vector, otherwise FAISS keeps serving it.
+            self.db.update_fact_status(rel.to_id, "superseded")
+            if old_fact and old_fact.fact:
+                self.db.update_fact_fields(
+                    rel.to_id,
+                    {"superseded_by": rel.from_id, "version": old_fact.version + 1},
                 )
+                self.vector.delete_for_content(old_fact.fact)
 
     def get_active_fact_texts(self) -> list[str]:
         return [f.fact for f in self.list_facts("active")]
@@ -333,6 +405,19 @@ class MemoryStore:
         best: Fact | None = None
         best_score = 0.0
         for f, _ in results:
+            score = text_overlap(norm, self._normalize(f.fact))
+            if score > best_score:
+                best_score = score
+                best = f
+        return best if best_score >= threshold else None
+
+    def find_similar_fact_any_status(self, text: str, threshold: float = 0.52) -> Fact | None:
+        """Dedup check across active and dormant facts only."""
+        norm = self._normalize(text)
+        candidates = [f for f in self.list_all_facts() if f.status in {"active", "dormant"}]
+        best: Fact | None = None
+        best_score = 0.0
+        for f in candidates:
             score = text_overlap(norm, self._normalize(f.fact))
             if score > best_score:
                 best_score = score
@@ -388,7 +473,138 @@ class MemoryStore:
 
     def load_recent_summaries(self, limit: int = 10) -> list[str]:
         return [r["content"] for r in self.db.list_summaries(status="active", limit=limit)]
-        
+
+    # ── Patterns (Уровень 2: inferences over facts) ──────────────────
+
+    def add_pattern(self, pat: "Pattern") -> Pattern:
+        # Уровень 2 — важный момент: паттерны эволюционируют.
+        # 1) Почти идентичный текст (>0.85) — чистый дубль, пропускаем.
+        dup = self.find_similar_pattern(pat.pattern, threshold=0.85)
+        if dup is not None:
+            return dup
+        # 2) Та же тема, но ДРУГОЙ вывод (0.5..0.85) — старый паттерн
+        #    устарел/противоречит. Помечаем superseded + выкидываем из FAISS,
+        #    чтобы retrieval не кормил LLM противоречивыми выводами.
+        related = self.find_similar_pattern(pat.pattern, threshold=0.5)
+        if related is not None:
+            self._supersede_pattern(related, pat)
+        self.db.add_pattern(pat.to_dict())
+        self.vector.compute_and_cache(pat.pattern, content_type="pattern", fact_id=pat.id)
+        return pat
+
+    def _supersede_pattern(self, old: "Pattern", new: "Pattern") -> None:
+        self.db.update_pattern_fields(
+            old.id, {"status": "superseded", "superseded_by": new.id}
+        )
+        if old.pattern.strip():
+            self.vector.delete_for_content(old.pattern)
+
+    def list_patterns(self, status: str = "active") -> list["Pattern"]:
+        return [Pattern.from_dict(r) for r in self.db.list_patterns(status=status)]
+
+    def get_pattern(self, pattern_id: str) -> "Pattern | None":
+        from companion.models import Pattern
+        for p in self.db.list_patterns(status=None):
+            if p["id"] == pattern_id:
+                return Pattern.from_dict(p)
+        return None
+
+    def search_patterns(self, query: str, limit: int = 10) -> list[tuple["Pattern", float]]:
+        active = self.list_patterns("active")
+        try:
+            results = self.vector.search(query, top_k=limit, content_type="pattern")
+            if results:
+                by_hash = {self.vector._content_hash(p.pattern): p for p in active}
+                hits = []
+                for r in results:
+                    p = by_hash.get(r["content_hash"])
+                    if p:
+                        hits.append((p, r["score"]))
+                if hits:
+                    return hits[:limit]
+        except Exception as exc:
+            logger.debug("Pattern vector search unavailable, falling back to keyword: %s", exc)
+        q = query.lower()
+        fallback = [p for p in active if q in p.pattern.lower()]
+        return [(p, 0.0) for p in fallback[:limit]]
+
+    def find_similar_pattern(self, text: str, threshold: float = 0.55) -> "Pattern | None":
+        norm = self._normalize(text)
+        best = None
+        best_score = 0.0
+        for p in self.list_patterns("active"):
+            score = text_overlap(norm, self._normalize(p.pattern))
+            if score > best_score:
+                best_score = score
+                best = p
+        return best if best_score >= threshold else None
+
+    def update_pattern(
+        self, pattern_id: str, *, pattern: str | None = None,
+        importance: int | None = None, confidence: float | None = None,
+        category: str | None = None, evidence: list[str] | None = None,
+    ) -> bool:
+        old = self.get_pattern(pattern_id)
+        if old is None:
+            return False
+        fields = {"version": old.version + 1}
+        old_text = old.pattern
+        if pattern is not None:
+            fields["pattern"] = pattern
+        if importance is not None:
+            fields["importance"] = max(1, min(10, int(importance)))
+        if confidence is not None:
+            fields["confidence"] = max(0.0, min(1.0, float(confidence)))
+        if category is not None:
+            fields["category"] = category
+        if evidence is not None:
+            fields["evidence"] = evidence
+        self.db.update_pattern_fields(pattern_id, fields)
+        if pattern is not None and pattern.strip() and pattern.strip() != old_text.strip():
+            if old_text.strip():
+                self.vector.delete_for_content(old_text)
+            self.vector.compute_and_cache(pattern, content_type="pattern", fact_id=pattern_id)
+        return True
+
+    def delete_pattern(self, pattern_id: str) -> bool:
+        old = self.get_pattern(pattern_id)
+        if old is None:
+            return False
+        if old.pattern.strip():
+            self.vector.delete_for_content(old.pattern)
+        return self.db.delete_pattern(pattern_id)
+
+    # ── Communication prefs (Уровень 4) ─────────────────────────────
+
+    def get_comm_pref(self) -> "CommPref":
+        from companion.models import CommPref
+        row = self.db.get_comm_pref("global")
+        if row is None:
+            return CommPref()
+        return CommPref.from_dict(row)
+
+    def upsert_comm_pref(self, delta: "CommPref") -> None:
+        """Merge delta-обновление предпочтений общения (авто-эволюция).
+
+        Пустые поля delta НЕ затирают существующие значения — merge
+        'накопительный до заполнения, заменяющий при явном указании'.
+        Списочные поля (liked/avoided topics) заменяются целиком, когда
+        delta приносит непустой список. Версия инкрементируется.
+        """
+        from companion.models import CommPref
+        current = self.get_comm_pref()
+        merged = CommPref(
+            style=delta.style or current.style,
+            formality=delta.formality or current.formality,
+            humor=delta.humor or current.humor,
+            language=delta.language or current.language,
+            liked_topics=delta.liked_topics if delta.liked_topics else current.liked_topics,
+            avoided_topics=delta.avoided_topics if delta.avoided_topics else current.avoided_topics,
+            updated_at=datetime.now().isoformat(),
+            version=current.version + 1,
+        )
+        self.db.upsert_comm_pref(merged.to_dict())
+
     def save_summary(self, content: str) -> None:
         summary_id = f"summary_{uuid.uuid4().hex[:10]}"
         self.db._insert_summary({

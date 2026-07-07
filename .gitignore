@@ -18,6 +18,7 @@ cc.bat
 analyze.py
 C:/Games/exocortex_structure.txt
 
+
 # Локальные данные, логи и базы (Твоя память и черновики книги)
 bot.log
 data/

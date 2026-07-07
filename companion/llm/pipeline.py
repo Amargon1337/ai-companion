@@ -14,11 +14,13 @@ from companion.llm.prompts import (
     FACT_EXTRACTION_PROMPT,
     PERSONALITY_PIPELINE_PROMPT,
     REFLECTION_PROMPT,
+    PATTERN_PROMPT,
+    COMM_PREF_PROMPT,
     SUMMARY_PROMPT,
 )
 from companion.memory.store import MemoryStore
 from companion.memory.text_sim import text_overlap
-from companion.models import Fact, FactRelation, Reflection
+from companion.models import Fact, FactRelation, Reflection, Pattern, CommPref
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +247,116 @@ def generate_reflections(
     return created
 
 
+def extract_patterns(
+    store: MemoryStore, summary: str, period: str | None = None
+) -> list[Pattern]:
+    """Уровень 2: вывод паттернов поведения поверх фактов.
+
+    Паттерн — это НЕ факт и НЕ обобщение-вывод (reflection), а инференция:
+    как/почему пользователь действует (напр. 'курит, чтобы справляться со
+    стрессом'). Хранится как отдельная сущность с FAISS-индексом.
+    """
+    period = period or datetime.now().strftime("%Y-%m")
+    facts = store.facts_for_period(period, min_importance=5)
+    fact_text = "\n".join(f"- {f.fact}" for f in facts[:30])
+
+    prompt = PATTERN_PROMPT.format(
+        period=period,
+        facts=fact_text or "мало данных",
+        summary=summary,
+    )
+    try:
+        result = llm.oneshot_structured(prompt, llm.PatternExtractionResult)
+        raw = [r.model_dump() for r in result.patterns]
+    except Exception as e:
+        logger.error(f"Pattern extraction failed: {e}")
+        return []
+
+    created: list[Pattern] = []
+    for item in raw:
+        if not isinstance(item, dict) or not item.get("pattern"):
+            continue
+        # Sanitize + injection guard (same policy as reflections/facts)
+        from companion.security.sanitizer import sanitize_markup, _looks_like_injection
+        pat_text = str(item["pattern"]).strip()
+        pat_text = sanitize_markup(pat_text).strip()
+        if not pat_text:
+            continue
+        if _looks_like_injection(pat_text):
+            logger.warning("Pattern looks like injection, dropping: %.50s...", pat_text)
+            continue
+        # Cross-entity dedup: a pattern must not merely restate an existing
+        # reflection or belief, or we triple-store the same insight and bloat
+        # the context (pattern + reflection + belief saying one thing).
+        if _pattern_redundant(store, pat_text):
+            logger.info("Skipping pattern that mirrors existing reflection/belief: %.50s...", pat_text)
+            continue
+        pat = Pattern(
+            pattern=pat_text,
+            category=str(item.get("category", "behavior")).lower(),
+            evidence=[str(e) for e in item.get("evidence", []) if e],
+            importance=max(1, min(10, int(item.get("importance", 6)))),
+            confidence=float(item.get("confidence", 0.7)),
+            status="active",
+        )
+        # add_pattern dedups + supersedes related patterns internally
+        stored = store.add_pattern(pat)
+        created.append(stored)
+    return created
+
+
+def extract_comm_prefs(
+    store: MemoryStore, summary: str, messages: list[str] | None = None
+) -> CommPref | None:
+    """Уровень 4: извлечь/обновить предпочтения общения пользователя.
+
+    Возвращает None при ошибке. Само сохранение (merge) делает store.upsert_comm_pref,
+    чтобы пустые поля не затирали ранее накопленные предпочтения.
+    """
+    facts = store.facts_for_period(datetime.now().strftime("%Y-%m"), min_importance=4)
+    fact_text = "\n".join(f"- {f.fact}" for f in facts[:40])
+    msg_text = "\n".join(f"- {m}" for m in (messages or [])[:15])
+    prompt = COMM_PREF_PROMPT.format(
+        facts=fact_text or "мало данных",
+        messages=msg_text or "нет",
+        summary=summary or "нет",
+    )
+    try:
+        result = llm.oneshot_structured(prompt, llm.CommPrefExtractionResult)
+        item = result.comm_pref
+        delta = CommPref(
+            style=(item.style or "").strip(),
+            formality=(item.formality or "").strip(),
+            humor=(item.humor or "").strip(),
+            language=(item.language or "").strip(),
+            liked_topics=[str(t).strip() for t in (item.liked_topics or []) if str(t).strip()],
+            avoided_topics=[str(t).strip() for t in (item.avoided_topics or []) if str(t).strip()],
+        )
+        # Не сохраняем пустышку — нет сигнала.
+        if not any([delta.style, delta.formality, delta.humor, delta.language,
+                    delta.liked_topics, delta.avoided_topics]):
+            logger.info("CommPref: no signal in this window, skipping.")
+            return None
+        store.upsert_comm_pref(delta)
+        return delta
+    except Exception as e:
+        logger.error(f"CommPref extraction failed: {e}")
+        return None
+
+
+def _pattern_redundant(store: MemoryStore, pat_text: str) -> bool:
+    """True if the pattern text closely mirrors an existing reflection/belief."""
+    norm = store._normalize(pat_text)
+    for refl in store.list_reflections("active"):
+        if text_overlap(norm, store._normalize(refl.insight)) > 0.72:
+            return True
+    for belief in store.db.list_beliefs("active"):
+        b = (belief.get("belief") or "").strip()
+        if b and text_overlap(norm, store._normalize(b)) > 0.72:
+            return True
+    return False
+
+
 def _personality_critical_section(store: MemoryStore, updated: dict[str, Any]) -> dict[str, Any]:
     """Sync critical section for personality update — runs in thread.
 
@@ -411,7 +523,9 @@ async def run_compress_pipeline(
                     fact.tags.append("auto_promoted")
                 if any(t in {"core_identity", "anchor", "pinned"} for t in fact.tags):
                     fact.tags.append("profile_fact")
-                store.db._insert_fact(fact.to_dict())
+                # Use the canonical edit path so DB metadata stays in sync with
+                # the FAISS entry already created by add_fact (text unchanged).
+                store.update_fact(fact.id, memory_kind="permanent", tags=fact.tags)
                 count = int(store.db.get_meta("permanent_promotion_count", "0")) + 1
                 store.db.set_meta("permanent_promotion_count", str(count))
         promoted_count = sum(1 for f in new_facts if "auto_promoted" in f.tags)
@@ -419,8 +533,17 @@ async def run_compress_pipeline(
             logger.info("Auto-promoted %d high-value facts to permanent", promoted_count)
         consolidate_facts(store, new_facts)
         extract_causal_links(store, new_facts, summary)
-        compress_n = store.increment_compress_count()
-        return new_facts, compress_n, summary
+        # Уровень 2: patterns extracted on the same cadence as reflections.
+        if compress_n % REFLECTION_EVERY_N == 0:
+            extract_patterns(store, summary)
+        # Уровень 4: предпочтения общения — всегда, на каждом compress
+        # (предпочтения эволюционируют независимо от каждых-N окна).
+        try:
+            extract_comm_prefs(store, summary)
+        except Exception as e:
+            logger.error("CommPref auto-update failed: %s", e)
+        compress_n_final = store.increment_compress_count()
+        return new_facts, compress_n_final, summary
 
     try:
         response = await llm.run_llm(chat.send_message, SUMMARY_PROMPT)
