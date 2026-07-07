@@ -45,8 +45,10 @@ def sanitize_and_scan_legacy_files() -> None:
     from companion.security.sanitizer import sanitize_markup, _looks_like_injection
     from datetime import datetime
     import json
+    from companion.storage.sqlite_db import MemoryDatabase
     
     quarantine_log_path = os.path.join(DATA_DIR, "quarantine_review.log")
+    os.makedirs(DATA_DIR, exist_ok=True)
     
     # 1. permanent_notes.txt
     notes_path = os.path.join(BASE_DIR, "permanent_notes.txt")
@@ -121,9 +123,46 @@ def sanitize_and_scan_legacy_files() -> None:
         except Exception as e:
             logger.error(f"Error sanitizing world_model.json: {e}")
 
+    notes_path = os.path.join(BASE_DIR, "permanent_notes.txt")
+    if os.path.exists(notes_path):
+        try:
+            db = MemoryDatabase()
+            migration_key = "legacy_permanent_notes_migrated"
+            current_signature = ""
+            notes = []
+            with open(notes_path, "r", encoding="utf-8") as f:
+                notes = [line.strip() for line in f if line.strip()]
+            if notes:
+                import hashlib
+                current_signature = hashlib.sha256("\n".join(notes).encode("utf-8")).hexdigest()
+            if current_signature and db.get_meta(migration_key, "") == current_signature:
+                logger.info("permanent_notes.txt migration already applied; skipping.")
+                return
+            if notes:
+                from companion.models import Fact
+                existing = {f.get("fact", "").strip() for f in db.list_facts(status=None)}
+                for note in notes:
+                    if note in existing:
+                        continue
+                    fact = Fact(
+                        fact=note,
+                        date=datetime.now().strftime("%Y-%m-%d"),
+                        importance=9,
+                        confidence=1.0,
+                        source="permanent_note_migration",
+                        source_type="user",
+                        memory_kind="permanent",
+                        tags=["permanent"],
+                    )
+                    db._insert_fact(fact.to_dict())
+                db.set_meta(migration_key, current_signature)
+            logger.info("Migrated permanent_notes.txt into SQLite permanent facts.")
+        except Exception as e:
+            logger.error("Error migrating permanent_notes.txt: %s", e)
+
 
 async def run() -> None:
-    # Sanitize and scan legacy files
+    # Sanitize and migrate remaining file inputs into SQLite.
     sanitize_and_scan_legacy_files()
 
     # Rotate growing JSONL files on startup

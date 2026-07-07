@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from contextlib import closing
 from datetime import datetime
 from typing import Any
 
@@ -28,7 +29,7 @@ class IdentityVault:
         self._init_schema()
 
     def _init_schema(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             _configure_conn(conn)
             conn.execute(
                 """
@@ -109,7 +110,7 @@ class IdentityVault:
         if category not in self.ALLOWED_CATEGORIES:
             raise ValueError(f"Category '{category}' not allowed.")
 
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             _configure_conn(conn)
             conn.row_factory = sqlite3.Row
             row = conn.execute(
@@ -150,6 +151,7 @@ class IdentityVault:
                     """,
                     (value, confidence, source, now, category),
                 )
+                conn.commit()
                 return "UPDATED"
             else:
                 now = datetime.now().isoformat()
@@ -161,10 +163,11 @@ class IdentityVault:
                     """,
                     (category, value, confidence, source, now, now),
                 )
+                conn.commit()
                 return "CREATED"
 
     def get_all(self) -> list[dict[str, Any]]:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             _configure_conn(conn)
             conn.row_factory = sqlite3.Row
             rows = conn.execute("SELECT * FROM identity_facts ORDER BY category").fetchall()

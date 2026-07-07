@@ -10,6 +10,17 @@ from companion.memory.importance import retrieval_score
 from companion.models import ContextBundle, Fact, Reflection
 
 
+def _is_explicit_search_query(query: str) -> bool:
+    lowered = query.lower()
+    search_keywords = ["интернет", "google", "гугл", "погугли", "поищи"]
+    if any(kw in lowered for kw in search_keywords):
+        action_verbs = ["посмотри", "найди", "поищи", "поиск", "проверь", "узнай", "загугли", "погугли"]
+        return any(verb in lowered for verb in action_verbs) or any(
+            lowered.startswith(verb) for verb in ["найди ", "поищи ", "погугли ", "загугли "]
+        )
+    return False
+
+
 def mood_to_retrieval_boost(mood: dict[str, float] | None, fact: str) -> float:
     """
     Преобразует mood в retrieval boost для факта.
@@ -80,6 +91,7 @@ class RetrievalBudgetManager:
         unified_profile_block: str = "",
         mood: dict | None = None,
         faiss_scores: dict[str, float] | None = None,
+        runtime_context_block: str = "",
     ) -> ContextBundle:
         summaries = summaries or []
         active_goals = active_goals or []
@@ -95,8 +107,8 @@ class RetrievalBudgetManager:
         ]
 
         # БЛОК 2: PINNED FACTS GUARANTEE
-        from companion.bot_core import is_explicit_search_request
-        if query and is_explicit_search_request(query):
+        explicit_search = bool(query and _is_explicit_search_query(query))
+        if explicit_search:
             pinned_facts_all = []
         else:
             pinned_facts_all = self.extract_pinned_facts(active_facts)
@@ -137,7 +149,7 @@ class RetrievalBudgetManager:
             
             import logging
             logger = logging.getLogger(__name__)
-            logger.info("Fact %s retrieval: FAISS=%.3f Final=%.3f", f.id, semantic_score, final_score)
+            logger.debug("Fact %s retrieval: FAISS=%.3f Final=%.3f", f.id, semantic_score, final_score)
             return final_score
 
         # Rank regular facts
@@ -145,7 +157,7 @@ class RetrievalBudgetManager:
         for f in regular_facts:
             semantic = faiss_scores.get(f.id, 0.0)
             score = _ranked_score(f, semantic)
-            if query and is_explicit_search_request(query):
+            if explicit_search:
                 # For explicit searches, only include facts strictly matching the topic (semantic > 0.2)
                 # Ignore importance/recency boosts if semantic match is poor.
                 if semantic < 0.2:
@@ -219,6 +231,7 @@ class RetrievalBudgetManager:
             world_model_context=world_model_context[:1200],
             user_model_context=user_model_context,
             unified_profile_block=unified_profile_block,
+            runtime_context_block=runtime_context_block,
         )
 
         # Global Overflow Eviction: T5 -> T4 -> T3

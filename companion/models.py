@@ -144,11 +144,14 @@ class ContextBundle:
     world_model_context: str = ""
     user_model_context: str = ""
     unified_profile_block: str = ""
+    runtime_context_block: str = ""
 
     def to_prompt_block(self) -> str:
         from companion.security.sanitizer import sanitize_markup
 
         parts: list[str] = []
+        if self.runtime_context_block:
+            parts.append(self.runtime_context_block)
         if self.identity_vault_block:
             sanitized_id = sanitize_markup(self.identity_vault_block) or ""
             parts.append(f"<system_identity>\n{sanitized_id}\n</system_identity>")

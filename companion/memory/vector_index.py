@@ -5,7 +5,7 @@ import logging
 import math
 import sqlite3
 import struct
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from collections.abc import Generator
 from typing import Any
 
@@ -48,11 +48,32 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
         all_embeddings = []
         for i in range(0, len(texts), chunk_size):
             chunk = texts[i : i + chunk_size]
-            result = client.models.embed_content(
-                model=_EMBEDDING_MODEL,
-                contents=chunk,
-                config=types.EmbedContentConfig(output_dimensionality=_EMBEDDING_DIM)
-            )
+            batch_embed = getattr(client.models, "batch_embed_content", None)
+            if batch_embed:
+                try:
+                    result = batch_embed(
+                        model=_EMBEDDING_MODEL,
+                        contents=chunk,
+                        config=types.EmbedContentConfig(output_dimensionality=_EMBEDDING_DIM),
+                    )
+                except TypeError:
+                    result = batch_embed(
+                        model=_EMBEDDING_MODEL,
+                        requests=[
+                            {
+                                "model": _EMBEDDING_MODEL,
+                                "content": text,
+                                "config": {"output_dimensionality": _EMBEDDING_DIM},
+                            }
+                            for text in chunk
+                        ],
+                    )
+            else:
+                result = client.models.embed_content(
+                    model=_EMBEDDING_MODEL,
+                    contents=chunk,
+                    config=types.EmbedContentConfig(output_dimensionality=_EMBEDDING_DIM)
+                )
             for embedding in result.embeddings:
                 values = list(embedding.values)
                 if values and not any(values):
@@ -126,7 +147,7 @@ class VectorIndex:
             return False
 
     def _init_table(self) -> None:
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn:
             _configure_conn(conn)
             
             # Check if table exists
@@ -155,6 +176,7 @@ class VectorIndex:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_type ON embeddings(content_type)")
             except sqlite3.OperationalError:
                 pass
+            conn.commit()
 
     @contextmanager
     def _conn(self) -> Generator[sqlite3.Connection, None, None]:
@@ -173,7 +195,15 @@ class VectorIndex:
         with self.lock:
             with self._conn() as conn:
                 rows = conn.execute(
-                    "SELECT content, embedding, content_type FROM embeddings WHERE content_type != 'query'"
+                    """
+                    SELECT fact AS content, embedding, 'fact' AS content_type
+                    FROM facts
+                    WHERE embedding IS NOT NULL AND status IN ('active', 'dormant')
+                    UNION ALL
+                    SELECT content, embedding, content_type
+                    FROM embeddings
+                    WHERE content_type NOT IN ('query', 'fact')
+                    """
                 ).fetchall()
             
             self.content_list = []
@@ -181,10 +211,15 @@ class VectorIndex:
             self.content_type_list = []
             arr_vecs = []
             
+            seen_hashes: set[str] = set()
             for content, blob, content_type in rows:
+                content_hash = self._content_hash(content)
+                if content_hash in seen_hashes:
+                    continue
+                seen_hashes.add(content_hash)
                 arr_vecs.append(_blob_to_float_list(blob))
                 self.content_list.append(content)
-                self.hash_list.append(self._content_hash(content))
+                self.hash_list.append(content_hash)
                 self.content_type_list.append(content_type)
                 
             self.index = faiss.IndexHNSWFlat(_EMBEDDING_DIM, 32)
@@ -198,16 +233,28 @@ class VectorIndex:
         import hashlib
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    def upsert_embedding(self, text: str, embedding: list[float], content_type: str = "fact") -> None:
+    def upsert_embedding(
+        self,
+        text: str,
+        embedding: list[float],
+        content_type: str = "fact",
+        fact_id: str | None = None,
+    ) -> None:
         h = self._content_hash(text)
         blob = _float_list_to_blob(embedding)
         with self.lock:
             with self._conn() as conn:
-                conn.execute(
-                    """INSERT OR REPLACE INTO embeddings (content_hash, content, embedding, content_type)
-                       VALUES (?, ?, ?, ?)""",
-                    (h, text, blob, content_type),
-                )
+                if content_type == "fact":
+                    if fact_id:
+                        conn.execute("UPDATE facts SET embedding=? WHERE id=?", (blob, fact_id))
+                    else:
+                        conn.execute("UPDATE facts SET embedding=? WHERE fact=?", (blob, text))
+                else:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO embeddings (content_hash, content, embedding, content_type)
+                           VALUES (?, ?, ?, ?)""",
+                        (h, text, blob, content_type),
+                    )
                 
             if content_type == "query":
                 return
@@ -232,21 +279,33 @@ class VectorIndex:
         h = self._content_hash(text)
         with self._conn() as conn:
             row = conn.execute(
+                "SELECT embedding FROM facts WHERE fact=? AND embedding IS NOT NULL LIMIT 1", (text,)
+            ).fetchone()
+            if row:
+                return _blob_to_float_list(row[0])
+            row = conn.execute(
                 "SELECT embedding FROM embeddings WHERE content_hash=?", (h,)
             ).fetchone()
         if row:
             return _blob_to_float_list(row[0])
         return None
 
-    def compute_and_cache(self, text: str, content_type: str = "fact") -> list[float] | None:
+    def compute_and_cache(
+        self,
+        text: str,
+        content_type: str = "fact",
+        fact_id: str | None = None,
+    ) -> list[float] | None:
         if not self.embeddings_enabled:
             return None
         existing = self.get_embedding(text)
         if existing:
+            if content_type == "fact" and fact_id:
+                self.upsert_embedding(text, existing, content_type, fact_id=fact_id)
             return existing
         try:
             vec = _embed_texts([text])[0]
-            self.upsert_embedding(text, vec, content_type)
+            self.upsert_embedding(text, vec, content_type, fact_id=fact_id)
             return vec
         except Exception:
             return None
@@ -261,15 +320,34 @@ class VectorIndex:
             
         hashes = [self._content_hash(t) for t in valid_texts]
         hash_to_text = dict(zip(hashes, valid_texts))
+        existing_by_hash: dict[str, list[float]] = {}
         
         with self._conn() as conn:
-            query = f"SELECT content_hash FROM embeddings WHERE content_hash IN ({','.join(['?'] * len(hashes))})"
+            if content_type == "fact":
+                fact_rows = conn.execute(
+                    f"SELECT fact, embedding FROM facts WHERE embedding IS NOT NULL AND fact IN ({','.join(['?'] * len(valid_texts))})",
+                    valid_texts,
+                ).fetchall()
+                for fact, blob in fact_rows:
+                    existing_by_hash[self._content_hash(fact)] = _blob_to_float_list(blob)
+            query = f"SELECT content, content_hash, embedding FROM embeddings WHERE content_hash IN ({','.join(['?'] * len(hashes))})"
             rows = conn.execute(query, hashes).fetchall()
-            found_hashes = {row[0] for row in rows}
+            for content, content_hash, blob in rows:
+                existing_by_hash.setdefault(content_hash, _blob_to_float_list(blob))
+            found_hashes = set(existing_by_hash)
+            if content_type == "fact":
+                conn.executemany(
+                    "UPDATE facts SET embedding=? WHERE fact=? AND embedding IS NULL",
+                    [(_float_list_to_blob(vec), hash_to_text[h]) for h, vec in existing_by_hash.items() if h in hash_to_text],
+                )
             
         missing_texts = [hash_to_text[h] for h in hashes if h not in found_hashes]
         
         if not missing_texts:
+            for text in valid_texts:
+                vec = existing_by_hash.get(self._content_hash(text))
+                if vec:
+                    self.upsert_embedding(text, vec, content_type)
             return
             
         try:
@@ -344,6 +422,10 @@ class VectorIndex:
                 conn.executemany(
                     "DELETE FROM embeddings WHERE content_hash=?",
                     [(h,) for h in hashes],
+                )
+                conn.executemany(
+                    "UPDATE facts SET embedding=NULL WHERE fact=?",
+                    [(t,) for t in texts],
                 )
             # Одна перестройка на весь батч.
             self._load_index()

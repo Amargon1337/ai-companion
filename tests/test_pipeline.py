@@ -74,11 +74,7 @@ def test_run_compress_pipeline_empty_response(mock_oneshot, mock_parse, mock_par
     chat = MagicMock()
     response = MagicMock()
     response.text = ""
-    # Use AsyncMock for send_message if run_llm makes it async, or normal mock if not.
-    # Wait, run_llm awaits chat.send_message, so it should return an awaitable.
-    async def mock_send(*args, **kwargs):
-        return response
-    chat.send_message = mock_send
+    chat.send_message.return_value = response
 
     import asyncio
     result = asyncio.run(run_compress_pipeline(memory_store, chat, 12345))
@@ -104,9 +100,7 @@ def test_run_compress_pipeline_increments_count(mock_oneshot, mock_parse, mock_p
 @patch("companion.llm.client.oneshot_structured", side_effect=mock_oneshot_structured)
 def test_run_compress_pipeline_error_handling(mock_oneshot, mock_parse, mock_parse_obj, memory_store):
     chat = MagicMock()
-    async def mock_send(*args, **kwargs):
-        raise RuntimeError("API failure")
-    chat.send_message = mock_send
+    chat.send_message.side_effect = RuntimeError("API failure")
 
     import asyncio
     result = asyncio.run(run_compress_pipeline(memory_store, chat, 12345))

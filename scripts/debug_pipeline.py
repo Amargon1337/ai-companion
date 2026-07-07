@@ -32,10 +32,7 @@ _LLM_PARSE_OBJ_RETURN = {"interests": {}}
 
 with patch("companion.llm.client.parse_json_object", return_value=_LLM_PARSE_OBJ_RETURN), \
      patch("companion.llm.client.parse_json_array", return_value=_LLM_PARSE_RETURN), \
-     patch("companion.llm.client.oneshot", return_value=_LLM_ONESHOT_RETURN), \
-     patch("companion.storage.legacy.LegacyStorage.save_summary"), \
-     patch("companion.storage.legacy.LegacyStorage.load_master_summary", return_value=""), \
-     patch("companion.storage.legacy.LegacyStorage.save_master_summary"):
+     patch("companion.llm.client.oneshot", return_value=_LLM_ONESHOT_RETURN):
     try:
         result = run_compress_pipeline(store, chat, 12345)
         print(f"Result: {result}")

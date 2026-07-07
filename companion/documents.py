@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 import os
-import uuid
+import logging
+import shutil
+import tempfile
 from collections.abc import Callable
 from typing import Any
 
 from aiogram import types
 
-from companion.config import BASE_DIR, MAX_DOCUMENT_CHARS, TEXT_EXTENSIONS
+from companion.config import MAX_DOCUMENT_CHARS, TEXT_EXTENSIONS
 from companion.llm import client as llm
 from companion.memory.store import MemoryStore
+
+
+logger = logging.getLogger(__name__)
 
 
 def read_text_file(path: str) -> str:
@@ -73,7 +78,9 @@ async def process_document(
     file_name = doc.file_name or "file"
     await message.answer(f"Читаю {file_name}...")
     ext = os.path.splitext(file_name)[1].lower() or ".bin"
-    file_path = os.path.join(BASE_DIR, f"{uuid.uuid4().hex}{ext}")
+    temp_dir = tempfile.mkdtemp(prefix="companion-doc-")
+    file_path = os.path.join(temp_dir, f"upload{ext}")
+    gemini_file = None
     try:
         tg_file = await bot.get_file(doc.file_id)
         await bot.download_file(tg_file.file_path, file_path)
@@ -93,8 +100,13 @@ async def process_document(
             await message.answer("Не смог прочитать файл.")
             return
         await process_llm(message, payload)
-    except Exception:
+    except Exception as exc:
+        logger.exception("Document processing error: %s", exc)
         await message.answer("Ошибка при обработке файла.")
     finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        if gemini_file:
+            try:
+                await llm.async_delete_file(gemini_file.name)
+            except Exception as exc:
+                logger.warning("Failed to delete Gemini file %s: %s", getattr(gemini_file, "name", "?"), exc)
+        shutil.rmtree(temp_dir, ignore_errors=True)

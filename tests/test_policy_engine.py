@@ -13,6 +13,10 @@ def mock_memory_store():
     store.list_facts.return_value = []
     store.list_reflections.return_value = []
     store.load_recent_summaries.return_value = []
+    store.build_canonical_profile_text.return_value = "Fake Snapshot"
+    store.db = MagicMock()
+    store.db.list_permanent_notes.return_value = ["Notes"]
+    store.db.get_meta.return_value = "Ivan DB"
     store.identity = MagicMock()
     store.identity.to_prompt_block.return_value = "Identity Block"
     return store
@@ -25,10 +29,8 @@ def mock_retrieval_mgr():
     mgr.select.return_value = bundle
     return mgr
 
-@patch("companion.llm.sessions.LegacyStorage.load_permanent_notes", return_value="Notes")
-@patch("companion.llm.sessions.LegacyStorage.load_memory", return_value="Ivan DB")
 @patch("companion.llm.sessions.reasoning_engine")
-def test_build_system_instruction_depressed_state(mock_reasoning, mock_load_memory, mock_load_notes, mock_memory_store, mock_retrieval_mgr):
+def test_build_system_instruction_depressed_state(mock_reasoning, mock_memory_store, mock_retrieval_mgr):
     # Set the state to depressed
     from companion.user_model import user_model
     user_model.data["emotional_timeline"]["baseline_state"] = "depressed"
@@ -55,10 +57,8 @@ def test_build_system_instruction_depressed_state(mock_reasoning, mock_load_memo
     assert "постирония" not in prompt
     assert "дерзкий" not in prompt
     
-@patch("companion.llm.sessions.LegacyStorage.load_permanent_notes", return_value="Notes")
-@patch("companion.llm.sessions.LegacyStorage.load_memory", return_value="Ivan DB")
 @patch("companion.llm.sessions.reasoning_engine")
-def test_build_system_instruction_fallback_state(mock_reasoning, mock_load_memory, mock_load_notes, mock_memory_store, mock_retrieval_mgr):
+def test_build_system_instruction_fallback_state(mock_reasoning, mock_memory_store, mock_retrieval_mgr):
     # Set the state to an invalid one
     from companion.user_model import user_model
     user_model.data["emotional_timeline"]["baseline_state"] = "super_burnt_out_and_tired"

@@ -5,6 +5,7 @@ import asyncio
 import logging
 import re as _re
 import time
+import uuid
 from datetime import datetime
 from typing import Any
 
@@ -19,6 +20,7 @@ from companion.background_scheduler import (
     safe_task,
 )
 from companion.config import BASE_DIR, SUMMARY_THRESHOLD
+from companion.context import ContextAggregator
 from companion.critique_manager import apply_critique_to_text, run_self_critique
 from companion.grounding_handler import (
     grounding_answer_only,
@@ -35,14 +37,14 @@ from companion.policy_layer import policy_layer
 from companion.policy_layer import UserState as PolicyUserState
 from companion.reasoning import reasoning_engine
 from companion.runtime_state import RuntimeState
-from companion.services import memory_service, reasoning_service, report_service
-from companion.storage.legacy import LegacyStorage
+from companion.services import memory_service, report_service
 
 logger = logging.getLogger(__name__)
 
 # Global singletons
 memory_store = MemoryStore()
 retrieval_mgr = RetrievalBudgetManager()
+context_aggregator = ContextAggregator(memory_store.db)
 
 # In-memory sessions
 user_chats: dict[int, Any] = {}
@@ -58,13 +60,13 @@ last_activity: dict[int, float] = {}
 
 
 async def proactive_ping_loop(bot):
-    """Каждые 30 мин проверяет возможность проактивного пинга."""
+    """Каждую минуту проверяет prospective memory и обычную проактивность."""
     from datetime import datetime
     from companion.proactive.loop import run_proactive_loop
     
     while True:
         try:
-            await asyncio.sleep(1800)
+            await asyncio.sleep(60)
             now_dt = datetime.now()
             hour = now_dt.hour
             # Не пингуем ночью
@@ -131,6 +133,132 @@ async def _persist_session(user_id: int) -> None:
     await asyncio.to_thread(memory_store.db.save_session, user_id, user_message_counts.get(user_id, 0))
 
 
+async def reset_context(message: types.Message) -> None:
+    uid = message.from_user.id
+    if uid in user_chats:
+        del user_chats[uid]
+        user_message_counts.pop(uid, None)
+        await message.answer("Чат сброшен. Память в SQLite сохранена.")
+    else:
+        await message.answer("Активного чата нет.")
+
+
+async def show_goals(message: types.Message) -> None:
+    goals = reasoning_engine.list_goals("active")
+    if not goals:
+        await message.answer("Нет целей. Сформулируй цель обычным текстом, например: 'моя цель - ...'")
+        return
+    lines = ["🎯 Твои цели:\n"]
+    for goal in goals:
+        status_emoji = {"active": "🟢", "paused": "⏸️", "completed": "✅", "abandoned": "❌"}.get(goal.status, "⚪")
+        priority_bar = "█" * goal.priority + "░" * (10 - goal.priority)
+        lines.append(f"{status_emoji} [{priority_bar}] {goal.title}")
+        if goal.description:
+            lines.append(f"   {goal.description[:60]}")
+        lines.append(f"   ID: {goal.goal_id}\n")
+    await send_long_message(message, "\n".join(lines))
+
+
+async def add_goal_from_text(message: types.Message, text: str) -> None:
+    from companion.reasoning import Goal
+    title = _extract_goal_title(text)
+    if not title:
+        await message.answer("Не понял цель. Пример: 'моя цель - пройти собеседование'.")
+        return
+    existing = reasoning_engine.list_goals("active")
+    if any(g.title.lower() == title.lower() for g in existing):
+        await message.answer(f"⚠️ Цель уже существует: {title}")
+        return
+    goal = Goal(title=title, priority=5)
+    reasoning_engine.add_goal(goal)
+    await message.answer(f"✅ Цель добавлена: {title}\nID: {goal.goal_id}")
+
+
+async def show_reasoning_state(message: types.Message) -> None:
+    lines = ["🧠 Текущее состояние разума:\n"]
+    active_goals = reasoning_engine.list_goals("active")
+    if active_goals:
+        lines.append("🎯 Активные цели:")
+        for goal in active_goals[:3]:
+            priority_bar = "█" * goal.priority + "░" * (10 - goal.priority)
+            lines.append(f"  [{priority_bar}] {goal.title}")
+        lines.append("")
+    causal_links = reasoning_engine.list_causal_links(min_confidence=0.6)
+    if causal_links:
+        lines.append(f"🔗 Установлено {len(causal_links)} причинно-следственных связей")
+        for link in causal_links[:3]:
+            lines.append(f"  {link.cause} -> {link.effect} ({link.confidence:.0%})")
+        lines.append("")
+    world_model = reasoning_engine.world_model
+    if world_model.get("active_contexts"):
+        lines.append("🌍 Активные контексты:")
+        for ctx in world_model["active_contexts"][:3]:
+            lines.append(f"  • {ctx}")
+        lines.append("")
+    lines.append(f"Последнее обновление: {world_model.get('last_updated', '?')[:16]}")
+    await send_long_message(message, "\n".join(lines))
+
+
+async def show_todos(message: types.Message) -> None:
+    todos = await memory_store.db.async_list_todos()
+    if not todos:
+        await message.answer("Список пуст.")
+        return
+    lines = [f"{i}. [{'✓' if t['done'] else '○'}] {t['text']}" for i, t in enumerate(todos, 1)]
+    await message.answer("\n".join(lines))
+
+
+async def add_todo(message: types.Message, text: str) -> None:
+    task_text = text.strip()
+    if not task_text:
+        await message.answer("Что добавить в задачи?")
+        return
+    await memory_store.db.async_save_todo(f"todo_{uuid.uuid4().hex[:10]}", task_text)
+    await message.answer("Задача добавлена.")
+
+
+async def complete_todo(message: types.Message, text: str) -> None:
+    todos = await memory_store.db.async_list_todos()
+    idx = _extract_index(text) - 1
+    if idx < 0 or idx >= len(todos):
+        await message.answer("Нет такого номера.")
+        return
+    await memory_store.db.async_complete_todo(todos[idx]["id"])
+    await message.answer("Готово.")
+
+
+async def delete_todo(message: types.Message, text: str) -> None:
+    todos = await memory_store.db.async_list_todos()
+    idx = _extract_index(text) - 1
+    if idx < 0 or idx >= len(todos):
+        await message.answer("Нет такого номера.")
+        return
+    await memory_store.db.async_delete_todo(todos[idx]["id"])
+    await message.answer("Готово.")
+
+
+async def clear_done_todos(message: types.Message) -> None:
+    deleted = await memory_store.db.async_clear_done_todos()
+    await message.answer(f"Выполненные очищены: {deleted}.")
+
+
+async def show_self_description(message: types.Message) -> None:
+    from companion.self_model import self_model
+    await send_long_message(message, self_model.get_self_description())
+
+
+async def show_selfmap(message: types.Message) -> None:
+    from companion.self_model import self_model
+    km = self_model.data.get("knowledge_domains", {})
+    lines = ["🗺️ Карта моих знаний о тебе:\n", "✅ Глубокое понимание:"]
+    lines.extend(f"  • {topic}" for topic in km.get("deep_knowledge", []))
+    lines.append("\n📖 Поверхностное понимание:")
+    lines.extend(f"  • {topic}" for topic in km.get("surface_knowledge", []))
+    lines.append("\n❓ Пробелы в знаниях:")
+    lines.extend(f"  • {missing}" for missing in km.get("missing_data", []))
+    await send_long_message(message, "\n".join(lines))
+
+
 _compression_locks: dict[int, asyncio.Lock] = {}
 
 def _get_compression_lock(user_id: int) -> asyncio.Lock:
@@ -180,6 +308,7 @@ async def compress_and_reset(user_id: int) -> str | None:
             return None
         except Exception as e:
             logger.error(f"Unexpected error in compress_and_reset: {e}")
+            user_message_counts[user_id] = user_message_counts.get(user_id, 0) + original_count
             return None
 
 
@@ -225,6 +354,10 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
             memory_store.log_message,
             "user", content_payload, analysis["estimated_importance"],
             "default", [], uid
+        )
+        safe_task(
+            _extract_prospective_memory(content_payload),
+            "prospective_memory_extract",
         )
         state.reasoning_context = await asyncio.to_thread(
             reasoning_engine.auto_reasoning_context, content_payload, analysis["estimated_importance"]
@@ -274,11 +407,22 @@ MUTATING_COMMANDS = {
 }
 
 PENDING_COMMANDS: dict[str, dict[str, Any]] = {}
+_PENDING_COMMAND_TTL_SECONDS = 15 * 60
+
+
+def cleanup_pending_commands(now: float | None = None) -> None:
+    current = now if now is not None else time.time()
+    expired = [
+        cmd_id for cmd_id, pending in PENDING_COMMANDS.items()
+        if current - float(pending.get("created_at", 0)) > _PENDING_COMMAND_TTL_SECONDS
+    ]
+    for cmd_id in expired:
+        PENDING_COMMANDS.pop(cmd_id, None)
 
 async def _route_command(message: types.Message, command: str, text: str) -> bool:
     """Route a command from LLM analysis to the appropriate service."""
     routing = {
-        "reset_context": reasoning_service.reset_context,
+        "reset_context": reset_context,
         "show_facts": memory_service.show_facts,
         "show_notes": memory_service.show_notes,
         "export_diary": memory_service.export_diary,
@@ -287,12 +431,12 @@ async def _route_command(message: types.Message, command: str, text: str) -> boo
         "week_digest": report_service.show_week_digest,
         "retrospective": report_service.show_retrospective,
         "selfie": report_service.show_selfie,
-        "show_goals": reasoning_service.show_goals,
-        "show_reasoning": reasoning_service.show_reasoning_state,
-        "self_description": reasoning_service.show_self_description,
-        "knowledge_map": reasoning_service.show_selfmap,
-        "show_todos": reasoning_service.show_todos,
-        "clear_done": reasoning_service.clear_done_todos,
+        "show_goals": show_goals,
+        "show_reasoning": show_reasoning_state,
+        "self_description": show_self_description,
+        "knowledge_map": show_selfmap,
+        "show_todos": show_todos,
+        "clear_done": clear_done_todos,
     }
 
     handler = routing.get(command)
@@ -302,7 +446,7 @@ async def _route_command(message: types.Message, command: str, text: str) -> boo
 
     if command == "add_goal":
         payload = _strip_prefix(text, ["моя цель", "я хочу"])
-        await reasoning_service.add_goal_from_text(message, payload if payload else text)
+        await add_goal_from_text(message, payload if payload else text)
         return True
 
     if command == "diary_entry":
@@ -312,15 +456,15 @@ async def _route_command(message: types.Message, command: str, text: str) -> boo
 
     if command == "add_todo":
         payload = _strip_prefix(text, ["добавь задачу", "создай задачу", "новая задача"])
-        await reasoning_service.add_todo(message, payload if payload else text)
+        await add_todo(message, payload if payload else text)
         return True
 
     if command == "complete_todo":
-        await reasoning_service.complete_todo(message, text)
+        await complete_todo(message, text)
         return True
 
     if command == "delete_todo":
-        await reasoning_service.delete_todo(message, text)
+        await delete_todo(message, text)
         return True
 
     if command == "monthbook":
@@ -367,6 +511,7 @@ def is_explicit_search_request(payload: Any) -> bool:
 
 
 async def process_llm_request(message: types.Message, content_payload: Any) -> None:
+    cleanup_pending_commands()
     last_activity[message.from_user.id] = time.time()
     
     from companion.user_model import user_model
@@ -390,7 +535,8 @@ async def process_llm_request(message: types.Message, content_payload: Any) -> N
                 PENDING_COMMANDS[cmd_id] = {
                     "command": command,
                     "payload": str(ctx["content_payload"]),
-                    "uid": ctx["uid"]
+                    "uid": ctx["uid"],
+                    "created_at": time.time(),
                 }
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [
@@ -437,6 +583,16 @@ async def process_llm_request(message: types.Message, content_payload: Any) -> N
         ctx["ctx_data"], ctx["policy_decision"], ctx["uid"],
         force_flash=ctx.get("force_flash", False)
     )
+
+
+async def _extract_prospective_memory(text: str) -> None:
+    try:
+        from companion.proactive.prospective import extract_prospective_tasks
+        created = await extract_prospective_tasks(memory_store, text)
+        if created:
+            logger.info("Prospective memory captured %d task(s)", created)
+    except Exception as exc:
+        logger.debug("Prospective memory extraction failed: %s", exc)
 
 
 def check_rate_limit(uid: int, message: types.Message) -> bool:
@@ -491,7 +647,7 @@ async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, 
             "facts": facts_list,
             "reflections": memory_store.search_reflections(query, limit=10) if query else memory_store.list_reflections("active")[:10],
             "summaries": memory_store.search_summaries(query, limit=3) if query else memory_store.load_recent_summaries(3),
-            "permanent_notes": LegacyStorage.load_permanent_notes(),
+            "permanent_notes": "\n".join(memory_store.db.list_permanent_notes()),
             "identity_vault_block": "",
             "personality": memory_store.build_canonical_profile_text(),
             "user_model_context": "",
@@ -501,6 +657,7 @@ async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, 
             "predictions": [],
             "world_model_context": reasoning_context.get("world_model_context", "") if reasoning_context else "",
             "faiss_scores": faiss_scores,
+            "runtime_context_block": context_aggregator.build_prompt_block(),
         }
 
     return await asyncio.to_thread(_load_sync)
@@ -539,6 +696,7 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             unified_profile_block=ctx_data.get("unified_profile_block", ""),
             mood=state.mood_state,
             faiss_scores=ctx_data.get("faiss_scores", {}),
+            runtime_context_block=ctx_data.get("runtime_context_block", ""),
         )
         ctx_block = bundle.to_prompt_block()
         user_block = _build_user_prompt_block(content_payload, state.reasoning_context, ctx_block)
@@ -723,6 +881,25 @@ def _extract_response_text(response: Any) -> str:
         logger.warning("Failed to extract Gemini response text: %s", e)
         return ""
     return text if isinstance(text, str) else ""
+
+
+def _extract_index(text: str) -> int:
+    match = _re.search(r"\b(\d+)\b", text)
+    return int(match.group(1)) if match else 0
+
+
+def _extract_goal_title(text: str) -> str:
+    patterns = [
+        r"моя цель\s*[-—:]?\s*(.+)",
+        r"цель\s*[-—:]?\s*(.+)",
+        r"хочу\s+(.+)",
+    ]
+    lowered = text.strip()
+    for pattern in patterns:
+        match = _re.search(pattern, lowered, _re.IGNORECASE)
+        if match:
+            return match.group(1).strip(" .")
+    return ""
 
 
 def fact_from_permanent_note(note: str) -> Fact:

@@ -2,16 +2,14 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import re
+import uuid
 from datetime import datetime
 
 from aiogram import types
 
 from companion import bot_core as core
-from companion.config import DIARY_PATH
 from companion.models import Fact
-from companion.storage.legacy import LegacyStorage
 
 
 def parse_year_from_text(text: str) -> int:
@@ -29,7 +27,6 @@ async def remember_text(message: types.Message, note: str) -> None:
         return
 
     async with core.memory_store.lock:
-        await asyncio.to_thread(LegacyStorage.save_permanent_note, note)
         fact = core.fact_from_permanent_note(note)
         await asyncio.to_thread(core.memory_store.add_fact, fact)
     uid = message.from_user.id
@@ -60,7 +57,7 @@ async def show_facts(message: types.Message, query: str = "") -> None:
 
 
 async def show_notes(message: types.Message) -> None:
-    notes = LegacyStorage.load_permanent_notes()
+    notes = "\n".join(await asyncio.to_thread(core.memory_store.db.list_permanent_notes))
     if notes:
         await core.send_long_message(message, f"📌 Постоянная память:\n\n{notes}")
     else:
@@ -72,19 +69,31 @@ async def add_diary_entry(message: types.Message, text: str) -> None:
     if not entry:
         await message.answer("Что записать в дневник?")
         return
-    LegacyStorage.save_diary(entry)
+    fact = Fact(
+        fact=entry,
+        date=datetime.now().strftime("%Y-%m-%d"),
+        importance=6,
+        confidence=0.8,
+        source="diary_entry",
+        source_type="user",
+        memory_kind="event",
+        tags=["diary"],
+    )
+    await asyncio.to_thread(core.memory_store.add_fact, fact)
     await message.answer("Лог записан.")
 
 
 async def export_diary(message: types.Message) -> None:
-    if os.path.exists(DIARY_PATH):
-        await message.answer_document(types.FSInputFile(DIARY_PATH))
-    else:
+    diary = [f for f in core.memory_store.list_all_facts() if "diary" in f.tags]
+    if not diary:
         await message.answer("Дневник пуст.")
+        return
+    lines = [f"{f.date}: {f.fact}" for f in sorted(diary, key=lambda f: f.date)]
+    await core.send_long_message(message, "\n".join(lines))
 
 
 async def show_timeline(message: types.Message) -> None:
-    events = LegacyStorage.load_events()
+    events = await asyncio.to_thread(core.memory_store.db.load_events)
     if not events:
         await message.answer("Хронология пуста.")
         return
@@ -93,7 +102,7 @@ async def show_timeline(message: types.Message) -> None:
 
 
 async def show_year(message: types.Message, year: int) -> None:
-    events = LegacyStorage.load_events(year)
+    events = await asyncio.to_thread(core.memory_store.db.load_events, year)
     if not events:
         await message.answer(f"Нет событий за {year}.")
         return
@@ -118,13 +127,20 @@ def auto_add_event_from_message(text: str, importance: int) -> Fact | None:
     if not title:
         return None
 
-    recent = LegacyStorage.load_events()
+    recent = core.memory_store.db.load_events()
     if any(e.get("event", "") == title for e in recent[-10:]):
         return None
 
     # Note: auto_add_event_from_message is synchronous, so it MUST be called via to_thread.
     # But since it's synchronous, we leave the signature sync, and callers wrap it.
-    LegacyStorage.save_event(title, min(10, max(5, importance)), clean[:500])
+    event_id = f"evt_{uuid.uuid4().hex[:12]}"
+    core.memory_store.db.save_event(
+        event_id,
+        datetime.now().strftime("%Y-%m-%d"),
+        title,
+        min(10, max(5, importance)),
+        clean[:500],
+    )
     fact = Fact(
         fact=clean[:500],
         date=datetime.now().strftime("%Y-%m-%d"),

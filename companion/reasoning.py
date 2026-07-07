@@ -10,12 +10,9 @@ from typing import Any
 
 from companion.config import DATA_DIR
 from companion.memory.text_sim import text_overlap
-from companion.storage.jsonl import append_jsonl, rotate_jsonl
+from companion.storage.sqlite_db import MemoryDatabase
 
-GOALS_PATH = os.path.join(DATA_DIR, "goals.jsonl")
 WORLD_MODEL_PATH = os.path.join(DATA_DIR, "world_model.json")
-CAUSAL_LINKS_PATH = os.path.join(DATA_DIR, "causal_links.jsonl")
-PREDICTIONS_PATH = os.path.join(DATA_DIR, "predictions.jsonl")
 
 
 class Goal:
@@ -156,6 +153,7 @@ class ReasoningEngine:
     def __init__(self):
         import threading
         self._lock = threading.RLock()
+        self.db = MemoryDatabase()
         self.world_model = self._load_world_model()
         self._last_wm_save = 0.0
 
@@ -332,23 +330,11 @@ class ReasoningEngine:
                         updates["status"] = "active"
                         self.update_goal(ex.goal_id, updates)
                     return
-            append_jsonl(GOALS_PATH, goal.to_dict())
-            rotate_jsonl(GOALS_PATH)
+            self.db.upsert_goal(goal.to_dict())
 
     def list_goals(self, status: str | None = None) -> list[Goal]:
         """Список целей."""
-        if not os.path.exists(GOALS_PATH):
-            return []
-
-        goals = []
-        with open(GOALS_PATH, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    data = json.loads(line.strip())
-                    if status is None or data.get("status") == status:
-                        goals.append(Goal.from_dict(data))
-                except json.JSONDecodeError:
-                    pass
+        goals = [Goal.from_dict(data) for data in self.db.list_goals(status)]
 
         # Сортировка: active первыми, потом по priority
         return sorted(
@@ -359,48 +345,17 @@ class ReasoningEngine:
     def update_goal(self, goal_id: str, updates: dict[str, Any]) -> bool:
         """Обновить цель (rewrite file)."""
         with self._lock:
-            goals = self.list_goals()
-            found = False
-
-            for goal in goals:
-                if goal.goal_id == goal_id:
-                    for key, value in updates.items():
-                        if hasattr(goal, key):
-                            setattr(goal, key, value)
-                    goal.updated_at = datetime.now().isoformat()
-                    found = True
-                    break
-
-            if found:
-                tmp = GOALS_PATH + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as f:
-                    for goal in goals:
-                        f.write(json.dumps(goal.to_dict(), ensure_ascii=False) + "\n")
-                os.replace(tmp, GOALS_PATH)
-
-            return found
+            return self.db.update_goal(goal_id, updates)
 
     # ═══ Causal Links ═══
 
     def add_causal_link(self, link: CausalLink) -> None:
         """Добавить причинно-следственную связь."""
-        append_jsonl(CAUSAL_LINKS_PATH, link.to_dict())
-        rotate_jsonl(CAUSAL_LINKS_PATH)
+        self.db.upsert_causal_link(link.to_dict())
 
     def list_causal_links(self, min_confidence: float = 0.5) -> list[CausalLink]:
         """Список причинно-следственных связей."""
-        if not os.path.exists(CAUSAL_LINKS_PATH):
-            return []
-
-        links = []
-        with open(CAUSAL_LINKS_PATH, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    data = json.loads(line.strip())
-                    if data.get("confidence", 0) >= min_confidence:
-                        links.append(CausalLink.from_dict(data))
-                except json.JSONDecodeError:
-                    pass
+        links = [CausalLink.from_dict(data) for data in self.db.list_causal_links(min_confidence)]
 
         return sorted(links, key=lambda l: l.confidence, reverse=True)
 
@@ -427,23 +382,11 @@ class ReasoningEngine:
 
     def add_prediction(self, prediction: Prediction) -> None:
         """Добавить прогноз."""
-        append_jsonl(PREDICTIONS_PATH, prediction.to_dict())
-        rotate_jsonl(PREDICTIONS_PATH)
+        self.db.upsert_prediction(prediction.to_dict())
 
     def list_predictions(self, outcome: str | None = None) -> list[Prediction]:
         """Список прогнозов."""
-        if not os.path.exists(PREDICTIONS_PATH):
-            return []
-
-        predictions = []
-        with open(PREDICTIONS_PATH, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    data = json.loads(line.strip())
-                    if outcome is None or data.get("outcome") == outcome:
-                        predictions.append(Prediction.from_dict(data))
-                except json.JSONDecodeError:
-                    pass
+        predictions = [Prediction.from_dict(data) for data in self.db.list_predictions(outcome)]
 
         return sorted(predictions, key=lambda p: p.created_at, reverse=True)
 

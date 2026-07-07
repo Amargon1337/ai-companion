@@ -9,15 +9,25 @@ _INJECTION_MARKERS = re.compile(
     r"(игнорируй\s+(?:предыдущ\w*|все\w*|систем\w*))|"
     r"(ты\s+должен\s+(?:теперь|отныне|всегда))|"
     r"(нов\w*\s+директив\w*)|"
-    r"[‹›]",
+    r"(ignore\s+(?:all\s+)?(?:previous|prior|system|developer)\s+(?:instructions?|messages?|prompts?))|"
+    r"(system\s+(?:prompt|message|instructions?|rules?))|"
+    r"(developer\s+(?:message|instructions?))|"
+    r"(you\s+are\s+now)|"
+    r"(follow\s+(?:these|my)\s+instructions?)|"
+    r"(^|\n)\s*(?:system|developer|assistant)\s*:",
     re.IGNORECASE
+)
+
+_SANITIZED_DANGEROUS_TAGS = re.compile(
+    r"[‹›]\s*/?\s*(?:script|iframe|object|embed|style|system|developer|assistant|tool|function)\b",
+    re.IGNORECASE,
 )
 
 
 def _looks_like_injection(text: str | None) -> bool:
     if not text:
         return False
-    return bool(_INJECTION_MARKERS.search(text))
+    return bool(_INJECTION_MARKERS.search(text) or _SANITIZED_DANGEROUS_TAGS.search(text))
 
 
 def sanitize_markup(text: str | None) -> str | None:

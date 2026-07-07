@@ -16,7 +16,6 @@ from companion import bot_core as core
 from companion.config import MAX_VIDEO_DOWNLOAD_BYTES
 from companion.llm import client as llm
 from companion.services import memory_service, report_service
-from companion.storage.legacy import LegacyStorage
 import yt_dlp
 
 logger = logging.getLogger(__name__)
@@ -140,6 +139,7 @@ def register(dp, bot) -> None:
 
     @dp.callback_query(F.data.startswith("cmd_ok:") | F.data.startswith("cmd_no:"))
     async def command_confirm(callback: types.CallbackQuery):
+        core.cleanup_pending_commands()
         data = callback.data
         action, cmd_id = data.split(":", 1)
         pending = core.PENDING_COMMANDS.get(cmd_id)
@@ -179,7 +179,7 @@ def register(dp, bot) -> None:
     @dp.message(F.text & ~F.text.startswith("/") & ~F.text.contains("tiktok.com"))
     async def text_handler(message: types.Message):
         text = message.text or ""
-        note = LegacyStorage.parse_remember_command(text)
+        note = _parse_remember_command(text)
         if note is not None:
             await memory_service.remember_text(message, note)
             return
@@ -230,3 +230,11 @@ def register(dp, bot) -> None:
                 except Exception:
                     pass
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _parse_remember_command(text: str) -> str | None:
+    lowered = text.strip().lower()
+    for prefix in ("запомни", "remember"):
+        if lowered.startswith(prefix):
+            return text.strip()[len(prefix):].strip(" :-—")
+    return None

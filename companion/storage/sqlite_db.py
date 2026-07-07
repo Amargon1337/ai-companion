@@ -1,12 +1,27 @@
 """SQLite backend — Phase 5, used as primary store with jsonl mirror."""
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import os
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
+
+
+def _json(value: Any) -> str:
+  return json.dumps(value if value is not None else [], ensure_ascii=False)
+
+
+def _loads(value: str | None, default: Any = None) -> Any:
+  if value is None:
+    return [] if default is None else default
+  try:
+    return json.loads(value)
+  except (TypeError, json.JSONDecodeError):
+    return [] if default is None else default
 
 def _configure_conn(conn: sqlite3.Connection) -> None:
   conn.execute("PRAGMA busy_timeout = 5000;")
@@ -48,7 +63,18 @@ class MemoryDatabase:
           valid_from TEXT,
           valid_until TEXT,
           schema_version INTEGER DEFAULT 1,
-          evidence TEXT DEFAULT '[]'
+          evidence TEXT DEFAULT '[]',
+          facts_sent_count INTEGER DEFAULT 0,
+          facts_used_count INTEGER DEFAULT 0,
+          embedding BLOB,
+          category TEXT DEFAULT 'life',
+          anchor_flag INTEGER DEFAULT 0,
+          manual_lock INTEGER DEFAULT 0,
+          archived INTEGER DEFAULT 0,
+          updated_at TEXT,
+          last_accessed TEXT,
+          access_count INTEGER DEFAULT 0,
+          decay_exempt INTEGER DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_facts_status ON facts(status);
         CREATE INDEX IF NOT EXISTS idx_facts_importance ON facts(importance);
@@ -155,6 +181,113 @@ class MemoryDatabase:
           user_replied BOOLEAN DEFAULT 0,
           reply_delay_hours REAL
         );
+        CREATE TABLE IF NOT EXISTS goals (
+          goal_id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          priority INTEGER DEFAULT 5,
+          status TEXT DEFAULT 'active',
+          description TEXT DEFAULT '',
+          blockers TEXT DEFAULT '[]',
+          next_actions TEXT DEFAULT '[]',
+          resources TEXT DEFAULT '[]',
+          obstacles TEXT DEFAULT '[]',
+          progress_markers TEXT DEFAULT '[]',
+          created_at TEXT,
+          updated_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(status);
+
+        CREATE TABLE IF NOT EXISTS causal_links (
+          link_id TEXT PRIMARY KEY,
+          cause TEXT NOT NULL,
+          effect TEXT NOT NULL,
+          confidence REAL DEFAULT 0.5,
+          evidence TEXT DEFAULT '[]',
+          mechanism TEXT DEFAULT '',
+          observed_count INTEGER DEFAULT 1,
+          created_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_causal_links_confidence ON causal_links(confidence);
+
+        CREATE TABLE IF NOT EXISTS predictions (
+          prediction_id TEXT PRIMARY KEY,
+          hypothesis TEXT NOT NULL,
+          confidence REAL DEFAULT 0.5,
+          timeframe TEXT DEFAULT '',
+          conditions TEXT DEFAULT '[]',
+          based_on TEXT DEFAULT '[]',
+          outcome TEXT DEFAULT 'pending',
+          created_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_predictions_outcome ON predictions(outcome);
+
+        CREATE TABLE IF NOT EXISTS todos (
+          id TEXT PRIMARY KEY,
+          text TEXT NOT NULL,
+          done INTEGER DEFAULT 0,
+          created_at TEXT,
+          completed_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS monthbooks (
+          ym TEXT PRIMARY KEY,
+          content TEXT NOT NULL,
+          updated_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS prospective_tasks (
+          task_id TEXT PRIMARY KEY,
+          text TEXT NOT NULL,
+          due_ts REAL NOT NULL,
+          status TEXT DEFAULT 'pending',
+          source_message_id TEXT,
+          created_at TEXT,
+          triggered_at TEXT,
+          metadata TEXT DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_prospective_due ON prospective_tasks(status, due_ts);
+
+        CREATE TABLE IF NOT EXISTS temporal_counters (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          counter_name TEXT NOT NULL UNIQUE,
+          description TEXT NOT NULL,
+          start_date TEXT NOT NULL,
+          timezone TEXT NOT NULL DEFAULT 'UTC',
+          status TEXT NOT NULL DEFAULT 'active',
+          archived INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          deleted_at TEXT,
+          CHECK (status IN ('active', 'paused', 'stopped')),
+          CHECK (archived IN (0, 1)),
+          CHECK (length(start_date) = 10)
+        );
+        CREATE INDEX IF NOT EXISTS idx_temporal_counters_status ON temporal_counters(status, archived, deleted_at);
+
+        CREATE TABLE IF NOT EXISTS temporal_counter_pauses (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          counter_id INTEGER NOT NULL,
+          pause_start_date TEXT NOT NULL,
+          pause_end_date TEXT,
+          reason TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (counter_id) REFERENCES temporal_counters(id) ON DELETE CASCADE,
+          CHECK (length(pause_start_date) = 10),
+          CHECK (pause_end_date IS NULL OR length(pause_end_date) = 10)
+        );
+        CREATE INDEX IF NOT EXISTS idx_temporal_counter_pauses_counter_id ON temporal_counter_pauses(counter_id);
+
+        CREATE TABLE IF NOT EXISTS memory_access_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          fact_id TEXT NOT NULL,
+          accessed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          query_hash TEXT,
+          vector_score REAL,
+          final_score REAL,
+          source TEXT NOT NULL DEFAULT 'rag',
+          FOREIGN KEY (fact_id) REFERENCES facts(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_access_log_fact_time ON memory_access_log(fact_id, accessed_at DESC);
         """
       )
       
@@ -197,9 +330,117 @@ class MemoryDatabase:
           conn.execute("ALTER TABLE facts ADD COLUMN facts_sent_count INTEGER DEFAULT 0")
         if "facts_used_count" not in cols:
           conn.execute("ALTER TABLE facts ADD COLUMN facts_used_count INTEGER DEFAULT 0")
+        if "embedding" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN embedding BLOB")
+        for col, ddl in {
+          "category": "ALTER TABLE facts ADD COLUMN category TEXT DEFAULT 'life'",
+          "anchor_flag": "ALTER TABLE facts ADD COLUMN anchor_flag INTEGER DEFAULT 0",
+          "manual_lock": "ALTER TABLE facts ADD COLUMN manual_lock INTEGER DEFAULT 0",
+          "archived": "ALTER TABLE facts ADD COLUMN archived INTEGER DEFAULT 0",
+          "updated_at": "ALTER TABLE facts ADD COLUMN updated_at TEXT",
+          "last_accessed": "ALTER TABLE facts ADD COLUMN last_accessed TEXT",
+          "access_count": "ALTER TABLE facts ADD COLUMN access_count INTEGER DEFAULT 0",
+          "decay_exempt": "ALTER TABLE facts ADD COLUMN decay_exempt INTEGER DEFAULT 0",
+        }.items():
+          if col not in cols:
+            conn.execute(ddl)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_retrieval_v2 ON facts(status, archived, anchor_flag, importance, last_accessed)")
+        conn.execute("UPDATE facts SET anchor_flag=1 WHERE anchor_flag=0 AND (tags LIKE '%anchor%' OR tags LIKE '%core_identity%' OR tags LIKE '%pinned%' OR memory_kind='permanent')")
+        conn.execute("UPDATE facts SET archived=1 WHERE archived=0 AND status='archived'")
       except sqlite3.OperationalError:
         pass
 
+      self._migrate_jsonl_files(conn)
+
+
+  def _migrate_jsonl_files(self, conn: sqlite3.Connection) -> None:
+    data_dir = os.path.dirname(self.path) or "."
+    migrations = [
+      ("goals.jsonl", "migrated_goals_jsonl", self._upsert_goal_conn),
+      ("causal_links.jsonl", "migrated_causal_links_jsonl", self._upsert_causal_link_conn),
+      ("predictions.jsonl", "migrated_predictions_jsonl", self._upsert_prediction_conn),
+      ("beliefs.jsonl", "migrated_beliefs_jsonl", self._upsert_belief_conn),
+    ]
+    for filename, meta_key, inserter in migrations:
+      if conn.execute("SELECT value FROM meta WHERE key=?", (meta_key,)).fetchone():
+        continue
+      path = os.path.join(data_dir, filename)
+      if not os.path.exists(path):
+        conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (meta_key, "missing"))
+        continue
+      imported = 0
+      with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+          if not line.strip():
+            continue
+          try:
+            inserter(conn, json.loads(line))
+            imported += 1
+          except (json.JSONDecodeError, KeyError, TypeError, sqlite3.Error):
+            continue
+      conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (meta_key, str(imported)))
+
+  def _upsert_goal_conn(self, conn: sqlite3.Connection, row: dict[str, Any]) -> None:
+    conn.execute(
+      """
+      INSERT INTO goals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(goal_id) DO UPDATE SET
+        title=excluded.title, priority=excluded.priority, status=excluded.status,
+        description=excluded.description, blockers=excluded.blockers,
+        next_actions=excluded.next_actions, resources=excluded.resources,
+        obstacles=excluded.obstacles, progress_markers=excluded.progress_markers,
+        updated_at=excluded.updated_at
+      """,
+      (
+        row["goal_id"], row["title"], row.get("priority", 5), row.get("status", "active"),
+        row.get("description", ""), _json(row.get("blockers", [])), _json(row.get("next_actions", [])),
+        _json(row.get("resources", [])), _json(row.get("obstacles", [])), _json(row.get("progress_markers", [])),
+        row.get("created_at"), row.get("updated_at"),
+      ),
+    )
+
+  def _upsert_causal_link_conn(self, conn: sqlite3.Connection, row: dict[str, Any]) -> None:
+    conn.execute(
+      """
+      INSERT INTO causal_links VALUES (?,?,?,?,?,?,?,?)
+      ON CONFLICT(link_id) DO UPDATE SET
+        cause=excluded.cause, effect=excluded.effect, confidence=excluded.confidence,
+        evidence=excluded.evidence, mechanism=excluded.mechanism,
+        observed_count=excluded.observed_count
+      """,
+      (
+        row["link_id"], row["cause"], row["effect"], row.get("confidence", 0.5),
+        _json(row.get("evidence", [])), row.get("mechanism", ""), row.get("observed_count", 1), row.get("created_at"),
+      ),
+    )
+
+  def _upsert_prediction_conn(self, conn: sqlite3.Connection, row: dict[str, Any]) -> None:
+    conn.execute(
+      """
+      INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?)
+      ON CONFLICT(prediction_id) DO UPDATE SET
+        hypothesis=excluded.hypothesis, confidence=excluded.confidence,
+        timeframe=excluded.timeframe, conditions=excluded.conditions,
+        based_on=excluded.based_on, outcome=excluded.outcome
+      """,
+      (
+        row["prediction_id"], row["hypothesis"], row.get("confidence", 0.5), row.get("timeframe", ""),
+        _json(row.get("conditions", [])), _json(row.get("based_on", [])), row.get("outcome", "pending"), row.get("created_at"),
+      ),
+    )
+
+  def _upsert_belief_conn(self, conn: sqlite3.Connection, row: dict[str, Any]) -> None:
+    belief_id = row.get("id") or f"belief_{hashlib.sha1(str(row.get('belief', '')).encode('utf-8')).hexdigest()[:10]}"
+    conn.execute(
+      """
+      INSERT INTO beliefs (id, belief, based_on, importance, status, created_at)
+      VALUES (?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET
+        belief=excluded.belief, based_on=excluded.based_on,
+        importance=excluded.importance, status=excluded.status
+      """,
+      (belief_id, row["belief"], _json(row.get("based_on", [])), row.get("importance", 6), row.get("status", "active"), row.get("created_at")),
+    )
 
 
   def batch_insert_facts(self, rows: list[dict[str, Any]]) -> None:
@@ -215,14 +456,19 @@ class MemoryDatabase:
         row.get("valid_until"), row.get("schema_version", 1),
         json.dumps(row.get("evidence", []), ensure_ascii=False),
         row.get("facts_sent_count", 0), row.get("facts_used_count", 0),
+        row.get("embedding"),
       )
       for row in rows
     ]
     with self._conn() as conn:
       conn.executemany(
         """
-        INSERT OR IGNORE INTO facts VALUES
-        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        INSERT OR IGNORE INTO facts (
+          id, fact, date, created_at, memory_kind, importance, confidence,
+          source, source_type, tags, status, valid_from, valid_until,
+          schema_version, evidence, facts_sent_count, facts_used_count, embedding
+        ) VALUES
+        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         tuples,
       )
@@ -304,8 +550,14 @@ class MemoryDatabase:
     with self._conn() as conn:
       conn.execute(
         """
-        INSERT INTO facts VALUES
-        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        INSERT INTO facts (
+          id, fact, date, created_at, memory_kind, importance, confidence,
+          source, source_type, tags, status, valid_from, valid_until,
+          schema_version, evidence, facts_sent_count, facts_used_count, embedding,
+          category, anchor_flag, manual_lock, archived, updated_at,
+          last_accessed, access_count, decay_exempt
+        ) VALUES
+        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
           fact=excluded.fact,
           date=excluded.date,
@@ -320,7 +572,16 @@ class MemoryDatabase:
           valid_until=excluded.valid_until,
           evidence=excluded.evidence,
           facts_sent_count=excluded.facts_sent_count,
-          facts_used_count=excluded.facts_used_count
+          facts_used_count=excluded.facts_used_count,
+          embedding=COALESCE(excluded.embedding, facts.embedding),
+          category=COALESCE(excluded.category, facts.category),
+          anchor_flag=excluded.anchor_flag,
+          manual_lock=excluded.manual_lock,
+          archived=excluded.archived,
+          updated_at=excluded.updated_at,
+          last_accessed=COALESCE(excluded.last_accessed, facts.last_accessed),
+          access_count=excluded.access_count,
+          decay_exempt=excluded.decay_exempt
         """,
         (
           row["id"], row["fact"], row.get("date"), row.get("created_at"),
@@ -331,8 +592,22 @@ class MemoryDatabase:
           row.get("valid_until"), row.get("schema_version", 1),
           json.dumps(row.get("evidence", []), ensure_ascii=False),
           row.get("facts_sent_count", 0), row.get("facts_used_count", 0),
+          row.get("embedding"),
+          row.get("category", "life"), row.get("anchor_flag", 1 if any(str(t).lower() in {"anchor", "core_identity", "pinned"} for t in row.get("tags", [])) or row.get("memory_kind") == "permanent" else 0),
+          row.get("manual_lock", 0), row.get("archived", 1 if row.get("status") == "archived" else 0),
+          row.get("updated_at") or row.get("created_at"), row.get("last_accessed"), row.get("access_count", 0), row.get("decay_exempt", 0),
         ),
       )
+
+  def update_fact_embedding(self, fact_id: str, embedding: bytes) -> None:
+    with self._conn() as conn:
+      conn.execute("UPDATE facts SET embedding=? WHERE id=?", (embedding, fact_id))
+
+  def update_fact_embeddings(self, rows: list[tuple[str, bytes]]) -> None:
+    if not rows:
+      return
+    with self._conn() as conn:
+      conn.executemany("UPDATE facts SET embedding=? WHERE id=?", [(blob, fact_id) for fact_id, blob in rows])
 
   def _insert_relation(self, row: dict[str, Any]) -> None:
     with self._conn() as conn:
@@ -371,15 +646,133 @@ class MemoryDatabase:
 
   def _insert_belief(self, row: dict[str, Any]) -> None:
     with self._conn() as conn:
-      conn.execute(
-        "INSERT OR IGNORE INTO beliefs VALUES (?,?,?,?,?,?)",
-        (
-          row["id"], row["belief"],
-          json.dumps(row.get("based_on", []), ensure_ascii=False),
-          row.get("importance", 6), row.get("status", "active"),
-          row.get("created_at"),
-        ),
-      )
+      self._upsert_belief_conn(conn, row)
+
+  async def async_insert_belief(self, row: dict[str, Any]) -> None:
+    await asyncio.to_thread(self._insert_belief, row)
+
+  def upsert_goal(self, row: dict[str, Any]) -> None:
+    with self._conn() as conn:
+      self._upsert_goal_conn(conn, row)
+
+  async def async_upsert_goal(self, row: dict[str, Any]) -> None:
+    await asyncio.to_thread(self.upsert_goal, row)
+
+  def list_goals(self, status: str | None = None) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      if status is None:
+        rows = conn.execute("SELECT * FROM goals ORDER BY status='active' DESC, priority DESC, created_at ASC").fetchall()
+      else:
+        rows = conn.execute(
+          "SELECT * FROM goals WHERE status=? ORDER BY priority DESC, created_at ASC",
+          (status,),
+        ).fetchall()
+    return [self._row_goal(r) for r in rows]
+
+  async def async_list_goals(self, status: str | None = None) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(self.list_goals, status)
+
+  def update_goal(self, goal_id: str, updates: dict[str, Any]) -> bool:
+    allowed = {
+      "title", "priority", "status", "description", "blockers", "next_actions",
+      "resources", "obstacles", "progress_markers", "updated_at",
+    }
+    values = {k: v for k, v in updates.items() if k in allowed}
+    if not values:
+      return False
+    if "updated_at" not in values:
+      from datetime import datetime
+      values["updated_at"] = datetime.now().isoformat()
+    json_cols = {"blockers", "next_actions", "resources", "obstacles", "progress_markers"}
+    assignments = ", ".join(f"{k}=?" for k in values)
+    params = [_json(v) if k in json_cols else v for k, v in values.items()]
+    params.append(goal_id)
+    with self._conn() as conn:
+      cur = conn.execute(f"UPDATE goals SET {assignments} WHERE goal_id=?", params)
+      return cur.rowcount > 0
+
+  async def async_update_goal(self, goal_id: str, updates: dict[str, Any]) -> bool:
+    return await asyncio.to_thread(self.update_goal, goal_id, updates)
+
+  def delete_goal(self, goal_id: str) -> bool:
+    with self._conn() as conn:
+      cur = conn.execute("DELETE FROM goals WHERE goal_id=?", (goal_id,))
+      return cur.rowcount > 0
+
+  async def async_delete_goal(self, goal_id: str) -> bool:
+    return await asyncio.to_thread(self.delete_goal, goal_id)
+
+  def upsert_causal_link(self, row: dict[str, Any]) -> None:
+    with self._conn() as conn:
+      self._upsert_causal_link_conn(conn, row)
+
+  async def async_upsert_causal_link(self, row: dict[str, Any]) -> None:
+    await asyncio.to_thread(self.upsert_causal_link, row)
+
+  def list_causal_links(self, min_confidence: float = 0.5) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      rows = conn.execute(
+        "SELECT * FROM causal_links WHERE confidence>=? ORDER BY confidence DESC, created_at DESC",
+        (min_confidence,),
+      ).fetchall()
+    return [self._row_causal_link(r) for r in rows]
+
+  async def async_list_causal_links(self, min_confidence: float = 0.5) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(self.list_causal_links, min_confidence)
+
+  def delete_causal_link(self, link_id: str) -> bool:
+    with self._conn() as conn:
+      cur = conn.execute("DELETE FROM causal_links WHERE link_id=?", (link_id,))
+      return cur.rowcount > 0
+
+  async def async_delete_causal_link(self, link_id: str) -> bool:
+    return await asyncio.to_thread(self.delete_causal_link, link_id)
+
+  def upsert_prediction(self, row: dict[str, Any]) -> None:
+    with self._conn() as conn:
+      self._upsert_prediction_conn(conn, row)
+
+  async def async_upsert_prediction(self, row: dict[str, Any]) -> None:
+    await asyncio.to_thread(self.upsert_prediction, row)
+
+  def list_predictions(self, outcome: str | None = None) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      if outcome is None:
+        rows = conn.execute("SELECT * FROM predictions ORDER BY created_at DESC").fetchall()
+      else:
+        rows = conn.execute(
+          "SELECT * FROM predictions WHERE outcome=? ORDER BY created_at DESC",
+          (outcome,),
+        ).fetchall()
+    return [self._row_prediction(r) for r in rows]
+
+  async def async_list_predictions(self, outcome: str | None = None) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(self.list_predictions, outcome)
+
+  def delete_prediction(self, prediction_id: str) -> bool:
+    with self._conn() as conn:
+      cur = conn.execute("DELETE FROM predictions WHERE prediction_id=?", (prediction_id,))
+      return cur.rowcount > 0
+
+  async def async_delete_prediction(self, prediction_id: str) -> bool:
+    return await asyncio.to_thread(self.delete_prediction, prediction_id)
+
+  def _row_goal(self, row: sqlite3.Row) -> dict[str, Any]:
+    d = dict(row)
+    for key in ("blockers", "next_actions", "resources", "obstacles", "progress_markers"):
+      d[key] = _loads(d.get(key))
+    return d
+
+  def _row_causal_link(self, row: sqlite3.Row) -> dict[str, Any]:
+    d = dict(row)
+    d["evidence"] = _loads(d.get("evidence"))
+    return d
+
+  def _row_prediction(self, row: sqlite3.Row) -> dict[str, Any]:
+    d = dict(row)
+    d["conditions"] = _loads(d.get("conditions"))
+    d["based_on"] = _loads(d.get("based_on"))
+    return d
 
   def get_meta(self, key: str, default: str = "0") -> str:
     with self._conn() as conn:
@@ -591,6 +984,140 @@ class MemoryDatabase:
       if used_ids:
         conn.executemany("UPDATE facts SET facts_sent_count = facts_sent_count + 1, facts_used_count = facts_used_count + 1 WHERE id=?", [(i,) for i in used_ids])
 
+  def hydrate_fact_metadata(self, fact_ids: list[str]) -> dict[str, dict[str, Any]]:
+    if not fact_ids:
+      return {}
+    unique_ids = list(dict.fromkeys(fact_ids))
+    placeholders = ",".join("?" for _ in unique_ids)
+    with self._conn() as conn:
+      rows = conn.execute(
+        f"""
+        SELECT id, importance, category, anchor_flag, manual_lock, archived,
+               created_at, date, updated_at, last_accessed, access_count, decay_exempt,
+               memory_kind, tags, status
+        FROM facts
+        WHERE id IN ({placeholders})
+        """,
+        unique_ids,
+      ).fetchall()
+    return {r["id"]: self._row_fact(r) for r in rows}
+
+  def record_fact_access_batch(self, fact_scores: list[tuple[str, float, float]], query_hash: str | None = None) -> None:
+    if not fact_scores:
+      return
+    with self._conn() as conn:
+      conn.executemany(
+        """
+        UPDATE facts
+        SET access_count = COALESCE(access_count, 0) + 1,
+            last_accessed = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id=? AND COALESCE(archived, 0)=0
+        """,
+        [(fact_id,) for fact_id, _, _ in fact_scores],
+      )
+      conn.executemany(
+        """
+        INSERT INTO memory_access_log(fact_id, query_hash, vector_score, final_score, source)
+        VALUES(?,?,?,?, 'rag')
+        """,
+        [(fact_id, query_hash, vector_score, final_score) for fact_id, vector_score, final_score in fact_scores],
+      )
+
+  def create_temporal_counter(self, counter_name: str, description: str, start_date: str, timezone: str) -> int:
+    with self._conn() as conn:
+      row = conn.execute(
+        """
+        INSERT INTO temporal_counters(counter_name, description, start_date, timezone, status)
+        VALUES(?,?,?,?, 'active')
+        ON CONFLICT(counter_name) DO UPDATE SET
+          description=excluded.description,
+          start_date=excluded.start_date,
+          timezone=excluded.timezone,
+          status='active',
+          archived=0,
+          deleted_at=NULL,
+          updated_at=CURRENT_TIMESTAMP
+        RETURNING id
+        """,
+        (counter_name, description, start_date, timezone),
+      ).fetchone()
+      return int(row["id"])
+
+  def update_temporal_counter(self, counter_name: str, *, description: str | None = None, status: str | None = None, archived: bool | None = None) -> bool:
+    updates: list[str] = []
+    params: list[Any] = []
+    if description is not None:
+      updates.append("description=?")
+      params.append(description)
+    if status is not None:
+      updates.append("status=?")
+      params.append(status)
+    if archived is not None:
+      updates.append("archived=?")
+      params.append(1 if archived else 0)
+    if not updates:
+      return False
+    updates.append("updated_at=CURRENT_TIMESTAMP")
+    params.append(counter_name)
+    with self._conn() as conn:
+      cur = conn.execute(f"UPDATE temporal_counters SET {', '.join(updates)} WHERE counter_name=? AND deleted_at IS NULL", params)
+      return cur.rowcount > 0
+
+  def delete_temporal_counter(self, counter_name: str) -> bool:
+    with self._conn() as conn:
+      cur = conn.execute(
+        "UPDATE temporal_counters SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE counter_name=?",
+        (counter_name,),
+      )
+      return cur.rowcount > 0
+
+  def pause_temporal_counter(self, counter_name: str, pause_date: str, reason: str | None = None) -> None:
+    with self._conn() as conn:
+      row = conn.execute("SELECT id FROM temporal_counters WHERE counter_name=? AND deleted_at IS NULL", (counter_name,)).fetchone()
+      if not row:
+        raise KeyError(f"counter not found: {counter_name}")
+      counter_id = int(row["id"])
+      if conn.execute("SELECT 1 FROM temporal_counter_pauses WHERE counter_id=? AND pause_end_date IS NULL", (counter_id,)).fetchone():
+        raise ValueError("counter is already paused")
+      conn.execute(
+        "INSERT INTO temporal_counter_pauses(counter_id, pause_start_date, reason) VALUES(?,?,?)",
+        (counter_id, pause_date, reason),
+      )
+      conn.execute("UPDATE temporal_counters SET status='paused', updated_at=CURRENT_TIMESTAMP WHERE id=?", (counter_id,))
+
+  def resume_temporal_counter(self, counter_name: str, resume_date: str) -> None:
+    with self._conn() as conn:
+      row = conn.execute("SELECT id FROM temporal_counters WHERE counter_name=? AND deleted_at IS NULL", (counter_name,)).fetchone()
+      if not row:
+        raise KeyError(f"counter not found: {counter_name}")
+      cur = conn.execute(
+        "UPDATE temporal_counter_pauses SET pause_end_date=? WHERE counter_id=? AND pause_end_date IS NULL",
+        (resume_date, int(row["id"])),
+      )
+      if cur.rowcount == 0:
+        raise ValueError("counter is not paused")
+      conn.execute("UPDATE temporal_counters SET status='active', updated_at=CURRENT_TIMESTAMP WHERE id=?", (int(row["id"]),))
+
+  def list_temporal_counters(self) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      rows = conn.execute(
+        """
+        SELECT * FROM temporal_counters
+        WHERE deleted_at IS NULL AND archived=0 AND status IN ('active', 'paused')
+        ORDER BY counter_name ASC
+        """
+      ).fetchall()
+    return [dict(r) for r in rows]
+
+  def list_temporal_counter_pauses(self, counter_id: int) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      rows = conn.execute(
+        "SELECT * FROM temporal_counter_pauses WHERE counter_id=? ORDER BY pause_start_date ASC",
+        (counter_id,),
+      ).fetchall()
+    return [dict(r) for r in rows]
+
   def _insert_summary(self, row: dict[str, Any]) -> None:
     with self._conn() as conn:
       conn.execute(
@@ -615,3 +1142,131 @@ class MemoryDatabase:
   def update_summary_status(self, summary_id: str, status: str) -> None:
     with self._conn() as conn:
       conn.execute("UPDATE summaries SET status=? WHERE id=?", (status, summary_id))
+
+  def list_permanent_notes(self) -> list[str]:
+    with self._conn() as conn:
+      rows = conn.execute(
+        "SELECT fact FROM facts WHERE memory_kind='permanent' AND status='active' ORDER BY created_at ASC"
+      ).fetchall()
+    return [r["fact"] for r in rows]
+
+  async def async_list_permanent_notes(self) -> list[str]:
+    return await asyncio.to_thread(self.list_permanent_notes)
+
+  def save_todo(self, task_id: str, text: str, done: bool = False, created_at: str | None = None) -> None:
+    from datetime import datetime
+    created_at = created_at or datetime.now().isoformat()
+    with self._conn() as conn:
+      conn.execute(
+        "INSERT INTO todos(id,text,done,created_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET text=excluded.text, done=excluded.done",
+        (task_id, text, int(done), created_at),
+      )
+
+  async def async_save_todo(self, task_id: str, text: str, done: bool = False) -> None:
+    await asyncio.to_thread(self.save_todo, task_id, text, done)
+
+  def list_todos(self, include_done: bool = True) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      if include_done:
+        rows = conn.execute("SELECT * FROM todos ORDER BY done ASC, created_at ASC").fetchall()
+      else:
+        rows = conn.execute("SELECT * FROM todos WHERE done=0 ORDER BY created_at ASC").fetchall()
+    return [dict(r) for r in rows]
+
+  async def async_list_todos(self, include_done: bool = True) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(self.list_todos, include_done)
+
+  def complete_todo(self, task_id: str) -> bool:
+    from datetime import datetime
+    with self._conn() as conn:
+      cur = conn.execute(
+        "UPDATE todos SET done=1, completed_at=? WHERE id=?",
+        (datetime.now().isoformat(), task_id),
+      )
+      return cur.rowcount > 0
+
+  async def async_complete_todo(self, task_id: str) -> bool:
+    return await asyncio.to_thread(self.complete_todo, task_id)
+
+  def delete_todo(self, task_id: str) -> bool:
+    with self._conn() as conn:
+      cur = conn.execute("DELETE FROM todos WHERE id=?", (task_id,))
+      return cur.rowcount > 0
+
+  async def async_delete_todo(self, task_id: str) -> bool:
+    return await asyncio.to_thread(self.delete_todo, task_id)
+
+  def clear_done_todos(self) -> int:
+    with self._conn() as conn:
+      cur = conn.execute("DELETE FROM todos WHERE done=1")
+      return cur.rowcount
+
+  async def async_clear_done_todos(self) -> int:
+    return await asyncio.to_thread(self.clear_done_todos)
+
+  def save_monthbook(self, ym: str, content: str) -> None:
+    from datetime import datetime
+    with self._conn() as conn:
+      conn.execute(
+        "INSERT INTO monthbooks(ym,content,updated_at) VALUES(?,?,?) ON CONFLICT(ym) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at",
+        (ym, content, datetime.now().isoformat()),
+      )
+
+  async def async_save_monthbook(self, ym: str, content: str) -> None:
+    await asyncio.to_thread(self.save_monthbook, ym, content)
+
+  def load_monthbook(self, ym: str) -> str:
+    with self._conn() as conn:
+      row = conn.execute("SELECT content FROM monthbooks WHERE ym=?", (ym,)).fetchone()
+      return row["content"] if row else ""
+
+  async def async_load_monthbook(self, ym: str) -> str:
+    return await asyncio.to_thread(self.load_monthbook, ym)
+
+  def upsert_prospective_task(self, row: dict[str, Any]) -> None:
+    with self._conn() as conn:
+      conn.execute(
+        """
+        INSERT INTO prospective_tasks(task_id,text,due_ts,status,source_message_id,created_at,triggered_at,metadata)
+        VALUES(?,?,?,?,?,?,?,?)
+        ON CONFLICT(task_id) DO UPDATE SET
+          text=excluded.text, due_ts=excluded.due_ts, status=excluded.status,
+          source_message_id=excluded.source_message_id, metadata=excluded.metadata
+        """,
+        (
+          row["task_id"], row["text"], row["due_ts"], row.get("status", "pending"),
+          row.get("source_message_id"), row.get("created_at"), row.get("triggered_at"),
+          _json(row.get("metadata", {})),
+        ),
+      )
+
+  async def async_upsert_prospective_task(self, row: dict[str, Any]) -> None:
+    await asyncio.to_thread(self.upsert_prospective_task, row)
+
+  def due_prospective_tasks(self, now_ts: float, limit: int = 5) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      rows = conn.execute(
+        "SELECT * FROM prospective_tasks WHERE status='pending' AND due_ts<=? ORDER BY due_ts ASC LIMIT ?",
+        (now_ts, limit),
+      ).fetchall()
+    return [self._row_prospective_task(r) for r in rows]
+
+  async def async_due_prospective_tasks(self, now_ts: float, limit: int = 5) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(self.due_prospective_tasks, now_ts, limit)
+
+  def mark_prospective_task_triggered(self, task_id: str) -> bool:
+    from datetime import datetime
+    with self._conn() as conn:
+      cur = conn.execute(
+        "UPDATE prospective_tasks SET status='triggered', triggered_at=? WHERE task_id=? AND status='pending'",
+        (datetime.now().isoformat(), task_id),
+      )
+      return cur.rowcount > 0
+
+  async def async_mark_prospective_task_triggered(self, task_id: str) -> bool:
+    return await asyncio.to_thread(self.mark_prospective_task_triggered, task_id)
+
+  def _row_prospective_task(self, row: sqlite3.Row) -> dict[str, Any]:
+    d = dict(row)
+    d["metadata"] = _loads(d.get("metadata"), {})
+    return d

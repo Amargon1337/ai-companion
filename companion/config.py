@@ -130,6 +130,14 @@ REFLECTION_EVERY_N = int(os.getenv("REFLECTION_EVERY_N", "10"))
 DORMANT_REVIVAL_THRESHOLD = float(os.getenv("DORMANT_REVIVAL_THRESHOLD", "0.80"))
 LLM_COMMAND_CONFIDENCE_THRESHOLD = float(os.getenv("LLM_COMMAND_CONFIDENCE_THRESHOLD", "0.92"))
 
+# Cognitive Context Layer v2 feature flags. Defaults keep the approved layer on,
+# while each module can be disabled instantly from api.env for rollback.
+ENABLE_TEMPORAL_CONTEXT = os.getenv("ENABLE_TEMPORAL_CONTEXT", "1").lower() not in {"0", "false", "no", "off"}
+ENABLE_TEMPORAL_DELTAS = os.getenv("ENABLE_TEMPORAL_DELTAS", "1").lower() not in {"0", "false", "no", "off"}
+ENABLE_IMPORTANCE_RANKING = os.getenv("ENABLE_IMPORTANCE_RANKING", "1").lower() not in {"0", "false", "no", "off"}
+ENABLE_ACCESS_TRACKING = os.getenv("ENABLE_ACCESS_TRACKING", "1").lower() not in {"0", "false", "no", "off"}
+LOCAL_TIMEZONE = os.getenv("LOCAL_TIMEZONE", "UTC")
+
 # Safety settings — пороги блокировки контента Gemini.
 # По умолчанию BLOCK_NONE — фильтрация отключена.
 # Можно переопределить через api.env отдельные категории:

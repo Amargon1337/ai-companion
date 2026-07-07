@@ -13,6 +13,7 @@ from companion.config import (
     DATA_DIR,
 )
 from companion.memory.importance import days_since
+from companion.memory.semantic_ranker import SemanticImportanceRanker
 from companion.memory.text_sim import text_overlap
 from companion.memory.vector_index import VectorIndex
 from companion.memory.identity_vault import IdentityVault
@@ -26,6 +27,7 @@ class MemoryStore:
     def __init__(self) -> None:
         self.db = MemoryDatabase()
         self.vector = VectorIndex()
+        self.semantic_ranker = SemanticImportanceRanker(self.db)
         self.identity = IdentityVault(self.db.path)
         import threading
         self._cache_lock = threading.Lock()
@@ -204,7 +206,7 @@ class MemoryStore:
     def add_fact(self, fact: Fact) -> Fact:
         d = fact.to_dict()
         self.db._insert_fact(d)
-        self.vector.compute_and_cache(fact.fact, content_type="fact")
+        self.vector.compute_and_cache(fact.fact, content_type="fact", fact_id=fact.id)
         return fact
 
     def get_fact(self, fact_id: str) -> Fact | None:
@@ -267,7 +269,7 @@ class MemoryStore:
                             hits.append((f, r["score"]))
                                 
                 if hits:
-                    return hits
+                    return self.semantic_ranker.rerank(hits, query_text=query)[:limit]
         except Exception as exc:
             logger.debug("Vector search unavailable, falling back to keyword: %s", exc)
 

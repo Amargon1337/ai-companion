@@ -127,7 +127,7 @@ def main():
     report.append("")
     report.append("3. Контекст и Рассуждение (Reasoning):")
     report.append("   - bot_core.py: Содержит тяжелую логику агрегации контекста (_load_retrieval_context), работает в thread pool.")
-    report.append("   - services/reasoning_service.py: Анализирует цели, причинно-следственные связи.")
+    report.append("   - reasoning.py + storage/sqlite_db.py: Анализируют цели, причинно-следственные связи.")
     report.append("   - llm/pipeline.py: Сборка промптов, вызов LLM (llm/client.py) и обработка structured output.")
     report.append("")
     report.append("4. Модели пользователя и личности (Identity):")

@@ -374,17 +374,17 @@ class UserModel:
             # Sync to IdentityVault
             from companion.bot_core import memory_store
             if snapshot.get("who_they_are"):
-                memory_store.identity.update_identity("core_identity", snapshot["who_they_are"], confidence=0.85, source="user_model_reflection")
+                memory_store.identity.update_identity("core_identity", snapshot["who_they_are"], confidence=0.85, source="user_model_reflection", explicit_overwrite=True)
             if snapshot.get("who_they_want_to_be"):
-                memory_store.identity.update_identity("ambitions", snapshot["who_they_want_to_be"], confidence=0.85, source="user_model_reflection")
+                memory_store.identity.update_identity("ambitions", snapshot["who_they_want_to_be"], confidence=0.85, source="user_model_reflection", explicit_overwrite=True)
             if snapshot.get("who_they_fear_becoming"):
-                memory_store.identity.update_identity("fears", snapshot["who_they_fear_becoming"], confidence=0.85, source="user_model_reflection")
+                memory_store.identity.update_identity("fears", snapshot["who_they_fear_becoming"], confidence=0.85, source="user_model_reflection", explicit_overwrite=True)
             if snapshot.get("core_traits"):
-                memory_store.identity.update_identity("core_traits", ", ".join(snapshot["core_traits"]), confidence=0.85, source="user_model_reflection")
+                memory_store.identity.update_identity("core_traits", ", ".join(snapshot["core_traits"]), confidence=0.85, source="user_model_reflection", explicit_overwrite=True)
             if snapshot.get("values"):
-                memory_store.identity.update_identity("values", ", ".join(snapshot["values"]), confidence=0.85, source="user_model_reflection")
+                memory_store.identity.update_identity("values", ", ".join(snapshot["values"]), confidence=0.85, source="user_model_reflection", explicit_overwrite=True)
             if snapshot.get("roles"):
-                memory_store.identity.update_identity("roles", ", ".join(snapshot["roles"]), confidence=0.85, source="user_model_reflection")
+                memory_store.identity.update_identity("roles", ", ".join(snapshot["roles"]), confidence=0.85, source="user_model_reflection", explicit_overwrite=True)
 
         await asyncio.to_thread(_sync_io, ident_snapshot, reflection)
 

@@ -9,7 +9,6 @@ from aiogram import types
 from companion import bot_core as core
 from companion.llm import client as llm
 from companion.llm.prompts import PERSONALITY_REPORT_PROMPT, RETROSPECTIVE_PROMPT
-from companion.storage.legacy import LegacyStorage
 
 
 async def show_summary(message: types.Message) -> None:
@@ -44,7 +43,14 @@ async def show_personality(message: types.Message) -> None:
 
 
 async def show_selfie(message: types.Message) -> None:
-    parts = LegacyStorage.get_selfie_data()
+    store = core.memory_store
+    parts = []
+    profile = store.build_canonical_profile_text()
+    summary = store.load_master_summary()
+    if profile:
+        parts.append(profile)
+    if summary:
+        parts.append(summary)
     if not parts:
         await message.answer("Нет данных.")
         return
@@ -55,7 +61,9 @@ async def show_selfie(message: types.Message) -> None:
 
 
 async def show_week_digest(message: types.Message) -> None:
-    lines = LegacyStorage.get_week_diary()
+    cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    facts = [f for f in core.memory_store.list_all_facts() if (f.date or "") >= cutoff and ("diary" in f.tags or f.memory_kind == "event")]
+    lines = [f"{f.date}: {f.fact}" for f in facts[:50]]
     if not lines:
         await message.answer("Дневник за неделю пуст.")
         return
@@ -66,11 +74,11 @@ async def show_monthbook(message: types.Message, ym: str | None = None) -> None:
     store = core.memory_store
     ym = ym or datetime.now().strftime("%Y-%m")
     await message.answer(f"Собираю главу за {ym}...")
-    content = LegacyStorage.load_monthbook(ym)
+    content = await store.db.async_load_monthbook(ym)
     if not content:
         content = await _build_monthbook(store, ym)
         if content:
-            LegacyStorage.save_monthbook(ym, content)
+            await store.db.async_save_monthbook(ym, content)
     await core.send_long_message(message, content or "Нет данных.")
 
 
@@ -107,10 +115,11 @@ async def show_context(message: types.Message) -> None:
 def _collect_retrospective(days: int) -> dict:
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     result = {}
-    week = LegacyStorage.get_week_diary()
+    facts = [f for f in core.memory_store.list_all_facts() if (f.date or "") >= cutoff and ("diary" in f.tags or f.memory_kind == "event")]
+    week = [f"{f.date}: {f.fact}" for f in facts[:50]]
     if week:
         result["diary_week"] = week
-    events = [e for e in LegacyStorage.load_events() if e["date"] >= cutoff]
+    events = [e for e in core.memory_store.db.load_events() if e["date"] >= cutoff]
     if events:
         result["events"] = events
     return result
@@ -127,7 +136,7 @@ async def _build_monthbook(store, ym: str) -> str:
     hi_msgs = store.high_importance_messages_for_period(ym, 7)
     if hi_msgs:
         parts.append("[Ключевые реплики]\n" + "\n".join(f"- {m.text[:200]}" for m in hi_msgs[:15]))
-    events = [e for e in LegacyStorage.load_events() if e["date"].startswith(ym)]
+    events = [e for e in store.db.load_events() if e["date"].startswith(ym)]
     if events:
         parts.append("[События]\n" + "\n".join(f"{e['date']}: {e['event']}" for e in events))
     if not parts:

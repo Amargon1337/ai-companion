@@ -7,6 +7,7 @@ from companion.proactive.reasons import select_reason, PingReason, ReasonDecisio
 from companion.proactive.collector import collect_context
 from companion.proactive.formatter import format_ping
 from companion.proactive.telemetry import record_ping_sent as telemetry_record_ping
+from companion.proactive.prospective import build_due_task_payload
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,13 @@ async def run_proactive_loop(bot, debug: bool = False):
     
     if not decision.allowed:
         logger.info(f"Proactive ping skipped. Reason: {decision.reason}, Score: {decision.score}")
+        return
+
+    from companion.bot_core import memory_store
+    due_tasks = await memory_store.db.async_due_prospective_tasks(current_ts, limit=1)
+    if due_tasks:
+        task = due_tasks[0]
+        await _send_due_task_ping(bot, target_user_id, task, decision, current_ts, debug)
         return
         
     # 2. Reason Selector
@@ -89,3 +97,37 @@ async def run_proactive_loop(bot, debug: bool = False):
         logger.info(f"Proactive ping sent successfully to {target_user_id}")
     except Exception as e:
         logger.error(f"Failed to send proactive ping via Telegram: {e}")
+
+
+async def _send_due_task_ping(bot, target_user_id: int, task: dict, decision, current_ts: float, debug: bool) -> None:
+    from companion.bot_core import memory_store
+    payload = collect_context(ReasonDecision(reason=PingReason.UNFINISHED_GOAL), user_model)
+    payload.facts.append("Проспективная задача к этому времени: " + build_due_task_payload(task))
+    payload.urgency = max(getattr(payload, "urgency", 1), 4)
+
+    from companion.llm.prompts import STRATEGY_PROFILES, TONE_PROFILES
+    state = user_model.data.get("emotional_timeline", {}).get("baseline_state", "neutral")
+    message = await format_ping(
+        payload=payload,
+        strategy=STRATEGY_PROFILES.get(state, STRATEGY_PROFILES["neutral"]),
+        tone=TONE_PROFILES.get(state, TONE_PROFILES["neutral"]),
+        debug=debug,
+    )
+    if debug and isinstance(message, dict):
+        logger.info(f"DEBUG Prospective Payload: {message}")
+        message = message["message"]
+    if not message or str(message).startswith("Error"):
+        message = f"Напоминание: {task['text']}"
+    try:
+        if not debug:
+            await bot.send_message(chat_id=target_user_id, text=message)
+        if await memory_store.db.async_mark_prospective_task_triggered(task["task_id"]):
+            engagement_record_ping(user_model, current_ts)
+            telemetry_record_ping(
+                reason="PROSPECTIVE_TASK",
+                baseline_state=state,
+                urgency=payload.urgency,
+                message=message,
+            )
+    except Exception as e:
+        logger.error(f"Failed to send prospective ping via Telegram: {e}")

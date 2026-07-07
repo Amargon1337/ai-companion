@@ -9,7 +9,6 @@ from companion.llm.prompts import CORE_PERSONALITY, TONE_PROFILES, STRATEGY_PROF
 from companion.memory.retrieval import RetrievalBudgetManager
 from companion.memory.store import MemoryStore
 from companion.reasoning import reasoning_engine
-from companion.storage.legacy import LegacyStorage
 from companion.user_model import user_model
 import hashlib
 
@@ -23,9 +22,9 @@ def build_system_instruction(
 ) -> str:
     PROMPT_VERSION = "v6"
     
-    notes = LegacyStorage.load_permanent_notes()
+    notes = "\n".join(store.db.list_permanent_notes())
     pers_snapshot = store.build_canonical_profile_text()
-    ivan = LegacyStorage.load_memory()
+    ivan = store.db.get_meta("legacy_profile", "")
 
     # БЛОК 3: SUMMARY STACK - включаем Tier 3 (master summary)
     master_summary = store.load_master_summary()
@@ -33,6 +32,12 @@ def build_system_instruction(
     if precomputed_context is not None:
         ctx = precomputed_context
     else:
+        runtime_context_block = ""
+        try:
+            from companion.context import ContextAggregator
+            runtime_context_block = ContextAggregator(store.db).build_prompt_block()
+        except Exception:
+            runtime_context_block = ""
         active_goals = reasoning_engine.get_goal_snapshot(query)
         causal_links = reasoning_engine.get_relevant_causal_context(query)
         predictions = []
@@ -51,6 +56,7 @@ def build_system_instruction(
             predictions=predictions,
             world_model_context=world_model_context,
             user_model_context="",
+            runtime_context_block=runtime_context_block,
         )
         ctx = bundle.to_prompt_block()
 

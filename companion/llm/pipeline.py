@@ -19,7 +19,6 @@ from companion.llm.prompts import (
 from companion.memory.store import MemoryStore
 from companion.memory.text_sim import text_overlap
 from companion.models import Fact, FactRelation, Reflection
-from companion.storage.legacy import LegacyStorage
 
 logger = logging.getLogger(__name__)
 

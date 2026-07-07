@@ -197,6 +197,10 @@ def get_file(name: str) -> Any:
     return client.files.get(name=name)
 
 
+def delete_file(name: str) -> None:
+    client.files.delete(name=name)
+
+
 # ── Native async Gemini client ────────────────────────────────────────
 
 _aio_client = None
@@ -265,6 +269,11 @@ async def aio_get_file(name: str) -> Any:
     return await c.aio.files.get(name=name)
 
 
+async def aio_delete_file(name: str) -> None:
+    c = _get_aio_client()
+    await c.aio.files.delete(name=name)
+
+
 # ── Async wrappers for use from async contexts (thread fallback) ──────
 
 async def async_oneshot(prompt: str, model: str = MODEL_NAME) -> str:
@@ -277,6 +286,10 @@ async def async_search_with_grounding(query: str, context: str = "") -> tuple[st
 
 async def async_upload_file(path: str) -> Any:
     return await asyncio.to_thread(upload_file, path)
+
+
+async def async_delete_file(name: str) -> None:
+    await asyncio.to_thread(delete_file, name)
 
 
 # ── Retry wrapper with exponential backoff ────────────────────────────
