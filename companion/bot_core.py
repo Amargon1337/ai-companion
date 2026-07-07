@@ -646,6 +646,7 @@ async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, 
             "personality": memory_store.build_canonical_profile_text(),
             "user_model_context": "",
             "comm_prefs": memory_store.get_comm_pref(),
+            "human_model": memory_store.get_human_model(),
             "recent": memory_store.recent_messages(min_importance=6, limit=10),
             "active_goals": reasoning_context.get("active_goals", []) if reasoning_context else [],
             "causal_links": reasoning_context.get("causal_links", []) if reasoning_context else [],
@@ -694,6 +695,7 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             faiss_scores=ctx_data.get("faiss_scores", {}),
             runtime_context_block=ctx_data.get("runtime_context_block", ""),
             comm_prefs=ctx_data.get("comm_prefs"),
+            human_model=ctx_data.get("human_model"),
         )
         ctx_block = bundle.to_prompt_block()
         user_block = _build_user_prompt_block(content_payload, state.reasoning_context)

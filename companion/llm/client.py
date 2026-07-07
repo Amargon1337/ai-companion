@@ -419,6 +419,17 @@ class CommPrefItem(BaseModel):
 class CommPrefExtractionResult(BaseModel):
     comm_pref: CommPrefItem
 
+class HumanModelItem(BaseModel):
+    """Уровень 6: выводы о человеке. Пустой список = 'без изменений' (не очищает)."""
+    goals: List[str] = Field(default_factory=list)            # цели пользователя
+    fears: List[str] = Field(default_factory=list)            # страхи
+    strengths: List[str] = Field(default_factory=list)        # сильные стороны
+    recurring_mistakes: List[str] = Field(default_factory=list)  # повторяющиеся ошибки
+    long_term_trends: List[str] = Field(default_factory=list)    # долгосрочные тенденции
+
+class HumanModelExtractionResult(BaseModel):
+    human_model: HumanModelItem
+
 class PersonalityPipelineResult(BaseModel):
     interests_delta: Dict[str, int] = Field(default_factory=dict)
     values_to_add: List[str] = Field(default_factory=list)

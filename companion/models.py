@@ -200,6 +200,40 @@ class CommPref:
 
 
 @dataclass
+class HumanModel:
+    """Уровень 6: самостоятельная модель человека — единая всегда-активная
+    запись. Хранится как ОДНА строка (key="global"), а не список: модель
+    человека эволюционирует, а не копится. Авто-обновляется на каждом compress
+    через merge delta-обновлений (extract_human_model).
+
+    Заполняется ВЫВОДАМИ ( inferences), а не фактами (facts): это то, что бот
+    понял о человеке, а не сухие события. Долгосрочные тенденции (long_term_
+    trends) — именно то, что просил юзер: 'за 8 месяцев регулярно возвращается
+    к теме одиночества' — это вывод, не факт.
+    """
+
+    goals: list[str] = field(default_factory=list)          # цели пользователя
+    fears: list[str] = field(default_factory=list)          # страхи
+    strengths: list[str] = field(default_factory=list)      # сильные стороны
+    recurring_mistakes: list[str] = field(default_factory=list)  # повторяющиеся ошибки
+    long_term_trends: list[str] = field(default_factory=list)    # долгосрочные тенденции
+    updated_at: str = ""
+    version: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.updated_at:
+            self.updated_at = datetime.now().isoformat()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> HumanModel:
+        known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+@dataclass
 class ContextBundle:
     """Selected context for a single LLM request."""
     facts: list[Fact] = field(default_factory=list)
@@ -218,6 +252,7 @@ class ContextBundle:
     unified_profile_block: str = ""
     runtime_context_block: str = ""
     comm_prefs: "CommPref | None" = None
+    human_model: "HumanModel | None" = None
 
     def to_prompt_block(self) -> str:
         from companion.security.sanitizer import sanitize_markup
@@ -252,6 +287,34 @@ class ContextBundle:
                     lines.append(f"Нежелательные темы: {topics}")
             if lines:
                 parts.append("[Предпочтения общения пользователя]\n" + "\n".join(lines))
+
+        # Уровень 6: модель человека — выводы о человеке (не факты).
+        # Всегда-активный блок, до <user_profile>, не вытесняется эвикшеном.
+        if self.human_model is not None:
+            hm = self.human_model
+            hm_lines = []
+            if hm.goals:
+                goals = "; ".join(sanitize_markup(g) or "" for g in hm.goals[:15] if g)
+                if goals.strip():
+                    hm_lines.append(f"Цели: {goals}")
+            if hm.fears:
+                fears = "; ".join(sanitize_markup(f) or "" for f in hm.fears[:15] if f)
+                if fears.strip():
+                    hm_lines.append(f"Страхи: {fears}")
+            if hm.strengths:
+                strengths = "; ".join(sanitize_markup(s) or "" for s in hm.strengths[:15] if s)
+                if strengths.strip():
+                    hm_lines.append(f"Сильные стороны: {strengths}")
+            if hm.recurring_mistakes:
+                mistakes = "; ".join(sanitize_markup(m) or "" for m in hm.recurring_mistakes[:15] if m)
+                if mistakes.strip():
+                    hm_lines.append(f"Повторяющиеся ошибки: {mistakes}")
+            if hm.long_term_trends:
+                trends = "; ".join(sanitize_markup(t) or "" for t in hm.long_term_trends[:15] if t)
+                if trends.strip():
+                    hm_lines.append(f"Долгосрочные тенденции: {trends}")
+            if hm_lines:
+                parts.append("[Модель человека (выводы)]\n" + "\n".join(hm_lines))
 
         user_profile_parts = []
         if self.personality_snapshot:

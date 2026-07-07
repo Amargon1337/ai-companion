@@ -94,6 +94,7 @@ class RetrievalBudgetManager:
         faiss_scores: dict[str, float] | None = None,
         runtime_context_block: str = "",
         comm_prefs: "Any" = None,
+        human_model: "Any" = None,
     ) -> ContextBundle:
         summaries = summaries or []
         active_goals = active_goals or []
@@ -250,6 +251,7 @@ class RetrievalBudgetManager:
             unified_profile_block=unified_profile_block,
             runtime_context_block=runtime_context_block,
             comm_prefs=comm_prefs,
+            human_model=human_model,
         )
 
         # Global Overflow Eviction: T5 -> T4 -> T3

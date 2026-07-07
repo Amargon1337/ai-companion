@@ -16,11 +16,12 @@ from companion.llm.prompts import (
     REFLECTION_PROMPT,
     PATTERN_PROMPT,
     COMM_PREF_PROMPT,
+    HUMAN_MODEL_PROMPT,
     SUMMARY_PROMPT,
 )
 from companion.memory.store import MemoryStore
 from companion.memory.text_sim import text_overlap
-from companion.models import Fact, FactRelation, Reflection, Pattern, CommPref
+from companion.models import Fact, FactRelation, Reflection, Pattern, CommPref, HumanModel
 
 logger = logging.getLogger(__name__)
 
@@ -344,6 +345,47 @@ def extract_comm_prefs(
         return None
 
 
+def extract_human_model(
+    store: MemoryStore, summary: str, messages: list[str] | None = None
+) -> HumanModel | None:
+    """Уровень 6: извлечь/обновить модель человека (выводы).
+
+    Возвращает None при ошибке/отсутствии сигнала. Сохранение (union-merge)
+    делает store.upsert_human_model — накопительное, выводы не теряются.
+    """
+    # Берём широкий срез фактов + саммери за долгий период — для тенденций
+    # нужна длинная дистанция, а не только текущее окно.
+    facts = store.facts_for_period(datetime.now().strftime("%Y-%m"), min_importance=3)
+    fact_text = "\n".join(f"- {f.fact}" for f in facts[:60])
+    msg_text = "\n".join(f"- {m}" for m in (messages or [])[:15])
+    prompt = HUMAN_MODEL_PROMPT.format(
+        facts=fact_text or "мало данных",
+        messages=msg_text or "нет",
+        summary=summary or "нет",
+    )
+    try:
+        result = llm.oneshot_structured(prompt, llm.HumanModelExtractionResult)
+        item = result.human_model
+        def _clean(lst):
+            return [str(t).strip() for t in (lst or []) if str(t).strip()]
+        delta = HumanModel(
+            goals=_clean(item.goals),
+            fears=_clean(item.fears),
+            strengths=_clean(item.strengths),
+            recurring_mistakes=_clean(item.recurring_mistakes),
+            long_term_trends=_clean(item.long_term_trends),
+        )
+        if not any([delta.goals, delta.fears, delta.strengths,
+                    delta.recurring_mistakes, delta.long_term_trends]):
+            logger.info("HumanModel: no signal in this window, skipping.")
+            return None
+        store.upsert_human_model(delta)
+        return delta
+    except Exception as e:
+        logger.error(f"HumanModel extraction failed: {e}")
+        return None
+
+
 def _pattern_redundant(store: MemoryStore, pat_text: str) -> bool:
     """True if the pattern text closely mirrors an existing reflection/belief."""
     norm = store._normalize(pat_text)
@@ -542,6 +584,12 @@ async def run_compress_pipeline(
             extract_comm_prefs(store, summary)
         except Exception as e:
             logger.error("CommPref auto-update failed: %s", e)
+        # Уровень 6: модель человека (выводы) — всегда, на каждом compress.
+        # Накопительная: долгосрочные тенденции растут между окнами.
+        try:
+            extract_human_model(store, summary)
+        except Exception as e:
+            logger.error("HumanModel auto-update failed: %s", e)
         compress_n_final = store.increment_compress_count()
         return new_facts, compress_n_final, summary
 

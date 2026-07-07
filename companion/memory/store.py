@@ -605,6 +605,37 @@ class MemoryStore:
         )
         self.db.upsert_comm_pref(merged.to_dict())
 
+    # ── Human model (Уровень 6) ──────────────────────────────────
+
+    def get_human_model(self) -> "HumanModel":
+        from companion.models import HumanModel
+        row = self.db.get_human_model("global")
+        if row is None:
+            return HumanModel()
+        return HumanModel.from_dict(row)
+
+    def upsert_human_model(self, delta: "HumanModel") -> None:
+        """Merge delta-обновление модели человека (авто-эволюция выводов).
+
+        Списочные поля объединяются (union, дедуп), чтобы долгосрочные
+        тенденции/цели НЕ терялись между окнами — модель накапливается, а не
+        перезаписывается целиком. Версию инкрементируем при реальном изменении.
+        """
+        from companion.models import HumanModel
+        current = self.get_human_model()
+        _merge = lambda a, b: list(dict.fromkeys((a or []) + (b or [])))[:25]
+
+        merged = HumanModel(
+            goals=_merge(current.goals, delta.goals),
+            fears=_merge(current.fears, delta.fears),
+            strengths=_merge(current.strengths, delta.strengths),
+            recurring_mistakes=_merge(current.recurring_mistakes, delta.recurring_mistakes),
+            long_term_trends=_merge(current.long_term_trends, delta.long_term_trends),
+            updated_at=datetime.now().isoformat(),
+            version=current.version + 1,
+        )
+        self.db.upsert_human_model(merged.to_dict())
+
     def save_summary(self, content: str) -> None:
         summary_id = f"summary_{uuid.uuid4().hex[:10]}"
         self.db._insert_summary({

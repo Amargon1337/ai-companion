@@ -151,6 +151,17 @@ class MemoryDatabase:
           version INTEGER DEFAULT 1
         );
 
+        CREATE TABLE IF NOT EXISTS human_model (
+          id TEXT PRIMARY KEY,
+          goals TEXT DEFAULT '[]',
+          fears TEXT DEFAULT '[]',
+          strengths TEXT DEFAULT '[]',
+          recurring_mistakes TEXT DEFAULT '[]',
+          long_term_trends TEXT DEFAULT '[]',
+          updated_at TEXT,
+          version INTEGER DEFAULT 1
+        );
+
         CREATE TABLE IF NOT EXISTS timeline (
           id TEXT PRIMARY KEY,
           date TEXT NOT NULL,
@@ -1010,6 +1021,45 @@ class MemoryDatabase:
           row.get("language", ""),
           liked_json,
           avoided_json,
+          row.get("updated_at"),
+          int(row.get("version", 1)),
+        ),
+      )
+
+  # ── Human model (Уровень 6) ────────────────────────────────────
+
+  def get_human_model(self, model_id: str = "global") -> dict[str, Any] | None:
+    with self._conn() as conn:
+      row = conn.execute(
+        "SELECT * FROM human_model WHERE id=?", (model_id,)
+      ).fetchone()
+    if row is None:
+      return None
+    d = dict(row)
+    for k in ("goals", "fears", "strengths", "recurring_mistakes", "long_term_trends"):
+      d[k] = json.loads(d.get(k) or "[]")
+    return d
+
+  def upsert_human_model(self, row: dict[str, Any]) -> None:
+    _js = lambda v: json.dumps(v, ensure_ascii=False) if not isinstance(v, str) else v
+    with self._conn() as conn:
+      conn.execute(
+        """
+        INSERT INTO human_model
+          (id, goals, fears, strengths, recurring_mistakes, long_term_trends, updated_at, version)
+        VALUES (?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+          goals=excluded.goals, fears=excluded.fears, strengths=excluded.strengths,
+          recurring_mistakes=excluded.recurring_mistakes, long_term_trends=excluded.long_term_trends,
+          updated_at=excluded.updated_at, version=excluded.version
+        """,
+        (
+          row.get("id", "global"),
+          _js(row.get("goals", [])),
+          _js(row.get("fears", [])),
+          _js(row.get("strengths", [])),
+          _js(row.get("recurring_mistakes", [])),
+          _js(row.get("long_term_trends", [])),
           row.get("updated_at"),
           int(row.get("version", 1)),
         ),
