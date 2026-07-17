@@ -112,8 +112,9 @@ async def background_user_model_reflection(state, store) -> None:
 
             if discoveries > 0 or confirmations > 0 or falsifications > 0:
                 logger.info(
-                    f"User model reflection: {discoveries} discoveries, "
-                    f"{confirmations} confirmations, {falsifications} falsifications"
+                    f"[REFLECTION] User model updated: {discoveries} discoveries, "
+                    f"{confirmations} confirmations, {falsifications} falsifications. "
+                    f"Детали: {reflection}"
                 )
 
         _record_success(task_name)

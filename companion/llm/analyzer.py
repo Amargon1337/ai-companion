@@ -30,7 +30,7 @@ def analyze_message(text: str) -> dict:
     try:
         logger.info("[ANALYZER] Запуск структурного анализа сообщения: определение интента и эмоций...")
         validated = oneshot_structured(prompt, MessageAnalysis, MODEL_NAME)
-        logger.info(f"[ANALYZER] Анализ завершен. Интент: {validated.intent}, Важность: {validated.estimated_importance}")
+        logger.info(f"[ANALYZER] Анализ завершен. Интент: {validated.intent}, Настроение: {validated.user_mood}, Состояние: {validated.user_state}, Важность: {validated.estimated_importance}")
         # Convert to dict format expected by callers
         return {
             "intent": validated.intent,
