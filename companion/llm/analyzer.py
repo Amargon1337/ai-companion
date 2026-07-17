@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from companion.llm.client import oneshot_structured, MessageAnalysis
 from companion.config import MODEL_NAME
+from companion.llm.telemetry import observe
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +17,7 @@ ANALYSIS_PROMPT = """Проанализируй сообщение пользо�
 Сообщение: {text}"""
 
 
+@observe(name="analyze_message")
 def analyze_message(text: str) -> dict:
     """
     Analyze user message using Gemini structured output.

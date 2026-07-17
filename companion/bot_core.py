@@ -417,8 +417,8 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
     conf = state.intent_confidence or 0.6
     policy_decision = _get_policy_decision(state, query)
     state.policy_constraints = policy_decision.constraints if policy_decision else None
-    logger.info("[MEMORY] Запуск поиска релевантных фактов и сборки когнитивного контекста (RAG)...")
-    ctx_data = await _load_retrieval_context(query, state.reasoning_context)
+    logger.info(f"[MEMORY] Запуск RAG. Важность: {state.message_importance}. Сборка когнитивного контекста...")
+    ctx_data = await _load_retrieval_context(query, state.reasoning_context, state.message_importance)
 
     # Блокируем web search для технических/кодовых запросов — ответ только из памяти
     _coding_keywords = {"питон", "python", "код", "скрипт", "бот"}
@@ -619,6 +619,9 @@ def _strip_prefix(text: str, prefixes: list[str]) -> str:
 
 
 
+from companion.llm.telemetry import observe
+
+@observe(name="process_llm_request")
 async def process_llm_request(message: types.Message, content_payload: Any) -> None:
     cleanup_pending_commands()
     last_activity[message.from_user.id] = time.time()
@@ -737,13 +740,17 @@ def _get_policy_decision(state: RuntimeState, query: str) -> Any | None:
     return None
 
 
-async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, Any] | None = None):
+async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, Any] | None = None, importance: int = 5):
     """All operations here are blocking I/O (SQLite, file reads, embedding API).
     Must run via to_thread to avoid freezing the event loop."""
     def _load_sync() -> dict[str, Any]:
         all_facts = memory_store.list_facts("active")
         if query:
-            search_results = memory_store.search_facts(query, limit=30)
+            # Dynamic retrieval budget:
+            # 0 importance -> ~5 facts. 10 importance -> ~70 facts.
+            dynamic_limit = max(5, int(5 + (importance * 6.5)))
+            
+            search_results = memory_store.search_facts(query, limit=dynamic_limit)
             searched = [f for f, _ in search_results]
             faiss_scores = {f.id: score for f, score in search_results}
             merged = {f.id: f for f in searched}
@@ -803,6 +810,7 @@ async def _init_user_session(uid, query):
     await _persist_session(uid)
 
 
+@observe(name="generate_and_send_response")
 async def _generate_and_send_response(message, chat, state, content_payload, query, ctx_data, policy_decision, uid, force_flash: bool = False):
     history = chat.history if hasattr(chat, "history") else []
     bundle = None

@@ -18,6 +18,14 @@ def collect_goal_context(decision: ReasonDecision, user_model: UserModel) -> Con
     facts = []
     if goal_snapshot:
         facts.append("Найдены активные цели:\n" + "\n".join(goal_snapshot))
+        
+    identity = user_model.data.get("identity", {})
+    want = identity.get("who_they_want_to_be")
+    fear = identity.get("who_they_fear_becoming")
+    if want:
+        facts.append(f"[ИДЕНТИЧНОСТЬ] Глобальное стремление пользователя: {want}")
+    if fear:
+        facts.append(f"[ИДЕНТИЧНОСТЬ] Глубинный страх пользователя: {fear}")
     
     return ContextPayload(
         reason=decision.reason,
