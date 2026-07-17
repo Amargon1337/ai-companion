@@ -102,7 +102,10 @@ async def run_proactive_loop(bot, debug: bool = False):
 async def _send_due_task_ping(bot, target_user_id: int, task: dict, decision, current_ts: float, debug: bool) -> None:
     from companion.bot_core import memory_store
     payload = collect_context(ReasonDecision(reason=PingReason.UNFINISHED_GOAL), user_model)
-    payload.facts.append("Проспективная задача к этому времени: " + build_due_task_payload(task))
+    if task.get("type") == "morning_insight":
+        payload.facts.append(f"[ОСОБАЯ ИНСТРУКЦИЯ] Утренний инсайт, сгенерированный твоим подсознанием этой ночью. Адаптируй эту мысль под свой текущий тон и поделись ей с пользователем: {build_due_task_payload(task)}")
+    else:
+        payload.facts.append("Проспективная задача к этому времени: " + build_due_task_payload(task))
     payload.urgency = max(getattr(payload, "urgency", 1), 4)
 
     from companion.llm.prompts import STRATEGY_PROFILES, TONE_PROFILES

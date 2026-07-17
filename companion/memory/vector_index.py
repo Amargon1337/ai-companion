@@ -41,6 +41,7 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
     try:
+        logger.info(f"[VECTOR] Отправка запроса на получение эмбеддингов для {len(texts)} элементов...")
         from google.genai import types
         client = _get_genai_client()
 
@@ -110,6 +111,14 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     nb = math.sqrt(sum(x * x for x in b))
     if na == 0 or nb == 0:
         return 0.0
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    if na == 0 or nb == 0:
+        return 0.0
     return dot / (na * nb)
 
 
@@ -117,18 +126,22 @@ class VectorIndex:
     """Manages embedding storage in SQLite and provides vector search."""
 
     def __init__(self, path: str | None = None) -> None:
+        import os
         from companion.config import SQLITE_PATH as _SQLITE_PATH
         self.path = path if path is not None else _SQLITE_PATH
         import threading
         self.lock = threading.RLock()
         self._init_table()
         
-        # In-memory FAISS structures
-        import faiss
-        self.index = faiss.IndexHNSWFlat(_EMBEDDING_DIM, 32)
-        self.content_list: list[str] = []
-        self.hash_list: list[str] = []
-        self.content_type_list: list[str] = []
+        self.index_path = os.path.join(os.path.dirname(self.path) if self.path else ".", "faiss_index.bin")
+        self.mapping_path = os.path.join(os.path.dirname(self.path) if self.path else ".", "faiss_mapping.json")
+        
+        self.id_to_content: dict[int, str] = {}
+        self.id_to_hash: dict[int, str] = {}
+        self.hash_to_id: dict[str, int] = {}
+        self.id_to_type: dict[int, str] = {}
+        self._next_id = 0
+        
         self._is_initialized = False
         self.embeddings_enabled = True
         
@@ -189,45 +202,106 @@ class VectorIndex:
             conn.close()
 
     def _load_index(self) -> None:
+        import os
+        import json
+        import faiss
+        with self.lock:
+            if os.path.exists(self.index_path) and os.path.exists(self.mapping_path):
+                try:
+                    self.index = faiss.read_index(self.index_path)
+                    with open(self.mapping_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        self.id_to_content = {int(k): v for k, v in data.get("id_to_content", {}).items()}
+                        self.id_to_hash = {int(k): v for k, v in data.get("id_to_hash", {}).items()}
+                        self.hash_to_id = data.get("hash_to_id", {})
+                        self.id_to_type = {int(k): v for k, v in data.get("id_to_type", {}).items()}
+                        self._next_id = data.get("next_id", 0)
+                    self._is_initialized = True
+                    return
+                except Exception as e:
+                    logger.warning(f"Failed to load FAISS index from disk, rebuilding: {e}")
+            
+            self._rebuild_index()
+
+    def save_index_to_disk(self):
+        import faiss
+        import json
+        with self.lock:
+            if self._is_initialized and hasattr(self, 'index') and self.index is not None:
+                faiss.write_index(self.index, self.index_path)
+                with open(self.mapping_path, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        "id_to_content": self.id_to_content,
+                        "id_to_hash": self.id_to_hash,
+                        "hash_to_id": self.hash_to_id,
+                        "id_to_type": self.id_to_type,
+                        "next_id": self._next_id
+                    }, f, ensure_ascii=False)
+
+    def _rebuild_index(self) -> None:
         import faiss
         import numpy as np
         
-        with self.lock:
-            with self._conn() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT fact AS content, embedding, 'fact' AS content_type
-                    FROM facts
-                    WHERE embedding IS NOT NULL AND status IN ('active', 'dormant')
-                    UNION ALL
-                    SELECT content, embedding, content_type
-                    FROM embeddings
-                    WHERE content_type NOT IN ('query', 'fact')
-                    """
-                ).fetchall()
+        self.id_to_content = {}
+        self.id_to_hash = {}
+        self.hash_to_id = {}
+        self.id_to_type = {}
+        self._next_id = 0
+        
+        base_index = faiss.IndexHNSWFlat(_EMBEDDING_DIM, 32)
+        self.index = faiss.IndexIDMap(base_index)
+        
+        seen_hashes: set[str] = set()
+
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """
+                SELECT fact AS content, embedding, 'fact' AS content_type
+                FROM facts
+                WHERE embedding IS NOT NULL AND status IN ('active', 'dormant')
+                UNION ALL
+                SELECT content, embedding, content_type
+                FROM embeddings
+                WHERE content_type NOT IN ('query', 'fact')
+                """
+            )
             
-            self.content_list = []
-            self.hash_list = []
-            self.content_type_list = []
-            arr_vecs = []
-            
-            seen_hashes: set[str] = set()
-            for content, blob, content_type in rows:
-                content_hash = self._content_hash(content)
-                if content_hash in seen_hashes:
-                    continue
-                seen_hashes.add(content_hash)
-                arr_vecs.append(_blob_to_float_list(blob))
-                self.content_list.append(content)
-                self.hash_list.append(content_hash)
-                self.content_type_list.append(content_type)
+            while True:
+                rows = cursor.fetchmany(2000)
+                if not rows:
+                    break
                 
-            self.index = faiss.IndexHNSWFlat(_EMBEDDING_DIM, 32)
-            if arr_vecs:
-                arr = np.array(arr_vecs, dtype=np.float32)
-                faiss.normalize_L2(arr)
-                self.index.add(arr)
-            self._is_initialized = True
+                arr_vecs = []
+                ids = []
+                for content, blob, content_type in rows:
+                    content_hash = self._content_hash(content)
+                    if content_hash in seen_hashes:
+                        continue
+                    seen_hashes.add(content_hash)
+                    
+                    arr_vecs.append(_blob_to_float_list(blob))
+                    current_id = self._next_id
+                    self.id_to_content[current_id] = content
+                    self.id_to_hash[current_id] = content_hash
+                    self.hash_to_id[content_hash] = current_id
+                    self.id_to_type[current_id] = content_type
+                    ids.append(current_id)
+                    self._next_id += 1
+                
+                if arr_vecs:
+                    arr = np.array(arr_vecs, dtype=np.float32)
+                    faiss.normalize_L2(arr)
+                    ids_arr = np.array(ids, dtype=np.int64)
+                    self.index.add_with_ids(arr, ids_arr)
+                    
+                    # explicit memory free for large batches
+                    del arr
+                    del ids_arr
+                    del arr_vecs
+                    del ids
+            
+        self._is_initialized = True
+        self.save_index_to_disk()
 
     def _content_hash(self, text: str) -> str:
         import hashlib
@@ -263,17 +337,23 @@ class VectorIndex:
                 self._load_index()
                 return
                 
-            if text in self.content_list:
+            if h in self.hash_to_id:
                 return
             import faiss
             import numpy as np
-            self.content_list.append(text)
-            self.hash_list.append(h)
-            self.content_type_list.append(content_type)
+            
+            current_id = self._next_id
+            self.id_to_content[current_id] = text
+            self.id_to_hash[current_id] = h
+            self.hash_to_id[h] = current_id
+            self.id_to_type[current_id] = content_type
+            self._next_id += 1
             
             vec = np.array([embedding], dtype=np.float32)
             faiss.normalize_L2(vec)
-            self.index.add(vec)
+            ids_arr = np.array([current_id], dtype=np.int64)
+            self.index.add_with_ids(vec, ids_arr)
+            self.save_index_to_disk()
 
     def get_embedding(self, text: str) -> list[float] | None:
         h = self._content_hash(text)
@@ -384,15 +464,16 @@ class VectorIndex:
             
             results = []
             for dist, idx in zip(distances[0], indices[0]):
-                if idx != -1 and idx < len(self.content_list):
-                    if content_type and self.content_type_list[idx] != content_type:
+                idx = int(idx)
+                if idx != -1 and idx in self.id_to_content:
+                    if content_type and self.id_to_type.get(idx) != content_type:
                         continue
                     # Convert L2 distance squared of normalized vectors to Cosine Similarity
                     score = 1.0 - float(dist) / 2.0
                     if score > 0.3:
                         results.append({
-                            "content": self.content_list[idx],
-                            "content_hash": self.hash_list[idx],
+                            "content": self.id_to_content[idx],
+                            "content_hash": self.id_to_hash[idx],
                             "score": round(score, 4)
                         })
                         if len(results) >= top_k:
@@ -427,5 +508,16 @@ class VectorIndex:
                     "UPDATE facts SET embedding=NULL WHERE fact=?",
                     [(t,) for t in texts],
                 )
-            # Одна перестройка на весь батч.
-            self._load_index()
+            
+            import numpy as np
+            ids_to_remove = []
+            for h in hashes:
+                if h in self.hash_to_id:
+                    del_id = self.hash_to_id.pop(h)
+                    self.id_to_content.pop(del_id, None)
+                    self.id_to_hash.pop(del_id, None)
+                    self.id_to_type.pop(del_id, None)
+                    ids_to_remove.append(del_id)
+            if ids_to_remove:
+                self.index.remove_ids(np.array(ids_to_remove, dtype=np.int64))
+                self.save_index_to_disk()

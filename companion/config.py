@@ -105,10 +105,10 @@ if not os.path.exists(IVAN_PATH):
     _bootstrap_log(f"Created {IVAN_PATH} (empty)")
 
 MODEL_NAME = "gemini-3.1-flash-lite"
-FINAL_RESPONSE_MODEL = "gemma-4-31b-it"
+FINAL_RESPONSE_MODEL = "gemini-3.1-flash-lite"
 # Для поиска с Google Search grounding используем Gemini 2.5 Flash
 # Поддерживает grounding и работает на бесплатном тарифе (июнь 2026)
-SEARCH_MODEL = "gemini-2.5-flash"
+SEARCH_MODEL = "gemini-3.1-flash-lite"
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "768"))
 
@@ -117,6 +117,12 @@ MAX_DOCUMENT_CHARS = 120_000
 RETRIEVAL_CHAR_BUDGET = 50_000
 RETRIEVAL_MAX_FACTS = 25  # Увеличено с 15 до 25
 RETRIEVAL_MAX_REFLECTIONS = 5
+
+# LCE (Life Continuity Engine): извлечение переходов НЕ каждый compress,
+# а раз в N сжатий — это дорогой отдельный запрос к LLM (как ты и просил).
+LCE_EVERY_N = 8
+# Ниже этого порога уверенности переход уходит в pending_review (карантин).
+LCE_CONFIDENCE_THRESHOLD = 0.65
 
 # ── Memory Reliability Layer (старение выводов, не удаление) ──
 # Полувремени (дни) без подтверждения до перехода active→aging→stale.

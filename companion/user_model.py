@@ -52,7 +52,7 @@ USER_MODEL_REFLECTION_PROMPT = """Ты анализируешь диалог И�
   "emotional_updates": {{
     "improvement_triggers_to_add": ["что улучшает состояние"],
     "deterioration_triggers_to_add": ["что ухудшает состояние/триггеры"],
-    "baseline_state": "новое базовое состояние (если изменилось, например: anxious, depressed, neutral)"
+    "baseline_state": "новое базовое состояние (СТРОГО ОДНО ИЗ: neutral, depressed, anxious, energized, angry)"
   }},
   "reflection": {{
     "discoveries": ["описание новых открытий о личности"],

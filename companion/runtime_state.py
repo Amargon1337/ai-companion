@@ -19,3 +19,4 @@ class RuntimeState:
     intent: str = "chat_casual"
     intent_confidence: float = 0.5
     command: str = ""
+    needs_clarification: str = ""

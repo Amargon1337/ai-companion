@@ -46,24 +46,17 @@ def make_config(**kwargs: Any) -> google_types.GenerateContentConfig:
     return google_types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS, **kwargs)
 
 
-def make_search_config(**kwargs: Any) -> google_types.GenerateContentConfig:
-    return make_config(
-        tools=[google_types.Tool(google_search=google_types.GoogleSearch())],
-        **kwargs,
-    )
-
-
 def history_item(role: str, text: str) -> dict:
     return {"role": role, "parts": [{"text": text}]}
 
 
-def oneshot(prompt: str, model: str = MODEL_NAME) -> str:
+def oneshot(prompt: str, model: str = MODEL_NAME, **kwargs: Any) -> str:
     import time
     from companion.config import LLM_RETRIES, LLM_RETRY_DELAY
     last_exc = None
     for attempt in range(LLM_RETRIES):
         try:
-            temp = client.chats.create(model=model, config=make_config())
+            temp = client.chats.create(model=model, config=make_config(**kwargs))
             r = temp.send_message(prompt)
             return (r.text or "").strip().replace("```json", "").replace("```", "").strip()
         except Exception as e:
@@ -153,43 +146,6 @@ def format_grounding_sources(response: Any) -> str:
     return "\n".join(lines)
 
 
-def search_with_grounding(query: str, context: str = "") -> tuple[str, str]:
-    """Google Search с grounding через Gemini 2.5 Flash."""
-    # Формируем персонализированный запрос
-    if context:
-        system_instruction = (
-            "Ты — персональный ассистент Ивана. "
-            "Используй Google Search для актуальных данных. "
-            "Интерпретируй результаты поиска с учетом личного контекста пользователя. "
-            "Отвечай на русском с лёгким цинизмом в стиле Ивана.\n\n"
-            f"Контекст о пользователе:\n{context[:1500]}"
-        )
-        prompt = query
-    else:
-        system_instruction = (
-            "Отвечай на русском. Используй Google Search для актуальных данных. "
-            "Факты — только из поиска."
-        )
-        prompt = query
-
-    response = client.models.generate_content(
-        model=SEARCH_MODEL,
-        contents=prompt,
-        config=make_search_config(
-            system_instruction=system_instruction,
-            temperature=0.4,
-        ),
-    )
-    # Safe text extraction with fallback
-    text = getattr(response, 'text', None) or ""
-    text = text.strip()
-    if not text:
-        import logging
-        logging.getLogger(__name__).error(f"Empty response from search model {SEARCH_MODEL}")
-        raise ValueError("Пустой ответ от модели")
-    return text, format_grounding_sources(response)
-
-
 def upload_file(path: str) -> Any:
     return client.files.upload(file=path)
 
@@ -222,42 +178,17 @@ def _get_aio_client():
     return _aio_client
 
 
-async def aio_oneshot(prompt: str, model: str = MODEL_NAME) -> str:
+async def aio_oneshot(prompt: str, model: str = MODEL_NAME, **kwargs: Any) -> str:
     c = _get_aio_client()
-    temp = c.aio.chats.create(model=model, config=make_config())
+    temp = c.aio.chats.create(model=model, config=make_config(**kwargs))
     r = await temp.send_message(prompt)
     return (r.text or "").strip().replace("```json", "").replace("```", "").strip()
 
 
-async def aio_search_with_grounding(query: str, context: str = "") -> tuple[str, str]:
-    from companion.config import SEARCH_MODEL
+async def aio_oneshot_multimodal(contents: list[Any], model: str = MODEL_NAME, **kwargs: Any) -> str:
     c = _get_aio_client()
-    if context:
-        system_instruction = (
-            "Ты — персональный ассистент Ивана. "
-            "Используй Google Search для актуальных данных. "
-            "Интерпретируй результаты поиска с учетом личного контекста пользователя. "
-            "Отвечай на русском с лёгким цинизмом в стиле Ивана.\n\n"
-            f"Контекст о пользователе:\n{context[:1500]}"
-        )
-    else:
-        system_instruction = (
-            "Отвечай на русском. Используй Google Search для актуальных данных. "
-            "Факты — только из поиска."
-        )
-    response = await c.aio.models.generate_content(
-        model=SEARCH_MODEL,
-        contents=query,
-        config=make_search_config(
-            system_instruction=system_instruction,
-            temperature=0.4,
-        ),
-    )
-    text = getattr(response, 'text', None) or ""
-    text = text.strip()
-    if not text:
-        raise ValueError("Пустой ответ от модели")
-    return text, format_grounding_sources(response)
+    r = await c.aio.models.generate_content(model=model, contents=contents, config=make_config(**kwargs))
+    return (r.text or "").strip().replace("```json", "").replace("```", "").strip()
 
 
 async def aio_upload_file(path: str) -> Any:
@@ -279,10 +210,6 @@ async def aio_delete_file(name: str) -> None:
 
 async def async_oneshot(prompt: str, model: str = MODEL_NAME) -> str:
     return await asyncio.to_thread(oneshot, prompt, model)
-
-
-async def async_search_with_grounding(query: str, context: str = "") -> tuple[str, str]:
-    return await asyncio.to_thread(search_with_grounding, query, context)
 
 
 async def async_upload_file(path: str) -> Any:
@@ -357,6 +284,7 @@ class MessageAnalysis(BaseModel):
     user_state: Literal["ANXIOUS", "DEPRESSED", "CURIOUS", "OVERWHELMED", "NORMAL"]
     estimated_importance: int = Field(default=5, ge=1, le=10)
     command: str = Field(default="")
+    needs_clarification: str = Field(default="", description="Текст уточняющего вопроса для заполнения пробелов в модели пользователя (gap-filling), если выявлена интересная тема без деталей. Иначе пустая строка.")
 
 class FactItem(BaseModel):
     fact: str
@@ -429,6 +357,18 @@ class HumanModelItem(BaseModel):
 
 class HumanModelExtractionResult(BaseModel):
     human_model: HumanModelItem
+
+class LifeTransitionItem(BaseModel):
+    """LCE: один устойчивый переход состояния. Пустой — не создавать."""
+    domain: str = Field(default="identity")  # identity|career|relationships|habits|interests|worldview|mental_state
+    from_state: str = Field(default="")
+    to_state: str = Field(default="")
+    explanation: str = Field(default="")
+    trigger_events: List[str] = Field(default_factory=list)  # описания/факты-основания
+    confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+
+class LifeTransitionExtractionResult(BaseModel):
+    transitions: List[LifeTransitionItem]
 
 class PersonalityPipelineResult(BaseModel):
     interests_delta: Dict[str, int] = Field(default_factory=dict)

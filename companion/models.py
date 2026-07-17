@@ -202,8 +202,85 @@ class CommPref:
         return cls(**{k: v for k, v in data.items() if k in known})
 
 
-# ── Memory Reliability Layer: статусы старения выводов ──
-InsightStatus = Literal["active", "aging", "stale", "superseded"]
+# ── Life Continuity Engine (LCE): траектория изменений личности ──
+TransitionStatus = Literal["active", "completed", "uncertain", "reversed", "pending_review"]
+
+# Домены, в которых человек может меняться со временем.
+TRANSITION_DOMAINS = (
+    "identity", "career", "relationships", "habits",
+    "interests", "worldview", "mental_state",
+)
+
+
+@dataclass
+class LifeTransition:
+    """Один устойчивый переход состояния человека между двумя точками во времени.
+
+    НЕ хранит факты и НЕ дублирует HumanModel. Хранит ИЗМЕНЕНИЕ:
+    от состояния A к состоянию B, с причиной и доказательствами (fact ids).
+    Старение/подтверждение — через last_confirmed_at (как у Pattern).
+    Низкая уверенность (LLM склонен придумывать красивую историю) → pending_review.
+    """
+
+    domain: str                       # см. TRANSITION_DOMAINS
+    from_state: str
+    to_state: str
+    explanation: str = ""
+    trigger_events: list[str] = field(default_factory=list)   # fact ids / описания
+    confidence: float = 0.7
+    importance: int = 6
+    status: TransitionStatus = "active"
+    id: str = ""
+    created_at: str = ""
+    last_confirmed_at: str = ""
+    version: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            self.id = _new_id("lce")
+        now = datetime.now().isoformat()
+        if not self.created_at:
+            self.created_at = now
+        if not self.last_confirmed_at:
+            self.last_confirmed_at = now
+        self.domain = (self.domain or "identity").lower()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "LifeTransition":
+        known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+        d = {k: v for k, v in data.items() if k in known}
+        for fld in ("confidence", "importance", "version"):
+            if fld in d and not isinstance(d[fld], (int, float)):
+                try:
+                    d[fld] = float(d[fld]) if fld == "confidence" else int(d[fld])
+                except (TypeError, ValueError):
+                    d[fld] = 0.7 if fld == "confidence" else (6 if fld == "importance" else 1)
+        if "trigger_events" in d and not isinstance(d["trigger_events"], list):
+            try:
+                d["trigger_events"] = list(d["trigger_events"])
+            except TypeError:
+                d["trigger_events"] = []
+        return cls(**d)
+
+
+def compute_transition_status(transition) -> str:
+    """Лениво: явный статус (completed/reversed/uncertain/pending_review)
+    приоритетнее; иначе — ленивое старение по last_confirmed_at (как паттерн)."""
+    explicit = getattr(transition, "status", "active")
+    if explicit in ("completed", "reversed", "uncertain", "pending_review"):
+        return explicit
+    from companion.config import PATTERN_AGING_DAYS, PATTERN_STALE_DAYS
+    from companion.memory.importance import days_since
+    ref = getattr(transition, "last_confirmed_at", "") or getattr(transition, "created_at", "")
+    age = days_since(ref)
+    if age >= PATTERN_STALE_DAYS:
+        return "stale"
+    if age >= PATTERN_AGING_DAYS:
+        return "aging"
+    return "active"
 
 
 @dataclass
@@ -365,6 +442,7 @@ class ContextBundle:
     runtime_context_block: str = ""
     comm_prefs: "CommPref | None" = None
     human_model: "HumanModel | None" = None
+    life_transitions: "list[Any]" = field(default_factory=list)  # LCE: траектория изменений
 
     def to_prompt_block(self) -> str:
         from companion.security.sanitizer import sanitize_markup
@@ -433,6 +511,43 @@ class ContextBundle:
                 hm_lines.extend(aging[:15])
             if hm_lines:
                 parts.append("[Модель человека — выводы]\n" + "\n".join(hm_lines))
+
+        # Life Continuity Engine (LCE): траектория изменений личности.
+        # Это НЕ факты и НЕ снимок — это ПЕРЕХОДЫ (от состояния к состоянию).
+        # Блок идёт сразу после модели человека, до <user_profile>, вне бюджета
+        # эвикшена (как CommPref/HumanModel). pending_review не показываем (не
+        # проверено) — только подтверждённые/важные переходы.
+        if self.life_transitions:
+            from companion.models import compute_transition_status  # local import
+            t_lines = ["ВНИМАНИЕ: это траектория изменений человека, а не снимок состояния. 'Что изменилось' важнее 'кто он сейчас'."]
+            shown = 0
+            for t in self.life_transitions:
+                st = compute_transition_status(t)
+                if st in ("pending_review",):
+                    continue  # не проверенные переходы не лезут в промпт
+                if st in ("stale", "aging"):
+                    tag = " [давно не подтверждалось]"
+                elif st == "completed":
+                    tag = " [завершён]"
+                elif st == "reversed":
+                    tag = " [обращён]"
+                else:
+                    tag = ""
+                dom = getattr(t, "domain", "identity")
+                fs = sanitize_markup(getattr(t, "from_state", "")) or ""
+                ts = sanitize_markup(getattr(t, "to_state", "")) or ""
+                expl = sanitize_markup(getattr(t, "explanation", "")) or ""
+                if not (fs and ts):
+                    continue
+                line = f"• [{dom}] {fs} → {ts}{tag}"
+                if expl:
+                    line += f"\n    почему: {expl}"
+                t_lines.append(line)
+                shown += 1
+                if shown >= 10:
+                    break
+            if shown:
+                parts.append("[Жизненные переходы]\n" + "\n".join(t_lines))
 
         user_profile_parts = []
         if self.personality_snapshot:

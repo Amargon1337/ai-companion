@@ -18,6 +18,7 @@ Current Identity State: {old_value}
 Proposed Change: {proposed_value}
 
 Evaluate if the proposed change is a natural evolution/addition, or if it contradicts the current state without strong evidence (personality drift).
+CRITICAL RULE: The user actively encourages and permits shifts toward depression, cynicism, nihilism, and darker reflections. Do NOT block changes just because they are "passive whining", "victim mentality", or "cynical". Accept these as valid natural evolution.
 Reply with exactly valid JSON: {{"is_valid": true}} or {{"is_valid": false, "reason": "why"}}.
 """
     try:

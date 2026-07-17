@@ -32,18 +32,31 @@ class MemoryDatabase:
   def __init__(self, path: str | None = None) -> None:
     from companion.config import SQLITE_PATH as _SQLITE_PATH
     self.path = path if path is not None else _SQLITE_PATH
+    import threading
+    self._lock = threading.RLock()
+    self.conn = sqlite3.connect(self.path, check_same_thread=False)
+    _configure_conn(self.conn)
+    self.conn.row_factory = sqlite3.Row
     self._init_schema()
+
+  def close(self) -> None:
+    with self._lock:
+      try:
+        self.conn.execute("PRAGMA optimize;")
+      except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Error on PRAGMA optimize: {e}")
+      self.conn.close()
 
   @contextmanager
   def _conn(self) -> Generator[sqlite3.Connection, None, None]:
-    conn = sqlite3.connect(self.path)
-    _configure_conn(conn)
-    conn.row_factory = sqlite3.Row
-    try:
-      yield conn
-      conn.commit()
-    finally:
-      conn.close()
+    with self._lock:
+      try:
+        yield self.conn
+        self.conn.commit()
+      except Exception:
+        self.conn.rollback()
+        raise
 
   def _init_schema(self) -> None:
     with self._conn() as conn:
@@ -80,6 +93,7 @@ class MemoryDatabase:
         CREATE INDEX IF NOT EXISTS idx_facts_status ON facts(status);
         CREATE INDEX IF NOT EXISTS idx_facts_importance ON facts(importance);
         CREATE INDEX IF NOT EXISTS idx_facts_date ON facts(date);
+        CREATE INDEX IF NOT EXISTS idx_facts_composite ON facts(status, date DESC, created_at DESC);
 
         CREATE TABLE IF NOT EXISTS fact_relations (
           id TEXT PRIMARY KEY,
@@ -90,6 +104,9 @@ class MemoryDatabase:
           reason TEXT,
           confidence REAL DEFAULT 0.8
         );
+        CREATE INDEX IF NOT EXISTS idx_fact_relations_from_id ON fact_relations(from_id);
+        CREATE INDEX IF NOT EXISTS idx_fact_relations_to_id ON fact_relations(to_id);
+        CREATE INDEX IF NOT EXISTS idx_fact_relations_composite ON fact_relations(from_id, to_id);
 
         CREATE TABLE IF NOT EXISTS messages (
           id TEXT PRIMARY KEY,
@@ -114,6 +131,7 @@ class MemoryDatabase:
           status TEXT DEFAULT 'active',
           created_at TEXT
         );
+        CREATE INDEX IF NOT EXISTS idx_reflections_status_composite ON reflections(status, created_at DESC);
 
         CREATE TABLE IF NOT EXISTS beliefs (
           id TEXT PRIMARY KEY,
@@ -123,6 +141,7 @@ class MemoryDatabase:
           status TEXT DEFAULT 'active',
           created_at TEXT
         );
+        CREATE INDEX IF NOT EXISTS idx_beliefs_status_composite ON beliefs(status, importance DESC);
 
         CREATE TABLE IF NOT EXISTS patterns (
           id TEXT PRIMARY KEY,
@@ -162,6 +181,22 @@ class MemoryDatabase:
           updated_at TEXT,
           version INTEGER DEFAULT 1
         );
+
+        CREATE TABLE IF NOT EXISTS life_transitions (
+          id TEXT PRIMARY KEY,
+          domain TEXT DEFAULT 'identity',
+          from_state TEXT NOT NULL,
+          to_state TEXT NOT NULL,
+          explanation TEXT DEFAULT '',
+          trigger_events TEXT DEFAULT '[]',
+          confidence REAL DEFAULT 0.7,
+          importance INTEGER DEFAULT 6,
+          status TEXT DEFAULT 'active',
+          created_at TEXT,
+          last_confirmed_at TEXT,
+          version INTEGER DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_life_transitions_status ON life_transitions(status, importance);
 
         CREATE TABLE IF NOT EXISTS timeline (
           id TEXT PRIMARY KEY,
@@ -1075,6 +1110,83 @@ class MemoryDatabase:
         ),
       )
 
+  # ── Life Continuity Engine (LCE) ────────────────────────────────
+
+  def add_life_transition(self, row: dict[str, Any]) -> None:
+    _js = lambda v: json.dumps(v, ensure_ascii=False) if not isinstance(v, str) else v
+    with self._conn() as conn:
+      conn.execute(
+        """
+        INSERT OR IGNORE INTO life_transitions
+          (id, domain, from_state, to_state, explanation, trigger_events,
+           confidence, importance, status, created_at, last_confirmed_at, version)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+          row.get("id"),
+          row.get("domain", "identity"),
+          row.get("from_state", ""),
+          row.get("to_state", ""),
+          row.get("explanation", ""),
+          _js(row.get("trigger_events", [])),
+          float(row.get("confidence", 0.7)),
+          int(row.get("importance", 6)),
+          row.get("status", "active"),
+          row.get("created_at"),
+          row.get("last_confirmed_at"),
+          int(row.get("version", 1)),
+        ),
+      )
+
+  def update_life_transition(self, transition_id: str, fields: dict[str, Any]) -> None:
+    allowed = {
+      "domain", "from_state", "to_state", "explanation", "trigger_events",
+      "confidence", "importance", "status", "last_confirmed_at", "version",
+    }
+    sets = {k: v for k, v in fields.items() if k in allowed}
+    if not sets:
+      return
+    if "trigger_events" in sets and not isinstance(sets["trigger_events"], str):
+      sets["trigger_events"] = json.dumps(sets["trigger_events"], ensure_ascii=False)
+    assignments = ", ".join(f"{k}=?" for k in sets)
+    params = list(sets.values()) + [transition_id]
+    with self._conn() as conn:
+      conn.execute(f"UPDATE life_transitions SET {assignments} WHERE id=?", params)
+
+  def get_life_transition(self, transition_id: str) -> dict[str, Any] | None:
+    with self._conn() as conn:
+      row = conn.execute(
+        "SELECT * FROM life_transitions WHERE id=?", (transition_id,)
+      ).fetchone()
+    if row is None:
+      return None
+    d = dict(row)
+    d["trigger_events"] = json.loads(d.get("trigger_events") or "[]")
+    return d
+
+  def list_life_transitions(self, status: str | None = None) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      if status is None:
+        rows = conn.execute(
+          "SELECT * FROM life_transitions ORDER BY importance DESC, created_at DESC"
+        ).fetchall()
+      else:
+        rows = conn.execute(
+          "SELECT * FROM life_transitions WHERE status=? ORDER BY importance DESC, created_at DESC",
+          (status,),
+        ).fetchall()
+    result = []
+    for r in rows:
+      d = dict(r)
+      d["trigger_events"] = json.loads(d.get("trigger_events") or "[]")
+      result.append(d)
+    return result
+
+  def delete_life_transition(self, transition_id: str) -> bool:
+    with self._conn() as conn:
+      cur = conn.execute("DELETE FROM life_transitions WHERE id=?", (transition_id,))
+      return cur.rowcount > 0
+
   def list_beliefs(self, status: str = "active") -> list[dict[str, Any]]:
     with self._conn() as conn:
       rows = conn.execute(
@@ -1475,3 +1587,18 @@ class MemoryDatabase:
     d = dict(row)
     d["metadata"] = _loads(d.get("metadata"), {})
     return d
+
+  async def async_batch_insert_facts(self, rows: list[dict[str, Any]]) -> None:
+    await asyncio.to_thread(self.batch_insert_facts, rows)
+
+  async def async_batch_insert_relations(self, rows: list[dict[str, Any]]) -> None:
+    await asyncio.to_thread(self.batch_insert_relations, rows)
+
+  async def async_batch_insert_messages(self, rows: list[dict[str, Any]]) -> None:
+    await asyncio.to_thread(self.batch_insert_messages, rows)
+
+  async def async_batch_insert_reflections(self, rows: list[dict[str, Any]]) -> None:
+    await asyncio.to_thread(self.batch_insert_reflections, rows)
+
+  async def async_batch_insert_beliefs(self, rows: list[dict[str, Any]]) -> None:
+    await asyncio.to_thread(self.batch_insert_beliefs, rows)

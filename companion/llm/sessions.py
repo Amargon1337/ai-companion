@@ -20,66 +20,15 @@ def build_system_instruction(
     query: str = "",
     precomputed_context: str | None = None,
 ) -> str:
-    PROMPT_VERSION = "v6"
-    
-    notes = "\n".join(store.db.list_permanent_notes())
-    pers_snapshot = store.build_canonical_profile_text()
+    from companion.user_model import user_model
+    baseline_state = user_model.data.get("emotional_timeline", {}).get("baseline_state", "neutral")
+    PROMPT_VERSION = f"v7_static_{baseline_state}"
     ivan = store.db.get_meta("legacy_profile", "")
+    
+    strategy = STRATEGY_PROFILES.get(baseline_state, STRATEGY_PROFILES.get("neutral"))
+    tone = TONE_PROFILES.get(baseline_state, TONE_PROFILES.get("neutral"))
 
-    # БЛОК 3: SUMMARY STACK - включаем Tier 3 (master summary)
-    master_summary = store.load_master_summary()
-
-    if precomputed_context is not None:
-        ctx = precomputed_context
-    else:
-        runtime_context_block = ""
-        try:
-            from companion.context import ContextAggregator
-            runtime_context_block = ContextAggregator(store.db).build_prompt_block()
-        except Exception:
-            runtime_context_block = ""
-        active_goals = reasoning_engine.get_goal_snapshot(query)
-        causal_links = reasoning_engine.get_relevant_causal_context(query)
-        predictions = []
-        world_model_context = reasoning_engine.get_world_model_context(query)
-
-        bundle = retrieval.select(
-            query=query,
-            facts=store.list_facts("active"),
-            reflections=store.list_reflections(),
-            summaries=store.load_recent_summaries(5),
-            permanent_notes=notes,
-            identity_vault_block="",
-            personality_snapshot=pers_snapshot,
-            active_goals=active_goals,
-            causal_links=causal_links,
-            predictions=predictions,
-            world_model_context=world_model_context,
-            user_model_context="",
-            runtime_context_block=runtime_context_block,
-            comm_prefs=store.get_comm_pref(),
-            human_model=store.get_human_model(),
-        )
-        ctx = bundle.to_prompt_block()
-
-    # --- Policy Engine (Dynamic Tone V6) ---
-    raw_state = user_model.data.get("emotional_timeline", {}).get("baseline_state", "neutral").lower()
-    from companion.user_model import UserModel
-    if raw_state not in UserModel.CORE_STATES:
-        current_state = "neutral"
-    else:
-        current_state = raw_state
-
-    mood_intensity = 1 
-
-    strategy = STRATEGY_PROFILES.get(current_state, STRATEGY_PROFILES["neutral"])
-    tone = TONE_PROFILES.get(current_state, TONE_PROFILES["neutral"])
-
-    prompt_hash_source = f"{PROMPT_VERSION}_{current_state}_{mood_intensity}_{strategy}_{tone}"
-    cache_key = hashlib.sha256(prompt_hash_source.encode('utf-8')).hexdigest()
-
-    if "default" not in _PROMPT_CACHE or _PROMPT_CACHE["default"].get("key") != cache_key:
-        policy_shell = f"""# SYSTEM DIRECTIVES
+    policy_shell = f"""# SYSTEM DIRECTIVES
 Each section is INDEPENDENT. Do not reinterpret, merge or summarize sections.
 Use each section only for its defined purpose.
 
@@ -87,7 +36,6 @@ Use each section only for its defined purpose.
 1. CORE_PERSONALITY (highest priority)
 2. DIALOGUE_STRATEGY (governs behavior, overrides Tone)
 3. EMOTIONAL_TONE (governs wording only)
-4. CONTEXT
 
 # 1. CORE_PERSONALITY
 {CORE_PERSONALITY}
@@ -98,24 +46,10 @@ Use each section only for its defined purpose.
 # 3. EMOTIONAL_TONE
 {tone}
 """
-        _PROMPT_CACHE["default"] = {"key": cache_key, "compiled_prompt": policy_shell}
-        
-    # Context assembly (not cached because it changes every request)
-    memory_block = ""
     if ivan:
-        memory_block += f"<legacy_profile_input>\n[ivan.txt — статичная персона]\n{ivan}\n</legacy_profile_input>\n\n"
-    
-    if ctx:
-        memory_block += ctx
-    elif pers_snapshot:
-        memory_block += f"\n<user_profile>\n{pers_snapshot}\n</user_profile>\n\n"
+        policy_shell += f"\n<legacy_profile_input>\n[ivan.txt — статичная персона]\n{ivan}\n</legacy_profile_input>\n"
         
-    if master_summary:
-        memory_block += f"\n<conversational_memory>\n[Master Summary — долговременный контекст]\n{master_summary[:2000]}\n</conversational_memory>\n"
-
-    final_system_prompt = _PROMPT_CACHE["default"]["compiled_prompt"] + f"\n# 4. CONTEXT\n{memory_block}\n"
-    
-    return final_system_prompt
+    return policy_shell
 
 
 def create_default_session(
@@ -149,12 +83,12 @@ def create_default_session(
     )
 
 
-def _reconstruct_recent_history(store: MemoryStore, limit: int = 30) -> list[dict]:
+def _reconstruct_recent_history(store: MemoryStore, limit: int = 15) -> list[dict]:
     """
     Восстанавливает последние сообщения из SQLite для continuity после рестарта.
 
     ПРОБЛЕМА: После рестарта Gemini session теряется, бот забывает последний контекст.
-    РЕШЕНИЕ: Загружаем последние 30 сообщений (user + assistant) из SQLite.
+    РЕШЕНИЕ: Загружаем последние 15 сообщений (user + assistant) из SQLite.
 
     ВЛИЯНИЕ НА КАЧЕСТВО:
     - После рестарта бот помнит недавний диалог

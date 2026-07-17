@@ -22,10 +22,6 @@ from companion.background_scheduler import (
 from companion.config import BASE_DIR, SUMMARY_THRESHOLD
 from companion.context import ContextAggregator
 from companion.critique_manager import apply_critique_to_text, run_self_critique
-from companion.grounding_handler import (
-    grounding_answer_only,
-    should_retry_with_grounding,
-)
 from companion.llm import client as llm
 from companion.llm.analyzer import analyze_message
 from companion.llm.pipeline import run_compress_pipeline
@@ -64,12 +60,22 @@ async def proactive_ping_loop(bot):
     from datetime import datetime
     from companion.proactive.loop import run_proactive_loop
     
+    last_subconscious_run = 0.0
+    
     while True:
         try:
             await asyncio.sleep(60)
             now_dt = datetime.now()
             hour = now_dt.hour
-            # Не пингуем ночью
+            
+            # Фоновое "Подсознание" (Background Consolidation) запускаем ночью (3:00 - 4:59)
+            if 3 <= hour < 5:
+                if (now_dt.timestamp() - last_subconscious_run) > 12 * 3600:
+                    from companion.proactive.subconscious import run_subconscious_consolidation
+                    await run_subconscious_consolidation(bot, memory_store)
+                    last_subconscious_run = now_dt.timestamp()
+            
+            # Не пингуем юзера ночью
             if not (10 <= hour < 23):
                 continue
                 
@@ -259,6 +265,46 @@ async def show_selfmap(message: types.Message) -> None:
     await send_long_message(message, "\n".join(lines))
 
 
+async def show_life_continuity(message: types.Message) -> None:
+    """Команда /continuity (алиас /lce): синтез траектории личности.
+
+    reflect_on_self(): объединяет модель человека (снимок) и жизненные
+    переходы (LCE, траекторию) в читаемый ответ 'что во мне изменилось'.
+    pending_review не показываем (не проверено)."""
+    from companion.memory.store import memory_store as ms
+    hm = ms.get_human_model()
+    transitions = [t for t in ms.get_recent_transitions(15)
+                   if t.status not in ("pending_review",)]
+    if not any(hm.all_insights()) and not transitions:
+        await message.answer("Пока недостаточно данных, чтобы судить о траектории. "
+                             "Дай мне пожить с тобой подольше.")
+        return
+    lines = ["🧭 Траектория личности (Life Continuity Engine):\n"]
+    if transitions:
+        lines.append("Что изменилось:")
+        for i, t in enumerate(transitions, 1):
+            dom = t.domain
+            tag = ""
+            if t.status == "completed":
+                tag = " (завершён)"
+            elif t.status == "reversed":
+                tag = " (обращён)"
+            lines.append(f"{i}. [{dom}]{tag} {t.from_state} → {t.to_state}")
+            if t.explanation:
+                lines.append(f"   почему: {t.explanation}")
+    else:
+        lines.append("Я пока не фиксирую устойчивых переходов — только текущее состояние:")
+    # Текущий снимок (HumanModel) как контекст 'кто ты сейчас'
+    for dim, label in (("goals", "Цели"), ("strengths", "Силы"),
+                        ("fears", "Страхи"), ("recurring_mistakes", "Повторы"),
+                        ("long_term_trends", "Тренды")):
+        items = [i.text for i in getattr(hm, dim) if i.text]
+        if items:
+            lines.append(f"\n{label}:")
+            lines.extend(f"  • {x}" for x in items[:8])
+    await send_long_message(message, "\n".join(lines))
+
+
 _compression_locks: dict[int, asyncio.Lock] = {}
 
 def _get_compression_lock(user_id: int) -> asyncio.Lock:
@@ -275,6 +321,7 @@ async def compress_and_reset(user_id: int) -> str | None:
         logger.info("Compression already in progress for user %d, skipping", user_id)
         return None
 
+    logger.info("[COMPRESSION] Превышен лимит сообщений. Запуск фонового сжатия контекста...")
     async with lock:
         chat = user_chats[user_id]
         original_count = user_message_counts.get(user_id, 0)
@@ -338,37 +385,39 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
         return None
 
     state = RuntimeState()
-    if isinstance(content_payload, str) and content_payload.strip():
-        state.user_message = content_payload
+    if query.strip():
+        state.user_message = query
 
         # LLM-based analysis replaces mood_lite, importance heuristics, and intent regex
-        analysis = await asyncio.to_thread(analyze_message, content_payload)
+        analysis = await asyncio.to_thread(analyze_message, query)
         state.message_importance = analysis["estimated_importance"]
         state.mood_state = analysis["user_mood"]
         state.intent = analysis["intent"]
         state.intent_confidence = analysis["confidence"]
         state.user_state = analysis["user_state"]
         state.command = analysis["command"]
+        state.needs_clarification = analysis.get("needs_clarification", "")
 
         await asyncio.to_thread(
             memory_store.log_message,
-            "user", content_payload, analysis["estimated_importance"],
+            "user", query, analysis["estimated_importance"],
             "default", [], uid
         )
         safe_task(
-            _extract_prospective_memory(content_payload),
+            _extract_prospective_memory(query),
             "prospective_memory_extract",
         )
         state.reasoning_context = await asyncio.to_thread(
-            reasoning_engine.auto_reasoning_context, content_payload, analysis["estimated_importance"]
+            reasoning_engine.auto_reasoning_context, query, analysis["estimated_importance"]
         )
         async with memory_store.lock:
-            await asyncio.to_thread(memory_service.auto_add_event_from_message, content_payload, analysis["estimated_importance"])
+            await asyncio.to_thread(memory_service.auto_add_event_from_message, query, analysis["estimated_importance"])
 
     intent = state.intent or "memory"
     conf = state.intent_confidence or 0.6
     policy_decision = _get_policy_decision(state, query)
     state.policy_constraints = policy_decision.constraints if policy_decision else None
+    logger.info("[MEMORY] Запуск поиска релевантных фактов и сборки когнитивного контекста (RAG)...")
     ctx_data = await _load_retrieval_context(query, state.reasoning_context)
 
     # Блокируем web search для технических/кодовых запросов — ответ только из памяти
@@ -391,6 +440,93 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
         "policy_decision": policy_decision, "ctx_data": ctx_data,
         "force_flash": force_flash, "content_payload": content_payload,
     }
+
+MULTIMODAL_PROMPT = """Проанализируй этот медиафайл, отправленный пользователем.
+Выдели ключевые объекты, контекст и смысл. Извлеки 1-3 факта о жизни пользователя (например, вещи, домашние животные, хобби, локации, люди), которые стоит запомнить.
+Верни ответ СТРОГО в формате JSON:
+{{
+  "description": "Краткое описание того, что ты увидел или услышал",
+  "facts": ["факт 1", "факт 2"]
+}}
+"""
+
+async def process_multimodal_request(message: types.Message):
+    """Handles photo/voice inputs, extracts facts via Gemini Vision, and saves them to memory."""
+    uid = message.from_user.id
+    if not message.photo and not message.voice and not message.document:
+        return
+
+    await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
+    
+    import os
+    import tempfile
+    import json
+    
+    try:
+        # 1. Download file
+        temp_dir = tempfile.mkdtemp(prefix="companion-media-")
+        if message.photo:
+            file_id = message.photo[-1].file_id
+            ext = ".jpg"
+        elif message.voice:
+            file_id = message.voice.file_id
+            ext = ".ogg"
+        else:
+            file_id = message.document.file_id
+            ext = os.path.splitext(message.document.file_name or "")[1]
+            
+        file = await message.bot.get_file(file_id)
+        local_path = os.path.join(temp_dir, f"media{ext}")
+        await message.bot.download_file(file.file_path, local_path)
+        
+        # 2. Upload to Gemini
+        from companion.llm.client import aio_upload_file, aio_oneshot_multimodal, aio_delete_file
+        uploaded_media = await aio_upload_file(local_path)
+        
+        # 3. Analyze
+        prompt = MULTIMODAL_PROMPT
+        if message.caption:
+            prompt += f"\n\nПользователь добавил подпись: {message.caption}"
+            
+        response_text = await aio_oneshot_multimodal([uploaded_media, prompt])
+        
+        # 4. Parse & Save
+        try:
+            res = json.loads(response_text)
+            desc = res.get("description", "")
+            facts = res.get("facts", [])
+            
+            # Log as system fact
+            for f in facts:
+                fact_text = f"[Multimodal Memory] На медиафайле пользователя зафиксировано: {f}"
+                await asyncio.to_thread(
+                    memory_store.log_message,
+                    "system", fact_text, 8,
+                    "memory", ["vision", "audio"], uid
+                )
+                
+            # Instead of a robotic log, pass the description to the persona pipeline
+            synthetic_query = f"[Пользователь прислал медиафайл. Внутреннее зрение увидело: {desc}]"
+            if message.caption:
+                synthetic_query += f"\nКомментарий пользователя: {message.caption}"
+            
+            logger.info(f"[MULTIMODAL] Сгенерирован скрытый промпт: {synthetic_query}")
+            
+            # This triggers the normal chat pipeline (RAG, reasoning, and character response)
+            await process_llm_request(message, synthetic_query)
+
+            
+        except json.JSONDecodeError:
+            await message.reply("Я изучил(а) файл, но не смог(ла) структурировать факты. 🤷‍♂️")
+            
+        # Cleanup
+        await aio_delete_file(uploaded_media.name)
+        os.remove(local_path)
+        os.rmdir(temp_dir)
+        
+    except Exception as e:
+        logger.error(f"Multimodal processing error: {e}")
+        await message.reply("У меня не получилось обработать этот файл. 😔")
 
 from companion.config import LLM_COMMAND_CONFIDENCE_THRESHOLD
 
@@ -482,26 +618,6 @@ def _strip_prefix(text: str, prefixes: list[str]) -> str:
     return text
 
 
-def is_explicit_search_request(payload: Any) -> bool:
-    text = ""
-    if isinstance(payload, str):
-        text = payload
-    elif isinstance(payload, list) and payload:
-        first = payload[0]
-        if isinstance(first, str):
-            text = first
-    if not text:
-        return False
-    lowered = text.lower()
-    search_keywords = ["интернет", "google", "гугл", "погугли", "поищи"]
-    if any(kw in lowered for kw in search_keywords):
-        action_verbs = ["посмотри", "найди", "поищи", "поиск", "проверь", "узнай", "загугли", "погугли"]
-        if any(verb in lowered for verb in action_verbs):
-            return True
-        if any(lowered.startswith(verb) for verb in ["найди ", "поищи ", "погугли ", "загугли "]):
-            return True
-    return False
-
 
 async def process_llm_request(message: types.Message, content_payload: Any) -> None:
     cleanup_pending_commands()
@@ -557,20 +673,8 @@ async def process_llm_request(message: types.Message, content_payload: Any) -> N
         finally:
             state.command = None
 
-    # Handle explicit search request
-    if is_explicit_search_request(ctx["content_payload"]):
-        from companion.grounding_handler import handle_grounding
-        if await handle_grounding(
-            message=message,
-            query=ctx["query"],
-            ctx_data=ctx["ctx_data"],
-            uid=ctx["uid"],
-            retrieval_mgr=retrieval_mgr,
-            memory_store=memory_store
-        ):
-            return
-
     chat = user_chats[ctx["uid"]]
+    logger.info("[GENERATION] Контекст собран. Отправка запроса на генерацию финального ответа пользователю...")
     await _generate_and_send_response(
         message, chat, state, ctx["content_payload"], ctx["query"],
         ctx["ctx_data"], ctx["policy_decision"], ctx["uid"],
@@ -604,15 +708,32 @@ def check_rate_limit(uid: int, message: types.Message) -> bool:
     return True
 
 
+def _analyze_hidden_emotion(text: str) -> str:
+    text = text.strip()
+    if not text:
+        return ""
+        
+    chars = len(text)
+    words = len(text.split())
+    
+    if words <= 3 and chars < 20:
+        if "." in text and "!" not in text and "?" not in text:
+            return "[СИСТЕМНОЕ СООБЩЕНИЕ: Пользователь отвечает сухо и коротко. Возможно, устал или отстранен. Отвечай эмпатично, не дави и используй краткие фразы.]"
+        elif "!" not in text and "?" not in text:
+            return "[СИСТЕМНОЕ СООБЩЕНИЕ: Пользователь отвечает односложно. Подстройся под его низкий темп, не пиши длинных текстов.]"
+            
+    if "..." in text or ".." in text:
+        return "[СИСТЕМНОЕ СООБЩЕНИЕ: В тексте есть многоточия. Пользователь может быть в задумчивости, неуверенности или грусти. Отвечай мягко.]"
+        
+    import re
+    if re.search(r"[А-ЯЁ]{4,}", text) and "!" in text:
+        return "[СИСТЕМНОЕ СООБЩЕНИЕ: Пользователь пишет КАПСОМ и с восклицаниями. Возможен сильный эмоциональный всплеск. Отреагируй на эту интенсивность адекватно.]"
+        
+    return ""
+
+
 def _get_policy_decision(state: RuntimeState, query: str) -> Any | None:
-    if state.user_message:
-        user_state = policy_layer.from_analyzer_state(state.user_state)
-        policy_decision = policy_layer.decide_policy(
-            user_state=user_state,
-            message_context={"user_message_length": len(state.user_message)}
-        )
-        logger.info(f"Policy decision: mode={policy_decision.response_mode.value} (from analyzer state={state.user_state})")
-        return policy_decision
+    # Temporarily disabled per user request
     return None
 
 
@@ -636,6 +757,12 @@ async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, 
             faiss_scores = {}
             facts_list = all_facts
 
+        raw_goals = memory_store.db.list_goals(status="active")[:2]
+        formatted_goals = [f"{g.get('title', '')}: {g.get('description', '')}" for g in raw_goals]
+        
+        raw_preds = memory_store.db.list_predictions(outcome="pending")[:3]
+        formatted_preds = [f"Предикт: {p.get('hypothesis')} (Условия/Время: {p.get('timeframe')} {', '.join(p.get('conditions', []))})" for p in raw_preds]
+
         return {
             "facts": facts_list,
             "reflections": memory_store.search_reflections(query, limit=10) if query else memory_store.list_reflections("active")[:10],
@@ -647,10 +774,11 @@ async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, 
             "user_model_context": "",
             "comm_prefs": memory_store.get_comm_pref(),
             "human_model": memory_store.get_human_model(),
+            "life_transitions": memory_store.get_active_transitions(),
             "recent": memory_store.recent_messages(min_importance=6, limit=10),
-            "active_goals": reasoning_context.get("active_goals", []) if reasoning_context else [],
+            "active_goals": formatted_goals if formatted_goals else (reasoning_context.get("active_goals", []) if reasoning_context else []),
             "causal_links": reasoning_context.get("causal_links", []) if reasoning_context else [],
-            "predictions": [],
+            "predictions": formatted_preds if formatted_preds else [],
             "world_model_context": reasoning_context.get("world_model_context", "") if reasoning_context else "",
             "faiss_scores": faiss_scores,
             "runtime_context_block": context_aggregator.build_prompt_block(),
@@ -676,6 +804,7 @@ async def _init_user_session(uid, query):
 
 
 async def _generate_and_send_response(message, chat, state, content_payload, query, ctx_data, policy_decision, uid, force_flash: bool = False):
+    history = chat.history if hasattr(chat, "history") else []
     bundle = None
     ctx_block = None
     if isinstance(content_payload, str) and query:
@@ -696,38 +825,56 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             runtime_context_block=ctx_data.get("runtime_context_block", ""),
             comm_prefs=ctx_data.get("comm_prefs"),
             human_model=ctx_data.get("human_model"),
+            life_transitions=ctx_data.get("life_transitions"),
         )
-        ctx_block = bundle.to_prompt_block()
+        master_summary = memory_store.load_master_summary()
+        ctx_block = ""
+        if master_summary:
+            ctx_block += f"<conversational_memory>\n[Master Summary]\n{master_summary[:2000]}\n</conversational_memory>\n\n"
+            
+        hidden_emotion = _analyze_hidden_emotion(query)
+        if hidden_emotion:
+            ctx_block += f"{hidden_emotion}\n\n"
+            
+        # Закомментировано по просьбе (отключение калибратора/допроса):
+        # if getattr(state, "needs_clarification", ""):
+        #     ctx_block += f"[СИСТЕМНОЕ СООБЩЕНИЕ: {state.needs_clarification} Вплети этот уточняющий вопрос органично в конец своего ответа, чтобы узнать больше деталей и поддержать диалог.]\n\n"
+            
+        ctx_block += bundle.to_prompt_block()
+        
         user_block = _build_user_prompt_block(content_payload, state.reasoning_context)
         if state.policy_constraints and policy_decision:
-            content_payload = policy_layer.format_prompt_with_policy(
+            base_payload = policy_layer.format_prompt_with_policy(
                 base_prompt=user_block,
                 policy=policy_decision
             )
         else:
-            content_payload = user_block
+            base_payload = user_block
+            
+        content_payload = (
+            f"[SYSTEM: Извлеченные воспоминания для текущего контекста]\n"
+            f"{ctx_block}\n\n"
+            f"[USER]\n{base_payload}"
+        )
 
-    desired_model = "gemini-3.1-flash-lite" if force_flash else "gemma-4-31b-it"
+    from companion.config import FINAL_RESPONSE_MODEL
+    desired_model = "gemini-3.1-flash-lite" if force_flash else FINAL_RESPONSE_MODEL
     current_model = getattr(chat, "model", None)
     
-    # We must unconditionally recreate the chat session on every turn to inject the updated RAG context
-    # into the system_instruction, because we no longer inject it into the user_block.
     if current_model != desired_model:
         logger.info(f"[ROUTER] Switching model from {current_model} to {desired_model}")
         
-    history = chat.get_history() if hasattr(chat, "get_history") else getattr(chat, "history", getattr(chat, "_curated_history", []))
-    from companion.llm.sessions import build_system_instruction
-    chat = llm.client.chats.create(
-        model=desired_model,
-        history=history,
-        config=llm.make_config(
-            system_instruction=build_system_instruction(
-                memory_store, retrieval_mgr, query, precomputed_context=ctx_block
-            ),
-            temperature=0.7,
-        )
-    )
-    user_chats[uid] = chat
+    if not history:
+        history = chat.get_history() if hasattr(chat, "get_history") else getattr(chat, "history", getattr(chat, "_curated_history", []))
+
+    # Создаем базовый чат для ответа только после получения плана,
+    # чтобы вшить в него отфильтрованный контекст.
+    # Но если план упадет, мы используем полный ctx_block как запасной вариант.
+    base_chat_config = {
+        "model": desired_model,
+        "history": history,
+        "temperature": 0.7
+    }
 
     try:
         async def typing_loop():
@@ -743,20 +890,32 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
         typing_task = asyncio.create_task(typing_loop())
 
         try:
+            # Фаза 2: Контекст в конце промпта и удаление CoT
+            from companion.llm.sessions import build_system_instruction
+            
+            chat = llm.client.chats.create(
+                model=base_chat_config["model"],
+                history=base_chat_config["history"],
+                config=llm.make_config(
+                    system_instruction=build_system_instruction(memory_store, retrieval_mgr, query),
+                    temperature=base_chat_config["temperature"],
+                )
+            )
+            user_chats[uid] = chat
+            
+            logger.info("[ROUTER] Sending final query with context appended at the end.")
+            
             try:
                 response = await llm.run_llm(chat.send_message, content_payload, timeout=250)
             except Exception as e:
-                if not force_flash:
-                    logger.warning(f"[ROUTER] [WARN] Gemma failed, falling back to Flash-lite: {e}")
-                    history = chat.get_history()
-                    from companion.llm.sessions import build_system_instruction
+                # Если мы уже на flash-lite или нас принудительно переключили, не пытаемся фоллбэчиться
+                if not force_flash and desired_model != "gemini-3.1-flash-lite":
+                    logger.warning(f"[ROUTER] [WARN] Primary model failed, falling back to Flash-lite: {e}")
                     chat = llm.client.chats.create(
                         model="gemini-3.1-flash-lite",
                         history=history,
                         config=llm.make_config(
-                            system_instruction=build_system_instruction(
-                                memory_store, retrieval_mgr, query, precomputed_context=ctx_block
-                            ),
+                            system_instruction=build_system_instruction(memory_store, retrieval_mgr, query),
                             temperature=0.7,
                         )
                     )
@@ -784,11 +943,6 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
         state.critique_result = critique
         if text:
             text = apply_critique_to_text(text, critique)
-        if critique.get("confidence", 1.0) < 0.55 and query and should_retry_with_grounding(query, critique):
-            grounded = await grounding_answer_only(query, ctx_data, retrieval_mgr)
-            if grounded:
-                text = grounded
-
         await send_long_message(message, text)
         msg_rec = None
         if text:

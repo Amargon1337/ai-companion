@@ -14,7 +14,7 @@ from companion.config import (
 )
 from companion.memory.importance import days_since
 from companion.memory.semantic_ranker import SemanticImportanceRanker
-from companion.memory.text_sim import text_overlap
+
 from companion.memory.vector_index import VectorIndex
 from companion.memory.identity_vault import IdentityVault
 from companion.models import Fact, FactRelation, MessageRecord, Reflection, Pattern
@@ -383,6 +383,15 @@ class MemoryStore:
                 t.lower() in {"anchor", "core_identity", "pinned"} for t in old_fact.tags
             )
             if protected:
+                # Новый факт противоречит защищенному. Защищенный побеждает.
+                self.db.update_fact_status(rel.from_id, "superseded")
+                new_fact = self.get_fact(rel.from_id)
+                if new_fact:
+                    self.db.update_fact_fields(
+                        rel.from_id,
+                        {"superseded_by": rel.to_id, "version": new_fact.version + 1},
+                    )
+                    self.vector.delete_for_content(new_fact.fact)
                 return
             # Newer fact wins: the old one is superseded (autonomous memory,
             # no human review). Mirror the `supersedes` branch — hide it AND
@@ -398,31 +407,25 @@ class MemoryStore:
     def get_active_fact_texts(self) -> list[str]:
         return [f.fact for f in self.list_facts("active")]
 
-    def find_similar_fact(self, text: str, threshold: float = 0.52) -> Fact | None:
-        """Dedup via FAISS vector search + n-grams."""
-        norm = self._normalize(text)
-        results = self.search_facts(text, limit=5)
-        best: Fact | None = None
-        best_score = 0.0
-        for f, _ in results:
-            score = text_overlap(norm, self._normalize(f.fact))
-            if score > best_score:
-                best_score = score
-                best = f
-        return best if best_score >= threshold else None
+    def find_similar_fact(self, text: str, threshold: float = 0.85) -> Fact | None:
+        """Dedup via FAISS vector search cosine similarity."""
+        results = self.vector.search(text, top_k=1, content_type="fact")
+        if results and results[0]["score"] >= threshold:
+            match_hash = results[0]["content_hash"]
+            for f in self.list_facts("active"):
+                if self.vector._content_hash(f.fact) == match_hash:
+                    return f
+        return None
 
-    def find_similar_fact_any_status(self, text: str, threshold: float = 0.52) -> Fact | None:
+    def find_similar_fact_any_status(self, text: str, threshold: float = 0.85) -> Fact | None:
         """Dedup check across active and dormant facts only."""
-        norm = self._normalize(text)
-        candidates = [f for f in self.list_all_facts() if f.status in {"active", "dormant"}]
-        best: Fact | None = None
-        best_score = 0.0
-        for f in candidates:
-            score = text_overlap(norm, self._normalize(f.fact))
-            if score > best_score:
-                best_score = score
-                best = f
-        return best if best_score >= threshold else None
+        results = self.vector.search(text, top_k=1, content_type="fact")
+        if results and results[0]["score"] >= threshold:
+            match_hash = results[0]["content_hash"]
+            for f in self.list_all_facts():
+                if f.status in {"active", "dormant"} and self.vector._content_hash(f.fact) == match_hash:
+                    return f
+        return None
 
     @staticmethod
     def _normalize(text: str) -> str:
@@ -454,14 +457,8 @@ class MemoryStore:
             logger.debug("Reflection vector search unavailable: %s", exc)
 
         q_norm = self._normalize(query)
-        scored = []
-        for r in active:
-            overlap = text_overlap(q_norm, self._normalize(r.insight))
-            score = overlap + (r.importance / 10) * 0.25
-            if overlap > 0 or score >= 0.2:
-                scored.append((score, r))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        return [r for _, r in scored[:limit]]
+        fallback = [r for r in active if q_norm in self._normalize(r.insight)]
+        return fallback[:limit]
 
     def search_summaries(self, query: str, limit: int = 3) -> list[str]:
         if not query:
@@ -531,16 +528,14 @@ class MemoryStore:
             self.touch_pattern(p.id)
         return [(p, 0.0) for p in fallback[:limit]]
 
-    def find_similar_pattern(self, text: str, threshold: float = 0.55) -> "Pattern | None":
-        norm = self._normalize(text)
-        best = None
-        best_score = 0.0
-        for p in self.list_patterns("active"):
-            score = text_overlap(norm, self._normalize(p.pattern))
-            if score > best_score:
-                best_score = score
-                best = p
-        return best if best_score >= threshold else None
+    def find_similar_pattern(self, text: str, threshold: float = 0.85) -> "Pattern | None":
+        results = self.vector.search(text, top_k=1, content_type="pattern")
+        if results and results[0]["score"] >= threshold:
+            match_hash = results[0]["content_hash"]
+            for p in self.list_patterns("active"):
+                if self.vector._content_hash(p.pattern) == match_hash:
+                    return p
+        return None
 
     def update_pattern(
         self, pattern_id: str, *, pattern: str | None = None,
@@ -669,6 +664,54 @@ class MemoryStore:
             # мягкий кап роста, без удаления статусов
             setattr(merged, dim, existing[:50])
         self.db.upsert_human_model(merged.to_dict())
+
+    # ── Life Continuity Engine (LCE) ─────────────────────────────
+
+    def add_transition(self, t: "LifeTransition") -> "LifeTransition":
+        self.db.add_life_transition(t.to_dict())
+        return t
+
+    def update_transition(self, transition_id: str, fields: dict[str, Any]) -> None:
+        self.db.update_life_transition(transition_id, fields)
+
+    def get_transition(self, transition_id: str) -> "LifeTransition | None":
+        from companion.models import LifeTransition
+        row = self.db.get_life_transition(transition_id)
+        return LifeTransition.from_dict(row) if row else None
+
+    def get_active_transitions(self) -> list["LifeTransition"]:
+        from companion.models import LifeTransition
+        return [LifeTransition.from_dict(r) for r in self.db.list_life_transitions("active")]
+
+    def get_pending_transitions(self) -> list["LifeTransition"]:
+        from companion.models import LifeTransition
+        return [LifeTransition.from_dict(r) for r in self.db.list_life_transitions("pending_review")]
+
+    def get_recent_transitions(self, limit: int = 10) -> list["LifeTransition"]:
+        from companion.models import LifeTransition
+        return [LifeTransition.from_dict(r) for r in self.db.list_life_transitions(None)[:limit]]
+
+    def touch_transition(self, transition_id: str) -> None:
+        """Подтверждение перехода при реальном использовании в retrieval."""
+        old = self.get_transition(transition_id)
+        if old is None:
+            return
+        self.db.update_life_transition(transition_id, {
+            "last_confirmed_at": datetime.now().isoformat(),
+            "version": old.version + 1,
+        })
+
+    def confirm_or_review_transition(
+        self, t: "LifeTransition", confidence_threshold: float = 0.65
+    ) -> "LifeTransition":
+        """Низкая уверенность → pending_review (карантин, как у фактов).
+
+        LLM склонен придумывать красивую историю там, где просто совпали
+        два факта. Поэтому переход с confidence < порога НЕ попадает в промпт
+        до ручного подтверждения."""
+        if t.confidence < confidence_threshold and t.status != "pending_review":
+            t.status = "pending_review"
+        return t
 
     def save_summary(self, content: str) -> None:
         summary_id = f"summary_{uuid.uuid4().hex[:10]}"
@@ -836,3 +879,35 @@ class MemoryStore:
         except Exception as e:
             logger.error("Retrieval effectiveness analysis failed: %s", e)
         return adjusted
+
+    async def async_add_fact(self, fact: Fact) -> Fact:
+        import asyncio
+        return await asyncio.to_thread(self.add_fact, fact)
+
+    async def async_update_fact(self, fact_id: str, **kwargs) -> bool:
+        import asyncio
+        return await asyncio.to_thread(self.update_fact, fact_id, **kwargs)
+
+    async def async_search_facts(self, query: str, limit: int = 20) -> list[tuple[Fact, float]]:
+        import asyncio
+        return await asyncio.to_thread(self.search_facts, query, limit=limit)
+
+    async def async_add_relation(self, rel: FactRelation) -> None:
+        import asyncio
+        return await asyncio.to_thread(self.add_relation, rel)
+    
+    async def async_add_pattern(self, pat: "Pattern") -> "Pattern":
+        import asyncio
+        return await asyncio.to_thread(self.add_pattern, pat)
+    
+    async def async_search_patterns(self, query: str, limit: int = 10) -> list[tuple["Pattern", float]]:
+        import asyncio
+        return await asyncio.to_thread(self.search_patterns, query, limit=limit)
+
+    async def async_search_reflections(self, query: str, limit: int = 10) -> list[Reflection]:
+        import asyncio
+        return await asyncio.to_thread(self.search_reflections, query, limit=limit)
+    
+    async def async_add_reflection(self, reflection: Reflection) -> Reflection:
+        import asyncio
+        return await asyncio.to_thread(self.add_reflection, reflection)

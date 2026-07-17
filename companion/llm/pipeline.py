@@ -7,7 +7,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from companion.config import REFLECTION_EVERY_N
+from companion.config import REFLECTION_EVERY_N, LCE_EVERY_N
 from companion.llm import client as llm
 from companion.llm.prompts import (
     CONSOLIDATION_PROMPT,
@@ -17,11 +17,12 @@ from companion.llm.prompts import (
     PATTERN_PROMPT,
     COMM_PREF_PROMPT,
     HUMAN_MODEL_PROMPT,
+    LIFE_TRANSITION_PROMPT,
     SUMMARY_PROMPT,
 )
 from companion.memory.store import MemoryStore
 from companion.memory.text_sim import text_overlap
-from companion.models import Fact, FactRelation, Reflection, Pattern, CommPref, HumanModel, HumanModelInsight
+from companion.models import Fact, FactRelation, Reflection, Pattern, CommPref, HumanModel, HumanModelInsight, LifeTransition
 
 logger = logging.getLogger(__name__)
 
@@ -391,15 +392,90 @@ def extract_human_model(
         return None
 
 
+def extract_life_transitions(
+    store: MemoryStore, summary: str, messages: list[str] | None = None
+) -> list[LifeTransition]:
+    """Life Continuity Engine: найти устойчивые переходы состояния человека.
+
+    Это НЕ факты и НЕ снимок (HumanModel) — это траектория: от состояния A
+    к состоянию B. Дорогой отдельный запрос к LLM, поэтому вызывается
+    редко (раз в LCE_EVERY_N compress), НЕ на каждом сжатии.
+
+    Защита: confidence < 0.65 → статус pending_review (карантин, как у фактов),
+    чтобы LLM не впаривал красивую историю на пустом месте. pending_review
+    НЕ попадает в промпт до ручного подтверждения.
+    """
+    from companion.config import LCE_CONFIDENCE_THRESHOLD
+    # Широкий срез: переходы видны только на длинной дистанции.
+    facts = store.facts_for_period(datetime.now().strftime("%Y-%m"), min_importance=4)
+    fact_text = "\n".join(f"- {f.fact}" for f in facts[:100])
+    hm = store.get_human_model()
+    from companion.models import HumanModel
+    hm_text = "\n".join(
+        f"[{dim}] " + "; ".join(i.text for i in getattr(hm, dim))
+        for dim in ("goals", "fears", "strengths", "recurring_mistakes", "long_term_trends")
+        if getattr(hm, dim)
+    )
+    pats = store.list_patterns("active")
+    pat_text = "\n".join(f"- {p.pattern}" for p in pats[:15])
+    prev = store.get_active_transitions()
+    prev_text = "\n".join(f"- [{t.domain}] {t.from_state} → {t.to_state}" for t in prev[:15]) or "нет"
+    summaries = "\n".join(s[:400] for s in store.load_recent_summaries(5))
+    prompt = LIFE_TRANSITION_PROMPT.format(
+        human_model=hm_text or "нет",
+        patterns=pat_text or "нет",
+        facts=fact_text or "мало данных",
+        previous=prev_text,
+        summaries=summaries or "нет",
+    )
+    try:
+        result = llm.oneshot_structured(prompt, llm.LifeTransitionExtractionResult)
+        created: list[LifeTransition] = []
+        for item in (result.transitions or []):
+            dom = str(getattr(item, "domain", "identity") or "identity").lower()
+            fs = str(getattr(item, "from_state", "") or "").strip()
+            ts = str(getattr(item, "to_state", "") or "").strip()
+            if not (fs and ts):
+                continue
+            from companion.security.sanitizer import sanitize_markup
+            conf = float(getattr(item, "confidence", 0.7) or 0.7)
+            t = LifeTransition(
+                domain=dom,
+                from_state=sanitize_markup(fs).strip(),
+                to_state=sanitize_markup(ts).strip(),
+                explanation=sanitize_markup(str(getattr(item, "explanation", "") or "")).strip(),
+                trigger_events=[str(e).strip() for e in (getattr(item, "trigger_events", []) or []) if str(e).strip()],
+                confidence=max(0.0, min(1.0, conf)),
+                importance=7,
+                status="active",
+            )
+            # Защита от красивой выдумки: низкая уверенность → карантин.
+            t = store.confirm_or_review_transition(t, LCE_CONFIDENCE_THRESHOLD)
+            stored = store.add_transition(t)
+            created.append(stored)
+        return created
+    except Exception as e:
+        logger.error(f"LifeTransition extraction failed: {e}")
+        return []
+
+
 def _pattern_redundant(store: MemoryStore, pat_text: str) -> bool:
     """True if the pattern text closely mirrors an existing reflection/belief."""
-    norm = store._normalize(pat_text)
+    q_norm = store._normalize(pat_text)
+    
+    # 1. FAISS Cosine Similarity check for reflections
+    results = store.vector.search(pat_text, top_k=1, content_type="reflection")
+    if results and results[0]["score"] >= 0.85:
+        return True
+        
+    # 2. String matching fallback
     for refl in store.list_reflections("active"):
-        if text_overlap(norm, store._normalize(refl.insight)) > 0.72:
+        if q_norm in store._normalize(refl.insight):
             return True
+            
     for belief in store.db.list_beliefs("active"):
         b = (belief.get("belief") or "").strip()
-        if b and text_overlap(norm, store._normalize(b)) > 0.72:
+        if b and q_norm in store._normalize(b):
             return True
     return False
 
@@ -414,9 +490,26 @@ def _personality_critical_section(store: MemoryStore, updated: dict[str, Any]) -
     merged = _merge_personality(fresh, updated)
     merged["last_updated"] = datetime.now().isoformat()
     store.save_personality(merged)
+    
+    new_beliefs = []
     for belief in merged.get("beliefs", [])[:20]:
         if isinstance(belief, str) and belief.strip():
             store.add_belief(belief.strip(), [f"personality_{merged['last_updated'][:10]}"])
+            new_beliefs.append(belief.strip())
+            
+    # Phase 4 hook: Sync "dead" beliefs
+    active_beliefs = store.db.list_beliefs(status="active")
+    new_beliefs_norm = {store._normalize(b) for b in new_beliefs}
+
+    for b in active_beliefs:
+        b_text = b.get("belief", "")
+        if store._normalize(b_text) not in new_beliefs_norm:
+            b_id = b.get("id")
+            if b_id:
+                with store.db._conn() as conn:
+                    conn.execute("UPDATE beliefs SET status = 'inactive' WHERE id = ?", (b_id,))
+                store.vector.delete_for_content(b_text)
+                
     return merged
 
 
@@ -561,6 +654,9 @@ async def run_compress_pipeline(
     """
     def _sync_stages() -> tuple[list[Fact], int, str]:
         """Синхронные этапы, не требующие локa, — в одном потоке."""
+        # compress_n отсчитывается из счётчика в БД (ранее был несвязанной
+        # переменной → NameError и падение всего пайплайна на каждом compress).
+        compress_n = store.get_compress_count()
         new_facts = extract_facts(store, summary)
         # Phase 2.3: Auto-promote high-value facts to permanent
         for fact in new_facts:
@@ -595,6 +691,13 @@ async def run_compress_pipeline(
             extract_human_model(store, summary)
         except Exception as e:
             logger.error("HumanModel auto-update failed: %s", e)
+        # Life Continuity Engine (LCE): извлечение переходов состояния —
+        # редко (раз в LCE_EVERY_N compress), это отдельный дорогой запрос.
+        if compress_n % LCE_EVERY_N == 0:
+            try:
+                extract_life_transitions(store, summary)
+            except Exception as e:
+                logger.error("LCE extraction failed: %s", e)
         compress_n_final = store.increment_compress_count()
         return new_facts, compress_n_final, summary
 

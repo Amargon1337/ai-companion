@@ -87,7 +87,6 @@ def _record_failure(task_name: str) -> None:
             f"Cooling down for {_CIRCUIT_BREAKER_COOLDOWN_SECONDS}s"
         )
 
-
 async def background_user_model_reflection(state, store) -> None:
     """Фоновое обновление user model через reflection."""
     task_name = "user_model_reflection"
@@ -96,6 +95,7 @@ async def background_user_model_reflection(state, store) -> None:
         return
 
     try:
+        logger.info("[REFLECTION] Запуск теневого анализа изменений личности пользователя...")
         recent_facts = store.recent_facts(10)
 
         reflection = await user_model.reflect_after_interaction(

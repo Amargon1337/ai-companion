@@ -45,11 +45,22 @@ class UserState(Enum):
     OVERWHELMED = "overwhelmed"
     NEUTRAL = "neutral"
 
+    @classmethod
+    def from_analyzer_state(cls, state_str: str) -> "UserState":
+        """Convert analyzer state string to UserState enum."""
+        mapping = {
+            "ANXIOUS": cls.ANXIOUS,
+            "DEPRESSED": cls.DEPRESSED,
+            "CURIOUS": cls.CURIOUS,
+            "OVERWHELMED": cls.OVERWHELMED,
+            "NORMAL": cls.NEUTRAL,
+        }
+        return mapping.get(state_str.upper(), cls.NEUTRAL)
+
 
 class ResponseMode(Enum):
     """Режим ответа."""
     EXPLAIN = "explain"
-    CONCISE = "concise"
     ANCHOR = "anchor"
     EMPATHY = "empathy"
 
@@ -117,7 +128,7 @@ class PolicyLayer:
                         avoid_explanation=True,
                         avoid_theorizing=True,
                         validate_feelings=True,
-                        reduce_cognitive_load=True,
+                        reduce_cognitive_load=False,
                         max_questions=1,
                         tone="empathic",
                     ),
@@ -131,7 +142,7 @@ class PolicyLayer:
                     response_mode=ResponseMode.ANCHOR,
                     constraints=PolicyConstraints(
                         avoid_theorizing=True,
-                        reduce_cognitive_load=True,
+                        reduce_cognitive_load=False,
                         anchor_to_action=True,
                         provide_structure=True,
                         max_questions=1,
@@ -310,69 +321,6 @@ class PolicyLayer:
 
         return "\n".join(rebuilt_lines)
 
-    def detect_user_state(
-        self,
-        message: str,
-        facts: list[Any] | None = None,
-    ) -> UserState:
-        """Определить состояние пользователя из сообщения (heuristic fallback)."""
-        message_lower = message.lower()
-
-        depression_keywords = [
-            "депрессия",
-            "ничего не хочу",
-            "нет сил",
-            "апатия",
-            "бессмысленно",
-            "устал",
-        ]
-        if any(kw in message_lower for kw in depression_keywords):
-            return UserState.DEPRESSED
-
-        anxiety_keywords = [
-            "тревога",
-            "тревожно",
-            "паника",
-            "беспокойство",
-            "волнуюсь",
-            "страх",
-        ]
-        if any(kw in message_lower for kw in anxiety_keywords):
-            return UserState.ANXIOUS
-
-        overwhelmed_keywords = [
-            "не справляюсь",
-            "слишком много",
-            "перегружен",
-            "захлебываюсь",
-            "голова кругом",
-        ]
-        if any(kw in message_lower for kw in overwhelmed_keywords):
-            return UserState.OVERWHELMED
-
-        curious_keywords = [
-            "как работает",
-            "почему",
-            "объясни",
-            "расскажи подробнее",
-            "интересно",
-        ]
-        if any(kw in message_lower for kw in curious_keywords):
-            return UserState.CURIOUS
-
-        return UserState.NEUTRAL
-
-    @staticmethod
-    def from_analyzer_state(state_str: str) -> UserState:
-        """Convert analyzer state string to UserState enum."""
-        mapping = {
-            "ANXIOUS": UserState.ANXIOUS,
-            "DEPRESSED": UserState.DEPRESSED,
-            "CURIOUS": UserState.CURIOUS,
-            "OVERWHELMED": UserState.OVERWHELMED,
-            "NORMAL": UserState.NEUTRAL,
-        }
-        return mapping.get(state_str.upper(), UserState.NEUTRAL)
 
     def format_prompt_with_policy(
         self,

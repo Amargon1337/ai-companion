@@ -6,19 +6,19 @@ from companion.llm.client import (
     aio_delete_file,
     async_oneshot,
     async_delete_file,
-    async_search_with_grounding,
+
     async_upload_file,
     delete_file,
     format_grounding_sources,
     get_file,
     history_item,
     make_config,
-    make_search_config,
+
     oneshot,
     parse_json_array,
     parse_json_object,
     run_llm,
-    search_with_grounding,
+
     upload_file,
 )
 
@@ -28,18 +28,18 @@ __all__ = [
     "aio_delete_file",
     "async_oneshot",
     "async_delete_file",
-    "async_search_with_grounding",
+
     "async_upload_file",
     "delete_file",
     "format_grounding_sources",
     "get_file",
     "history_item",
     "make_config",
-    "make_search_config",
+
     "oneshot",
     "parse_json_array",
     "parse_json_object",
     "run_llm",
-    "search_with_grounding",
+
     "upload_file",
 ]

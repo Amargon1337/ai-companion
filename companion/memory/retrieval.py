@@ -95,6 +95,7 @@ class RetrievalBudgetManager:
         runtime_context_block: str = "",
         comm_prefs: "Any" = None,
         human_model: "Any" = None,
+        life_transitions: "Any" = None,
     ) -> ContextBundle:
         summaries = summaries or []
         active_goals = active_goals or []
@@ -252,6 +253,7 @@ class RetrievalBudgetManager:
             runtime_context_block=runtime_context_block,
             comm_prefs=comm_prefs,
             human_model=human_model,
+            life_transitions=life_transitions,
         )
 
         # Global Overflow Eviction: T5 -> T4 -> T3

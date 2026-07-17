@@ -2,6 +2,7 @@ import json
 from companion.proactive.collector import ContextPayload
 from companion.llm.client import aio_oneshot
 from companion.config import MODEL_NAME
+from companion.llm.prompts import CORE_PERSONALITY
 
 PROACTIVE_PROMPT_TEMPLATE = """# TASK
 Generate exactly one proactive message.
@@ -26,10 +27,13 @@ Generate exactly one proactive message.
 You may only reference facts listed in REASON FACTS.
 If facts are insufficient, write a generic message.
 
-# POLICY
+# 1. CORE_PERSONALITY (highest priority, use this identity)
+{core_personality}
+
+# 2. DIALOGUE_STRATEGY
 {strategy}
 
-# TONE
+# 3. EMOTIONAL_TONE
 {tone}
 
 # OUTPUT
@@ -52,6 +56,7 @@ def assemble_prompt(payload: ContextPayload, strategy: str, tone: str) -> str:
         facts=facts_str,
         urgency=payload.urgency,
         max_words=max_words,
+        core_personality=CORE_PERSONALITY,
         strategy=strategy,
         tone=tone
     )
@@ -70,7 +75,7 @@ async def format_ping(
     prompt = assemble_prompt(payload, strategy, tone)
     
     try:
-        response_text = await aio_oneshot(prompt, MODEL_NAME)
+        response_text = await aio_oneshot(prompt, MODEL_NAME, temperature=0.7)
         message = response_text.strip().strip('"').strip("'")
     except Exception as e:
         message = f"Error generating ping: {e}"

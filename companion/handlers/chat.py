@@ -28,7 +28,6 @@ HELP_TEXT = (
     "<b>Команды:</b>\n"
     "/start — перезапустить companion UI\n"
     "/help — показать справку\n"
-    "/search &lt;запрос&gt; — принудительный web search\n"
     "/summary — вручную получить саммери\n"
     "/personality — профиль личности\n"
     "/remember &lt;текст&gt; — сохранить важное навсегда\n\n"
@@ -46,7 +45,6 @@ HELP_TEXT = (
 
 def get_main_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.button(text="🔍 Поиск в Web", callback_data="action:search")
     builder.button(text="📊 Получить сводку", callback_data="action:summary")
     builder.button(text="👤 Профиль личности", callback_data="action:personality")
     builder.button(text="💡 Инфо / Помощь", callback_data="action:help")
@@ -61,7 +59,7 @@ def register(dp, bot) -> None:
     async def cmd_start(message: types.Message):
         msg = await message.answer(
             "Companion online. Пиши обычным текстом — память, reasoning и поиск работают в фоне.\n\n"
-            "Быстрые команды: /search, /summary, /personality, /remember.",
+            "Быстрые команды: /summary, /personality, /remember.",
             reply_markup=ReplyKeyboardRemove(),
         )
         await msg.edit_reply_markup(reply_markup=get_main_keyboard())
@@ -87,48 +85,14 @@ def register(dp, bot) -> None:
 
     @dp.message(Command("search"))
     async def cmd_search(message: types.Message):
-        query = (message.text or "").replace("/search", "", 1).strip()
-        if not query:
-            await message.answer("Формат: /search <запрос>")
-            return
-        if not core.check_rate_limit(message.from_user.id, message):
-            return
-        await message.answer("Ищу в Google...")
-        try:
-            rc = await asyncio.to_thread(core.reasoning_engine.auto_reasoning_context, query)
-            ctx_data = await core._load_retrieval_context(query, rc)
-            ctx = core.retrieval_mgr.select(
-                query=query,
-                facts=ctx_data["facts"],
-                reflections=ctx_data["reflections"],
-                summaries=ctx_data["summaries"],
-                permanent_notes=ctx_data["permanent_notes"],
-                identity_vault_block=ctx_data.get("identity_vault_block", ""),
-                personality_snapshot=ctx_data["personality"],
-                recent_messages=ctx_data["recent"],
-                active_goals=ctx_data.get("active_goals", []),
-                causal_links=ctx_data.get("causal_links", []),
-                predictions=[],
-                world_model_context=ctx_data.get("world_model_context", ""),
-                user_model_context=ctx_data.get("user_model_context", ""),
-            ).to_prompt_block()
-            await core.send_typing(message)
-            text, sources = await llm.run_llm(llm.search_with_grounding, query, ctx)
-            reply = f"🔍 {text}"
-            if sources:
-                reply += f"\n\n📎 Источники:\n{sources}"
-            await core.send_long_message(message, reply)
-            store.log_message(role="assistant", text=text, importance=5, mode="search", user_id=message.from_user.id)
-        except Exception as e:
-            logger.error("Search error: %s", e, exc_info=True)
-            await message.answer("Произошла ошибка поиска. Подробности в логах.")
+        await message.answer("Поиск в интернете отключён.")
 
     @dp.callback_query(F.data.startswith("action:"))
     async def inline_actions(callback: types.CallbackQuery):
         action = callback.data.split(":", 1)[1]
         await callback.answer()
         if action == "search":
-            await callback.message.answer("Формат: /search <запрос>")
+            await callback.message.answer("Поиск в интернете отключён.")
         elif action == "summary":
             await report_service.show_summary(callback.message)
         elif action == "personality":
@@ -159,7 +123,9 @@ def register(dp, bot) -> None:
                 callback.message.text + "\n\n✅ Подтверждено пользователем.",
                 reply_markup=None
             )
-            success = await core._route_command(callback.message, pending["command"], pending["payload"])
+            mock_msg = callback.message
+            mock_msg.from_user = types.User(id=pending["uid"], is_bot=False, first_name="User")
+            success = await core._route_command(mock_msg, pending["command"], pending["payload"])
             if success:
                 await asyncio.to_thread(
                     core.memory_store.log_message,
@@ -175,6 +141,10 @@ def register(dp, bot) -> None:
             )
             
         del core.PENDING_COMMANDS[cmd_id]
+
+    @dp.message(F.photo | F.voice | F.document)
+    async def multimodal_handler(message: types.Message):
+        await core.process_multimodal_request(message)
 
     @dp.message(F.text & ~F.text.startswith("/") & ~F.text.contains("tiktok.com"))
     async def text_handler(message: types.Message):
