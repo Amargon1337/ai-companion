@@ -745,9 +745,9 @@ def _analyze_hidden_emotion(text: str) -> str:
     
     if words <= 3 and chars < 20:
         if "." in text and "!" not in text and "?" not in text:
-            return "[СИСТЕМНОЕ СООБЩЕНИЕ: Пользователь отвечает сухо и коротко. Возможно, устал или отстранен. Отвечай эмпатично, не дави и используй краткие фразы.]"
+            return "[СИСТЕМНОЕ СООБЩЕНИЕ: Пользователь отвечает сухо и коротко. Возможно, устал или занят. Поддержи его кратким ответом без давления.]"
         elif "!" not in text and "?" not in text:
-            return "[СИСТЕМНОЕ СООБЩЕНИЕ: Пользователь отвечает односложно. Подстройся под его низкий темп, не пиши длинных текстов.]"
+            return "[СИСТЕМНОЕ СООБЩЕНИЕ: Пользователь отвечает кратко. Отвечай не слишком длинно (1-2 абзаца), но держи свой характер.]"
             
     if "..." in text or ".." in text:
         return "[СИСТЕМНОЕ СООБЩЕНИЕ: В тексте есть многоточия. Пользователь может быть в задумчивости, неуверенности или грусти. Отвечай мягко.]"
@@ -859,7 +859,12 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             human_model=ctx_data.get("human_model"),
             life_transitions=ctx_data.get("life_transitions"),
         )
-        logger.info(f"[RAG] Собран бандл памяти. Фактов: {len(bundle.facts) if bundle.facts else 0}, Рефлексий: {len(bundle.reflections) if bundle.reflections else 0}. Топ факт: '{bundle.facts[0].fact[:50]}...' if bundle.facts else 'нет'")
+        logger.info(f"[RAG] Собран бандл памяти. Фактов: {len(bundle.facts) if bundle.facts else 0}, Рефлексий: {len(bundle.reflections) if bundle.reflections else 0}.")
+        if bundle.facts:
+            logger.info("[RAG DEBUG] Top 5 Facts:")
+            for i, f in enumerate(bundle.facts[:5]):
+                score_str = f"score={getattr(f, 'retrieval_score', 0.0):.3f}"
+                logger.info(f"  #{i+1}: {f.fact[:80]}... | {score_str}")
         master_summary = memory_store.load_master_summary()
         ctx_block = ""
         if master_summary:

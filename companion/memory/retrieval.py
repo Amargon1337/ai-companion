@@ -149,32 +149,57 @@ class RetrievalBudgetManager:
             importance = (f.importance / 10) * 0.30
             recency_val = recency * 0.20
             mood_boost = mood_to_retrieval_boost(mood, f.fact) if mood else 0.0
+            kind_boost = {"state": 0.15, "event": 0.1, "belief": 0.0}.get(f.memory_kind, 0.0)
             
-            final_score = semantic + importance + recency_val + mood_boost
+            final_score = semantic + importance + recency_val + mood_boost + kind_boost
             
             import logging
             logger = logging.getLogger(__name__)
             logger.debug("Fact %s retrieval: FAISS=%.3f Final=%.3f", f.id, semantic_score, final_score)
             return final_score
 
-        # Rank regular facts
+        # Rank regular facts with initial scores
         ranked_regular = []
         for f in regular_facts:
             semantic = faiss_scores.get(f.id, 0.0)
             score = _ranked_score(f, semantic)
             if explicit_search:
-                # For explicit searches, only include facts strictly matching the topic (semantic > 0.2)
-                # Ignore importance/recency boosts if semantic match is poor.
                 if semantic < 0.2:
                     continue
             ranked_regular.append((f, score))
             
-        ranked_regular = sorted(
-            ranked_regular,
-            key=lambda item: item[1],
-            reverse=True,
-        )
-        ranked_facts = pinned_facts + [f for f, s in ranked_regular]
+        ranked_regular = sorted(ranked_regular, key=lambda item: item[1], reverse=True)
+        
+        # Apply MMR (Maximum Marginal Relevance) to increase diversity
+        mmr_ranked = []
+        selected_texts = []
+        
+        for f, score in ranked_regular:
+            penalty = 0.0
+            ft_lower = f.fact.lower()
+            f_words = set(ft_lower.split())
+            f_tags = set(t.lower() for t in f.tags)
+            
+            for sw, stags in selected_texts:
+                word_overlap = len(f_words & sw) / max(len(f_words), 1)
+                tag_overlap = len(f_tags & stags) / max(len(f_tags), 1) if f_tags else 0.0
+                
+                if word_overlap > 0.4:
+                    penalty += 0.2
+                if tag_overlap > 0.5:
+                    penalty += 0.15
+                    
+            final_mmr_score = score - penalty
+            f.retrieval_score = final_mmr_score  # Save for logging
+            mmr_ranked.append((f, final_mmr_score))
+            selected_texts.append((f_words, f_tags))
+            
+        mmr_ranked = sorted(mmr_ranked, key=lambda item: item[1], reverse=True)
+        
+        for f in pinned_facts:
+            f.retrieval_score = 99.0
+            
+        ranked_facts = pinned_facts + [f for f, s in mmr_ranked]
 
         # Rank reflections (already filtered by FAISS in bot_core)
         active_refl = [r for r in reflections if r.status == "active"]

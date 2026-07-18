@@ -242,9 +242,9 @@ class UserModel:
             current_profanity = self.data["communication_style"]["profanity_level"]
             # Smooth EMA update
             if matches > 0:
-                new_profanity = min(10.0, current_profanity + matches * 2.0)
+                new_profanity = min(10.0, current_profanity + matches * 3.0)
             else:
-                new_profanity = max(0.0, current_profanity - 0.2)
+                new_profanity = max(0.0, current_profanity - 0.05)
             self.data["communication_style"]["profanity_level"] = new_profanity
 
         current_model_json = json.dumps(self.data, ensure_ascii=False, indent=2)
