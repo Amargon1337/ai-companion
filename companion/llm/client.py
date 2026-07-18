@@ -299,8 +299,8 @@ class FactExtractionResult(BaseModel):
 
 
 class ConsolidationItem(BaseModel):
-    relation: Literal["supersedes", "contradicts", "confirms", "related_to"]
-    reason: str = Field(default="")
+    new_fact_index: int
+    existing_fact_id: str
     relation: Literal["supersedes", "contradicts", "confirms", "related_to"]
     reason: str = Field(default="")
 
@@ -417,7 +417,12 @@ def oneshot_structured(prompt: str, response_schema: type[BaseModel], model: str
             )
             text = (r.text or "").strip()
             if not text:
-                raise ValueError("Empty response from model")
+                logger.warning(f"Empty response from model. Fallback to empty schema dict. Config schema: {response_schema.__name__}")
+                try:
+                    return response_schema.model_validate({})
+                except Exception:
+                    empty_data = {k: [] for k in response_schema.model_fields.keys()}
+                    return response_schema.model_validate(empty_data)
             try:
                 data = json.loads(text)
                 return response_schema.model_validate(data)

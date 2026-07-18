@@ -12,9 +12,7 @@ from companion.config import DATA_DIR
 from companion.memory.text_sim import text_overlap
 from companion.storage.sqlite_db import MemoryDatabase
 
-WORLD_MODEL_PATH = os.path.join(DATA_DIR, "world_model.json")
-
-
+from companion.storage.sqlite_db import MemoryDatabase
 class Goal:
     """Долговременная цель пользователя."""
 
@@ -159,12 +157,9 @@ class ReasoningEngine:
 
     def _load_world_model(self) -> dict[str, Any]:
         """Загрузить активную модель мира."""
-        if os.path.exists(WORLD_MODEL_PATH):
-            try:
-                with open(WORLD_MODEL_PATH, encoding="utf-8") as f:
-                    return json.load(f)
-            except (OSError, json.JSONDecodeError):
-                pass
+        loaded = self.db.get_state_model("world")
+        if loaded:
+            return loaded
         return {
             "current_state": {},
             "recent_patterns": {},
@@ -178,12 +173,8 @@ class ReasoningEngine:
             if now - self._last_wm_save < 10.0:
                 return
             self._last_wm_save = now
-            os.makedirs(os.path.dirname(WORLD_MODEL_PATH) or ".", exist_ok=True)
             self.world_model["last_updated"] = datetime.now().isoformat()
-            tmp = WORLD_MODEL_PATH + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.world_model, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, WORLD_MODEL_PATH)
+            self.db.save_state_model("world", self.world_model)
 
     def update_world_model_from_message(self, text: str, importance: int = 5) -> None:
         from companion.security.sanitizer import sanitize_markup

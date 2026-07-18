@@ -3,15 +3,27 @@ from __future__ import annotations
 
 import json
 import logging
+
 import os
 import asyncio
 from datetime import datetime
 from typing import Any
 
 from companion.config import DATA_DIR
-from companion.storage.jsonl import append_jsonl, rotate_jsonl
 
 logger = logging.getLogger(__name__)
+
+LOGS_DIR = os.path.join(DATA_DIR, "logs")
+os.makedirs(LOGS_DIR, exist_ok=True)
+import logging.handlers
+audit_logger = logging.getLogger("audit.user_model")
+audit_logger.setLevel(logging.INFO)
+if not audit_logger.handlers:
+    _handler = logging.handlers.RotatingFileHandler(
+        os.path.join(LOGS_DIR, "updates.jsonl"), maxBytes=2*1024*1024, backupCount=3, encoding="utf-8"
+    )
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_logger.addHandler(_handler)
 
 USER_MODEL_PATH = os.path.join(DATA_DIR, "user_model.json")
 MODEL_UPDATES_LOG = os.path.join(DATA_DIR, "user_model_updates.jsonl")
@@ -235,16 +247,12 @@ class UserModel:
             # --- SHARED LORE PHASE 0: Dry-Run Logging ---
             lore_candidates = res.get("shared_lore_candidates", [])
             if lore_candidates:
-                import os
-                from companion.config import DATA_DIR
-                lore_log_path = os.path.join(DATA_DIR, "shared_lore_candidates.jsonl")
-                now_str = datetime.now().isoformat()
-                with open(lore_log_path, "a", encoding="utf-8") as f:
-                    for cand in lore_candidates:
-                        # Ensure it's not a hallucinated placeholder
-                        if cand.get("candidate_phrase") and cand.get("candidate_phrase") != "потенциальный локальный мем/фраза из диалога (если есть)":
-                            cand["timestamp"] = now_str
-                            f.write(json.dumps(cand, ensure_ascii=False) + "\n")
+                from companion.storage.sqlite_db import MemoryDatabase
+                db = MemoryDatabase()
+                for cand in lore_candidates:
+                    # Ensure it's not a hallucinated placeholder
+                    if cand.get("candidate_phrase") and cand.get("candidate_phrase") != "потенциальный локальный мем/фраза из диалога (если есть)":
+                        await db.async_add_shared_lore_candidate(cand)
 
             # --- SHADOW EVALUATION (Drift Control) ---
             from companion.llm.shadow_eval import evaluate_identity_change
@@ -359,7 +367,6 @@ class UserModel:
         except Exception as e:
             logger.error("Failed to perform user model reflection via LLM: %s", e)
             reflection["discoveries"].append(f"Reflection LLM failed: {e}")
-
         with self._lock:
             # Update metadata
             self.data["total_interactions"] += 1
@@ -386,25 +393,21 @@ class UserModel:
             if snapshot.get("roles"):
                 memory_store.identity.update_identity("roles", ", ".join(snapshot["roles"]), confidence=0.85, source="user_model_reflection", explicit_overwrite=True)
 
-        await asyncio.to_thread(_sync_io, ident_snapshot, reflection)
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(None, _sync_io, ident_snapshot, reflection)
+        except RuntimeError:
+            # No running loop, run synchronously
+            _sync_io(ident_snapshot, reflection)
 
-        return reflection
-
-    def _save_model(self):
-        from companion.storage.sqlite_db import MemoryDatabase
-        with self._lock:
-            data_json = json.dumps(self.data, ensure_ascii=False)
-        db = MemoryDatabase()
-        db.set_meta("user_model", data_json)
-
-    def _load_model(self):
+    def _load_model(self) -> None:
+        """Загрузить модель из БД."""
         from companion.storage.sqlite_db import MemoryDatabase
         db = MemoryDatabase()
-        val = db.get_meta("user_model", "")
-        if val:
+        loaded_data = db.get_state_model("user")
+        if loaded_data:
             try:
-                loaded_data = json.loads(val)
-                # Preserve defaults if keys are missing from loaded data
                 for k, v in loaded_data.items():
                     if isinstance(v, dict) and k in self.data:
                         self.data[k].update(v)
@@ -433,8 +436,8 @@ class UserModel:
                 logger.error(f"Failed to migrate user model: {e}")
 
     def _log_reflection(self, reflection: dict[str, Any]):
-        append_jsonl(MODEL_UPDATES_LOG, reflection)
-        rotate_jsonl(MODEL_UPDATES_LOG)
+        reflection["timestamp"] = datetime.now().isoformat()
+        audit_logger.info(json.dumps(reflection, ensure_ascii=False))
 
 
 # Global singleton

@@ -11,7 +11,6 @@ from aiogram import BaseMiddleware, Bot, Dispatcher, types
 
 from companion.config import ADMIN_IDS, API_TOKEN, DATA_DIR, LOG_LEVEL, LOG_PATH
 from companion.handlers import register_handlers, setup_bot_commands
-from companion.storage.jsonl import rotate_jsonl
 
 # Logging: stderr + rotating file
 logging.basicConfig(
@@ -39,136 +38,103 @@ class AuthMiddleware(BaseMiddleware):
                 return
         return await handler(event, data)
 
-
 def sanitize_and_scan_legacy_files() -> None:
     from companion.config import BASE_DIR, DATA_DIR
     from companion.security.sanitizer import sanitize_markup, _looks_like_injection
     from datetime import datetime
-    import json
     from companion.storage.sqlite_db import MemoryDatabase
-    
+    import hashlib
+    from companion.models import Fact
+
     quarantine_log_path = os.path.join(DATA_DIR, "quarantine_review.log")
-    os.makedirs(DATA_DIR, exist_ok=True)
-    
-    # 1. permanent_notes.txt
     notes_path = os.path.join(BASE_DIR, "permanent_notes.txt")
-    pending_notes_path = os.path.join(DATA_DIR, "permanent_notes.pending_review.txt")
+    os.makedirs(DATA_DIR, exist_ok=True)
+    db = MemoryDatabase()
+
+    # 1. Sanitize permanent_notes.txt
     if os.path.exists(notes_path):
         try:
             with open(notes_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            lines = content.split("\n")
+                lines = f.readlines()
+            
             sanitized_lines = []
+            pending_notes_path = os.path.join(DATA_DIR, "permanent_notes.pending_review.txt")
             updated = False
+            
             for line in lines:
-                if not line.strip():
-                    sanitized_lines.append(line)
+                clean_line = line.strip()
+                if not clean_line:
                     continue
-                sanitized_line = sanitize_markup(line) or ""
-                if _looks_like_injection(sanitized_line):
-                    # Move to pending review file and log
-                    with open(pending_notes_path, "a", encoding="utf-8") as pf:
-                        pf.write(f"{line}\n")
-                    with open(quarantine_log_path, "a", encoding="utf-8") as qf:
-                        qf.write(f"[{datetime.now().isoformat()}] [SUSPICIOUS] [permanent_notes.txt] {line}\n")
-                    logger.warning("Suspicious injection pattern detected in permanent_notes.txt! Moved to permanent_notes.pending_review.txt and logged.")
-                    updated = True
-                    continue  # EXCLUDE from active file
                 
-                if sanitized_line != line:
+                sanitized = sanitize_markup(clean_line) or ""
+                if _looks_like_injection(sanitized):
+                    with open(pending_notes_path, "a", encoding="utf-8") as pf:
+                        pf.write(f"{clean_line}\n")
+                    with open(quarantine_log_path, "a", encoding="utf-8") as qf:
+                        qf.write(f"[{datetime.now().isoformat()}] [SUSPICIOUS] [permanent_notes.txt] {clean_line}\n")
                     updated = True
-                sanitized_lines.append(sanitized_line)
+                else:
+                    sanitized_lines.append(sanitized)
+                    if sanitized != clean_line:
+                        updated = True
             
             if updated:
-                new_content = "\n".join(sanitized_lines)
                 with open(notes_path, "w", encoding="utf-8") as f:
-                    f.write(new_content)
-                logger.info("permanent_notes.txt updated (sanitized and/or quarantined).")
+                    f.write("\n".join(sanitized_lines) + "\n")
+                logger.info("permanent_notes.txt sanitized/quarantined.")
         except Exception as e:
             logger.error(f"Error sanitizing permanent_notes.txt: {e}")
 
-    # 2. world_model.json
-    wm_path = os.path.join(DATA_DIR, "world_model.json")
-    if os.path.exists(wm_path):
-        try:
-            with open(wm_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+    # 2. Sanitize world model
+    try:
+        data = db.get_state_model("world")
+        if data:
             contexts = data.get("active_contexts", [])
-            pending_contexts = data.get("pending_review_contexts", [])
-            sanitized_contexts = []
+            new_active = []
             updated = False
             for ctx in contexts:
-                sanitized_ctx = sanitize_markup(ctx) or ""
-                if _looks_like_injection(sanitized_ctx):
-                    # Move to pending review contexts and log
-                    pending_contexts.append(ctx)
+                sanitized = sanitize_markup(ctx) or ""
+                if _looks_like_injection(sanitized):
                     with open(quarantine_log_path, "a", encoding="utf-8") as qf:
-                        qf.write(f"[{datetime.now().isoformat()}] [SUSPICIOUS] [world_model.json] {ctx}\n")
-                    logger.warning("Suspicious injection pattern detected in world_model.json! Moved to pending_review_contexts and logged.")
+                        qf.write(f"[{datetime.now().isoformat()}] [SUSPICIOUS] [world_model] {ctx}\n")
                     updated = True
-                    continue  # EXCLUDE from active contexts
-                
-                if sanitized_ctx != ctx:
-                    updated = True
-                sanitized_contexts.append(sanitized_ctx)
-            
+                else:
+                    new_active.append(sanitized)
+                    if sanitized != ctx:
+                        updated = True
             if updated:
-                data["active_contexts"] = sanitized_contexts
-                data["pending_review_contexts"] = pending_contexts
-                tmp = wm_path + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp, wm_path)
-                logger.info("world_model.json updated (sanitized and/or quarantined).")
-        except Exception as e:
-            logger.error(f"Error sanitizing world_model.json: {e}")
+                data["active_contexts"] = new_active
+                db.save_state_model("world", data)
+    except Exception as e:
+        logger.error(f"Error sanitizing world model: {e}")
 
-    notes_path = os.path.join(BASE_DIR, "permanent_notes.txt")
+    # 3. Migrate permanent_notes.txt to SQLite
     if os.path.exists(notes_path):
         try:
-            db = MemoryDatabase()
-            migration_key = "legacy_permanent_notes_migrated"
-            current_signature = ""
-            notes = []
             with open(notes_path, "r", encoding="utf-8") as f:
                 notes = [line.strip() for line in f if line.strip()]
             if notes:
-                import hashlib
-                current_signature = hashlib.sha256("\n".join(notes).encode("utf-8")).hexdigest()
-            if current_signature and db.get_meta(migration_key, "") == current_signature:
-                logger.info("permanent_notes.txt migration already applied; skipping.")
-                return
-            if notes:
-                from companion.models import Fact
-                existing = {f.get("fact", "").strip() for f in db.list_facts(status=None)}
-                for note in notes:
-                    if note in existing:
-                        continue
-                    fact = Fact(
-                        fact=note,
-                        date=datetime.now().strftime("%Y-%m-%d"),
-                        importance=9,
-                        confidence=1.0,
-                        source="permanent_note_migration",
-                        source_type="user",
-                        memory_kind="permanent",
-                        tags=["permanent"],
-                    )
-                    db._insert_fact(fact.to_dict())
-                db.set_meta(migration_key, current_signature)
-            logger.info("Migrated permanent_notes.txt into SQLite permanent facts.")
+                migration_key = "legacy_permanent_notes_migrated"
+                sig = hashlib.sha256("\n".join(notes).encode("utf-8")).hexdigest()
+                if db.get_meta(migration_key, "") != sig:
+                    existing = {f.get("fact", "").strip() for f in db.list_facts(status=None)}
+                    for note in notes:
+                        if note not in existing:
+                            fact = Fact(fact=note, date=datetime.now().strftime("%Y-%m-%d"), 
+                                        importance=9, confidence=1.0, source="migration", 
+                                        source_type="user", memory_kind="permanent", tags=["permanent"])
+                            db._insert_fact(fact.to_dict())
+                    db.set_meta(migration_key, sig)
+                    logger.info("Migrated permanent_notes.txt to SQLite.")
         except Exception as e:
-            logger.error("Error migrating permanent_notes.txt: %s", e)
+            logger.error(f"Error migrating permanent_notes.txt: {e}")
 
 
 async def run() -> None:
     # Sanitize and migrate remaining file inputs into SQLite.
     sanitize_and_scan_legacy_files()
 
-    # Rotate growing JSONL files on startup
-    for fname in ("messages.jsonl", "policy_decisions.jsonl", "user_model_updates.jsonl"):
-        rotate_jsonl(os.path.join(DATA_DIR, fname))
-    logger.info("JSONL rotation check complete")
+
 
     from companion.bot_core import memory_store
 

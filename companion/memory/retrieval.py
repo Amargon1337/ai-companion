@@ -1,5 +1,6 @@
 """Retrieval Budget Manager — ranked context within token budget."""
 from __future__ import annotations
+from typing import Any
 
 from companion.config import (
     RETRIEVAL_CHAR_BUDGET,

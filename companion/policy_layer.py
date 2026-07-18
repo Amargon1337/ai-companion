@@ -29,12 +29,8 @@ from enum import Enum
 from typing import Any
 
 from companion.config import DATA_DIR
-from companion.storage.jsonl import append_jsonl, rotate_jsonl
 
 logger = logging.getLogger(__name__)
-
-
-POLICY_LOG_PATH = os.path.join(DATA_DIR, "policy_decisions.jsonl")
 
 
 class UserState(Enum):
@@ -217,8 +213,8 @@ class PolicyLayer:
             "context": context or {},
         }
 
-        append_jsonl(POLICY_LOG_PATH, log_entry)
-        rotate_jsonl(POLICY_LOG_PATH)
+        audit_logger = logging.getLogger("audit.policy")
+        audit_logger.info(json.dumps(log_entry, ensure_ascii=False))
 
     def enforce_constraints(
         self,

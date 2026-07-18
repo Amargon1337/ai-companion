@@ -8,10 +8,22 @@ from datetime import datetime
 from typing import Any
 
 from companion.config import DATA_DIR
-from companion.storage.jsonl import append_jsonl, rotate_jsonl
+from companion.config import DATA_DIR
 
-SELF_MODEL_PATH = os.path.join(DATA_DIR, "self_model.json")
-ERROR_LOG_PATH = os.path.join(DATA_DIR, "self_errors.jsonl")
+LOGS_DIR = os.path.join(DATA_DIR, "logs")
+os.makedirs(LOGS_DIR, exist_ok=True)
+import logging
+import logging.handlers
+audit_logger = logging.getLogger("audit.self_model")
+audit_logger.setLevel(logging.INFO)
+if not audit_logger.handlers:
+    _handler = logging.handlers.RotatingFileHandler(
+        os.path.join(LOGS_DIR, "errors.jsonl"), maxBytes=2*1024*1024, backupCount=3, encoding="utf-8"
+    )
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_logger.addHandler(_handler)
+
+ERROR_LOG_PATH = os.path.join(LOGS_DIR, "errors.jsonl")
 
 
 class SelfModel:
@@ -21,12 +33,11 @@ class SelfModel:
         self.data = self._load()
 
     def _load(self) -> dict[str, Any]:
-        if os.path.exists(SELF_MODEL_PATH):
-            try:
-                with open(SELF_MODEL_PATH, encoding="utf-8") as f:
-                    return json.load(f)
-            except (OSError, json.JSONDecodeError):
-                pass
+        from companion.storage.sqlite_db import MemoryDatabase
+        db = MemoryDatabase()
+        loaded = db.get_state_model("self")
+        if loaded:
+            return loaded
         return self._default_model()
 
     def _default_model(self) -> dict[str, Any]:
@@ -77,9 +88,9 @@ class SelfModel:
 
     def save(self) -> None:
         self.data["last_updated"] = datetime.now().isoformat()
-        os.makedirs(os.path.dirname(SELF_MODEL_PATH) or ".", exist_ok=True)
-        with open(SELF_MODEL_PATH, "w", encoding="utf-8") as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=2)
+        from companion.storage.sqlite_db import MemoryDatabase
+        db = MemoryDatabase()
+        db.save_state_model("self", self.data)
 
     def log_error(
         self,
@@ -99,8 +110,7 @@ class SelfModel:
             "timestamp": datetime.now().isoformat(),
         }
 
-        append_jsonl(ERROR_LOG_PATH, error_record)
-        rotate_jsonl(ERROR_LOG_PATH)
+        audit_logger.info(json.dumps(error_record, ensure_ascii=False))
 
     def get_error_summary(self, days: int = 30) -> dict[str, Any]:
         """Статистика ошибок за последние N дней."""

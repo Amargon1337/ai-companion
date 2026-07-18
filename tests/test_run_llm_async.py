@@ -26,6 +26,9 @@ def _sync_send(prompt):
     return _FakeResponse(f"sync:{prompt}")
 
 
+import pytest
+
+@pytest.mark.asyncio
 async def test_run_llm_awaits_async_coroutine_function():
     """The core regression: async callable must be awaited, not returned as a coroutine."""
     result = await run_llm(_async_send, "hi", timeout=5, retries=1)
@@ -34,6 +37,7 @@ async def test_run_llm_awaits_async_coroutine_function():
     assert result.text == "async:hi"
 
 
+@pytest.mark.asyncio
 async def test_run_llm_passthrough_sync_function():
     """Sync callable still runs in a thread and returns the real value (no regression)."""
     result = await run_llm(_sync_send, "hi", timeout=5, retries=1)
@@ -44,6 +48,7 @@ async def test_run_llm_passthrough_sync_function():
     assert result2.text == "sync:yo"
 
 
+@pytest.mark.asyncio
 async def test_run_llm_async_timeout():
     """An async callable that hangs must respect the timeout (not hang forever)."""
 

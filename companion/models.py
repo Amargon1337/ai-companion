@@ -9,6 +9,7 @@ from typing import Any, Literal
 MemoryKind = Literal["permanent", "state", "event"]
 FactStatus = Literal["active", "superseded", "inactive", "archived", "dormant", "pending_review"]
 RelationType = Literal["supersedes", "contradicts", "confirms", "related_to"]
+InsightStatus = Literal["active", "archived", "refuted", "aging", "stale"]
 
 
 def _new_id(prefix: str) -> str:

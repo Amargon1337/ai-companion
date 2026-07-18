@@ -190,9 +190,11 @@ def generate_reflections(
         facts=fact_text or "мало данных",
         summary=summary,
     )
+    logger.info(f"[DIAG] generate_reflections started for period {period}. Facts count: {len(facts)}")
     try:
         result = llm.oneshot_structured(prompt, llm.ReflectionResult)
         raw = [r.model_dump() for r in result.reflections]
+        logger.info(f"[DIAG] generate_reflections LLM result reflections count: {len(raw)}")
     except Exception as e:
         logger.error(f"Reflection failed: {e}")
         return []
@@ -234,6 +236,7 @@ def generate_reflections(
                     break
                     
         if is_duplicate:
+            logger.info(f"[DIAG] Reflection duplicate discarded: {new_insight[:30]}...")
             continue
         status = "pending_review" if _looks_like_injection(new_insight) else "active"
         refl = Reflection(
@@ -244,8 +247,14 @@ def generate_reflections(
             confidence=float(item.get("confidence", 0.75)),
             status=status,
         )
-        store.add_reflection(refl)
-        created.append(refl)
+        try:
+            stored = store.add_reflection(refl)
+            logger.info(f"[DIAG] add_reflection success. status: {status}, content: {new_insight[:30]}...")
+            created.append(refl)
+        except Exception as e:
+            logger.error(f"[DIAG] add_reflection failed: {e}")
+    
+    logger.info(f"[DIAG] generate_reflections returning {len(created)} created reflections.")
     return created
 
 
@@ -428,14 +437,20 @@ def extract_life_transitions(
         previous=prev_text,
         summaries=summaries or "нет",
     )
+    logger.info(f"[DIAG] extract_life_transitions started. Facts count: {len(facts)}")
     try:
         result = llm.oneshot_structured(prompt, llm.LifeTransitionExtractionResult)
         created: list[LifeTransition] = []
-        for item in (result.transitions or []):
+        
+        parsed_transitions = result.transitions or []
+        logger.info(f"[DIAG] extract_life_transitions LLM parsed transitions: {len(parsed_transitions)}")
+        
+        for item in parsed_transitions:
             dom = str(getattr(item, "domain", "identity") or "identity").lower()
             fs = str(getattr(item, "from_state", "") or "").strip()
             ts = str(getattr(item, "to_state", "") or "").strip()
             if not (fs and ts):
+                logger.info("[DIAG] Transition discarded: empty from_state or to_state")
                 continue
             from companion.security.sanitizer import sanitize_markup
             conf = float(getattr(item, "confidence", 0.7) or 0.7)
@@ -451,8 +466,31 @@ def extract_life_transitions(
             )
             # Защита от красивой выдумки: низкая уверенность → карантин.
             t = store.confirm_or_review_transition(t, LCE_CONFIDENCE_THRESHOLD)
-            stored = store.add_transition(t)
-            created.append(stored)
+            logger.info(f"[DIAG] confirm_or_review_transition gave status: {t.status}")
+            
+            # Deduplication
+            import difflib
+            prev = store.db.get_life_transitions()
+            is_dup = False
+            for existing in prev:
+                if existing.domain.lower() == t.domain.lower():
+                    from_sim = difflib.SequenceMatcher(None, existing.from_state.lower(), t.from_state.lower()).ratio()
+                    to_sim = difflib.SequenceMatcher(None, existing.to_state.lower(), t.to_state.lower()).ratio()
+                    if from_sim > 0.6 and to_sim > 0.6:
+                        logger.info(f"[DIAG] Skipping duplicate transition: {t.from_state} -> {t.to_state}")
+                        is_dup = True
+                        break
+            if is_dup:
+                continue
+            
+            try:
+                stored = store.add_transition(t)
+                logger.info(f"[DIAG] add_transition success. ID: {stored.id}")
+                created.append(stored)
+            except Exception as e:
+                logger.error(f"[DIAG] add_transition failed: {e}")
+                
+        logger.info(f"[DIAG] extract_life_transitions returning {len(created)} transitions.")
         return created
     except Exception as e:
         logger.error(f"LifeTransition extraction failed: {e}")

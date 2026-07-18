@@ -20,9 +20,11 @@ async def setup_bot_commands(bot) -> None:
     commands = [
         BotCommand(command="start", description="Запуск companion"),
         BotCommand(command="help", description="Все возможности"),
-        BotCommand(command="search", description="Принудительный веб-поиск"),
         BotCommand(command="summary", description="Получить саммери"),
         BotCommand(command="personality", description="Профиль личности"),
+        BotCommand(command="continuity", description="Синтез траектории личности"),
+        BotCommand(command="timeline", description="Хронология изменений"),
+        BotCommand(command="metrics", description="Когнитивная статистика"),
         BotCommand(command="remember", description="Запомнить важное"),
     ]
     await bot.set_my_commands(commands)

@@ -23,7 +23,6 @@ from companion.config import BASE_DIR, SUMMARY_THRESHOLD
 from companion.context import ContextAggregator
 from companion.critique_manager import apply_critique_to_text, run_self_critique
 from companion.llm import client as llm
-from companion.llm.analyzer import analyze_message
 from companion.llm.pipeline import run_compress_pipeline
 from companion.llm.sessions import create_default_session
 from companion.memory.retrieval import RetrievalBudgetManager
@@ -33,7 +32,7 @@ from companion.policy_layer import policy_layer
 from companion.policy_layer import UserState as PolicyUserState
 from companion.reasoning import reasoning_engine
 from companion.runtime_state import RuntimeState
-from companion.services import memory_service, report_service
+from companion.handlers import commands
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +95,7 @@ async def send_typing(message: types.Message):
         pass
 
 
-async def send_long_message(message: types.Message, text: str) -> None:
+async def send_long_message(message: types.Message, text: str, **kwargs) -> None:
     max_len = 4000
     while len(text) > max_len:
         split = max_len
@@ -110,10 +109,10 @@ async def send_long_message(message: types.Message, text: str) -> None:
             else:
                 # No split point found — force split at max_len to prevent infinite loop
                 split = max_len
-        await message.answer(text[:split])
+        await message.answer(text[:split], **kwargs)
         text = text[split:].lstrip()
     if text:
-        await message.answer(text)
+        await message.answer(text, **kwargs)
 
 
 async def wait_gemini_file_ready(uploaded: Any, timeout: int = 120) -> Any:
@@ -271,9 +270,8 @@ async def show_life_continuity(message: types.Message) -> None:
     reflect_on_self(): объединяет модель человека (снимок) и жизненные
     переходы (LCE, траекторию) в читаемый ответ 'что во мне изменилось'.
     pending_review не показываем (не проверено)."""
-    from companion.memory.store import memory_store as ms
-    hm = ms.get_human_model()
-    transitions = [t for t in ms.get_recent_transitions(15)
+    hm = memory_store.get_human_model()
+    transitions = [t for t in memory_store.get_recent_transitions(15)
                    if t.status not in ("pending_review",)]
     if not any(hm.all_insights()) and not transitions:
         await message.answer("Пока недостаточно данных, чтобы судить о траектории. "
@@ -303,6 +301,31 @@ async def show_life_continuity(message: types.Message) -> None:
             lines.append(f"\n{label}:")
             lines.extend(f"  • {x}" for x in items[:8])
     await send_long_message(message, "\n".join(lines))
+
+async def show_timeline(message: types.Message) -> None:
+    """Команда /timeline: хронология изменений личности."""
+    transitions = [t for t in memory_store.get_recent_transitions(50)
+                   if t.status not in ("pending_review",)]
+    
+    if not transitions:
+        await message.answer("Пока недостаточно данных для построения хронологии.")
+        return
+
+    transitions.sort(key=lambda x: getattr(x, "created_at", ""))
+
+    lines = ["🕰 <b>Хронология трансформаций:</b>\n"]
+    for i, t in enumerate(transitions, 1):
+        date_str = getattr(t, "created_at", "")[:10]  # YYYY-MM-DD
+        lines.append(f"<b>[{date_str}] {t.domain.upper()}</b>")
+        lines.append(f"🔄 Изменение: <i>{t.from_state}</i> ➔ <b>{t.to_state}</b>")
+        if t.explanation:
+            lines.append(f"💡 Почему: {t.explanation}")
+        if t.trigger_events:
+            evs = "; ".join(t.trigger_events)
+            lines.append(f"🔗 Триггеры: {evs}")
+        lines.append("")
+
+    await send_long_message(message, "\n".join(lines), parse_mode="HTML")
 
 
 _compression_locks: dict[int, asyncio.Lock] = {}
@@ -411,7 +434,7 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
             reasoning_engine.auto_reasoning_context, query, analysis["estimated_importance"]
         )
         async with memory_store.lock:
-            await asyncio.to_thread(memory_service.auto_add_event_from_message, query, analysis["estimated_importance"])
+            await asyncio.to_thread(commands.auto_add_event_from_message, query, analysis["estimated_importance"])
 
     intent = state.intent or "memory"
     conf = state.intent_confidence or 0.6
@@ -552,14 +575,14 @@ async def _route_command(message: types.Message, command: str, text: str) -> boo
     """Route a command from LLM analysis to the appropriate service."""
     routing = {
         "reset_context": reset_context,
-        "show_facts": memory_service.show_facts,
-        "show_notes": memory_service.show_notes,
-        "export_diary": memory_service.export_diary,
-        "show_timeline": memory_service.show_timeline,
-        "show_context": report_service.show_context,
-        "week_digest": report_service.show_week_digest,
-        "retrospective": report_service.show_retrospective,
-        "selfie": report_service.show_selfie,
+        "show_facts": commands.show_facts,
+        "show_notes": commands.show_notes,
+        "export_diary": commands.export_diary,
+        "show_timeline": commands.show_timeline,
+        "show_context": commands.show_context,
+        "week_digest": commands.show_week_digest,
+        "retrospective": commands.show_retrospective,
+        "selfie": commands.show_selfie,
         "show_goals": show_goals,
         "show_reasoning": show_reasoning_state,
         "self_description": show_self_description,
@@ -580,7 +603,7 @@ async def _route_command(message: types.Message, command: str, text: str) -> boo
 
     if command == "diary_entry":
         payload = _strip_prefix(text, ["запиши в дневник", "добавь в дневник", "сохрани в дневник"])
-        await memory_service.add_diary_entry(message, payload if payload else text)
+        await commands.add_diary_entry(message, payload if payload else text)
         return True
 
     if command == "add_todo":
@@ -598,13 +621,13 @@ async def _route_command(message: types.Message, command: str, text: str) -> boo
 
     if command == "monthbook":
         match = _re.search(r"(20\d{2}-\d{2})", text)
-        await report_service.show_monthbook(message, match.group(1) if match else None)
+        await commands.show_monthbook(message, match.group(1) if match else None)
         return True
 
     if command == "show_year":
         year_match = _re.search(r"\d{4}", text)
         if year_match:
-            await memory_service.show_year(message, year_match.group())
+            await commands.show_year(message, year_match.group())
             return True
 
     return False
@@ -876,6 +899,33 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
     if not history:
         history = chat.get_history() if hasattr(chat, "get_history") else getattr(chat, "history", getattr(chat, "_curated_history", []))
 
+    # Фаза 1: Внутренняя генерация плана (CoT)
+    @observe(as_type="generation", name="cot_phase_1")
+    async def generate_plan() -> str:
+        plan_prompt = (
+            "Перед тем как дать финальный ответ, проанализируй запрос и контекст, "
+            "выдели главные факты и напиши краткий внутренний план (Chain of Thought), "
+            "как лучше ответить.\n\n"
+            f"Запрос пользователя:\n{query}\n\nКонтекст:\n{ctx_block}"
+        )
+        try:
+            from companion.llm.client import aio_oneshot
+            return await aio_oneshot(plan_prompt, model="gemini-3.1-flash-lite", temperature=0.5)
+        except Exception as e:
+            logger.warning(f"Phase 1 plan generation failed: {e}")
+            return ""
+
+    plan = await generate_plan()
+    if plan:
+        logger.info("[ROUTER] Фаза 1 (CoT) успешно выполнена.")
+        content_payload = (
+            f"[SYSTEM: Извлеченные воспоминания для текущего контекста]\n"
+            f"{ctx_block}\n\n"
+            f"[SYSTEM: Внутренний план ответа]\n"
+            f"{plan}\n\n"
+            f"[USER]\n{base_payload}"
+        )
+
     # Создаем базовый чат для ответа только после получения плана,
     # чтобы вшить в него отфильтрованный контекст.
     # Но если план упадет, мы используем полный ctx_block как запасной вариант.
@@ -914,8 +964,12 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             
             logger.info("[ROUTER] Sending final query with context appended at the end.")
             
+            @observe(as_type="generation", name="cot_phase_2")
+            async def execute_final_response(c, payload: str) -> Any:
+                return await llm.run_llm(c.send_message, payload, timeout=250)
+            
             try:
-                response = await llm.run_llm(chat.send_message, content_payload, timeout=250)
+                response = await execute_final_response(chat, content_payload)
             except Exception as e:
                 # Если мы уже на flash-lite или нас принудительно переключили, не пытаемся фоллбэчиться
                 if not force_flash and desired_model != "gemini-3.1-flash-lite":
@@ -929,7 +983,7 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
                         )
                     )
                     user_chats[uid] = chat
-                    response = await llm.run_llm(chat.send_message, content_payload, timeout=250)
+                    response = await execute_final_response(chat, content_payload)
                 else:
                     raise e
         finally:

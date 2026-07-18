@@ -25,7 +25,7 @@ if not GOOGLE_API_KEY:
 # Langfuse Configuration (Optional)
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY")
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY")
-LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
 
 _raw_admins = os.getenv("ADMIN_IDS")
 if not _raw_admins:
@@ -59,23 +59,12 @@ EMPTY_PERSONALITY: dict = {
 }
 
 # Legacy paths (unchanged for compatibility)
-TODO_PATH = os.path.join(BASE_DIR, "todo.json")
-PERSONALITY_PATH = os.path.join(BASE_DIR, "personality.json")
 TIMELINE_PATH = os.path.join(BASE_DIR, "timeline.jsonl")
-MOOD_PATH = os.path.join(BASE_DIR, "mood.jsonl")
-DIARY_PATH = os.path.join(BASE_DIR, "diary.txt")
-SUMMARIES_PATH = os.path.join(BASE_DIR, "summaries.txt")
-IVAN_PATH = os.path.join(BASE_DIR, "ivan.txt")
 PERMANENT_NOTES_PATH = os.path.join(BASE_DIR, "permanent_notes.txt")
 MONTHBOOK_DIR = os.path.join(BASE_DIR, "monthbook")
 
 # Memory architecture paths
 DATA_DIR = os.path.join(BASE_DIR, "data")
-FACTS_PATH = os.path.join(DATA_DIR, "facts.jsonl")
-FACT_RELATIONS_PATH = os.path.join(DATA_DIR, "fact_relations.jsonl")
-MESSAGES_PATH = os.path.join(DATA_DIR, "messages.jsonl")
-REFLECTIONS_PATH = os.path.join(DATA_DIR, "reflections.jsonl")
-BELIEFS_PATH = os.path.join(DATA_DIR, "beliefs.jsonl")
 
 SQLITE_PATH = os.path.join(DATA_DIR, "companion.db")
 
@@ -98,16 +87,8 @@ def _bootstrap_log(msg: str) -> None:
     _BOOTSTRAP_LOGGER.info(msg)
 
 
-if not os.path.exists(PERSONALITY_PATH):
-    import json
-    with open(PERSONALITY_PATH, "w", encoding="utf-8") as f:
-        json.dump(EMPTY_PERSONALITY, f, ensure_ascii=False, indent=2)
-    _bootstrap_log(f"Created {PERSONALITY_PATH} with empty personality")
 
-if not os.path.exists(IVAN_PATH):
-    with open(IVAN_PATH, "w", encoding="utf-8") as f:
-        f.write("")  # empty template
-    _bootstrap_log(f"Created {IVAN_PATH} (empty)")
+
 
 MODEL_NAME = "gemini-3.1-flash-lite"
 FINAL_RESPONSE_MODEL = "gemini-3.1-flash-lite"

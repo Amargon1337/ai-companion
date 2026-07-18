@@ -1,13 +1,17 @@
 """Unified memory store — facts, messages, relations, reflections, beliefs."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from companion.models import CommPref, HumanModel, LifeTransition
 
 from companion.config import (
     DATA_DIR,
@@ -58,28 +62,14 @@ class MemoryStore:
     # ── Personality ───────────────────────────────────────────────────
 
     def load_personality(self) -> dict[str, Any]:
-        """Load personality from SQLite DB (meta table). Migrates from personality.json if needed."""
-        from companion.config import PERSONALITY_PATH, EMPTY_PERSONALITY
+        """Load personality from SQLite DB (meta table)."""
+        from companion.config import EMPTY_PERSONALITY
         val = self.db.get_meta("personality", "")
         if val:
             try:
                 return json.loads(val)
             except json.JSONDecodeError as e:
                 logger.error("Failed to parse personality from DB: %s", e)
-                
-        # Migration
-        if os.path.exists(PERSONALITY_PATH):
-            try:
-                with open(PERSONALITY_PATH, encoding="utf-8") as f:
-                    data = json.load(f)
-                self.save_personality(data)
-                try:
-                    os.remove(PERSONALITY_PATH)
-                except OSError:
-                    pass
-                return data
-            except (OSError, json.JSONDecodeError) as e:
-                logger.error("Failed to load personality: %s", e)
         return dict(EMPTY_PERSONALITY)
 
     def save_personality(self, data: dict[str, Any]) -> None:
@@ -140,23 +130,8 @@ class MemoryStore:
         return self.build_canonical_profile_text()
 
     def load_master_summary(self) -> str:
-        """Load master summary from SQLite DB (meta table). Migrates from file if needed."""
-        from companion.config import BASE_DIR
-        val = self.db.get_meta("master_summary", "")
-        if val:
-            return val
-            
-        master_path = os.path.join(BASE_DIR, "master_summary.txt")
-        if os.path.exists(master_path):
-            with open(master_path, encoding="utf-8") as f:
-                content = f.read().strip()
-            self.save_master_summary(content)
-            try:
-                os.remove(master_path)
-            except OSError:
-                pass
-            return content
-        return ""
+        """Load master summary from SQLite DB (meta table)."""
+        return self.db.get_meta("master_summary", "")
 
     def save_master_summary(self, content: str) -> None:
         """Save master summary to SQLite DB (meta table)."""

@@ -15,7 +15,7 @@ from aiogram.types import ReplyKeyboardRemove
 from companion import bot_core as core
 from companion.config import MAX_VIDEO_DOWNLOAD_BYTES
 from companion.llm import client as llm
-from companion.services import memory_service, report_service
+from companion.handlers import commands
 import yt_dlp
 
 logger = logging.getLogger(__name__)
@@ -30,6 +30,9 @@ HELP_TEXT = (
     "/help — показать справку\n"
     "/summary — вручную получить саммери\n"
     "/personality — профиль личности\n"
+    "/continuity — синтез траектории личности\n"
+    "/timeline — подробная хронология трансформаций\n"
+    "/metrics — когнитивная статистика бота\n"
     "/remember &lt;текст&gt; — сохранить важное навсегда\n\n"
     "<b>Обычным текстом тоже можно:</b>\n"
     "• что ты обо мне помнишь\n"
@@ -39,7 +42,7 @@ HELP_TEXT = (
     "• экспортируй дневник\n"
     "• добавь задачу купить лекарства\n"
     "• моя цель — найти новую работу\n\n"
-    "Поиск, настроение, причинно-следственный анализ, прогнозирование и оценка уверенности работают автоматически."
+    "Память, причинно-следственный анализ, LCE и оценка уверенности работают автоматически."
 )
 
 
@@ -57,31 +60,41 @@ def register(dp, bot) -> None:
 
     @dp.message(Command("start"))
     async def cmd_start(message: types.Message):
-        msg = await message.answer(
+        await message.answer(
             "Companion online. Пиши обычным текстом — память, reasoning и поиск работают в фоне.\n\n"
             "Быстрые команды: /summary, /personality, /remember.",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=get_main_keyboard(),
         )
-        await msg.edit_reply_markup(reply_markup=get_main_keyboard())
 
     @dp.message(Command("help"))
     async def cmd_help(message: types.Message):
-        msg = await message.answer(HELP_TEXT, parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
-        await msg.edit_reply_markup(reply_markup=get_main_keyboard())
+        await message.answer(HELP_TEXT, parse_mode="HTML", reply_markup=get_main_keyboard())
 
     @dp.message(Command("summary", "summarize"))
     async def cmd_summary(message: types.Message):
-        await report_service.show_summary(message)
+        await commands.show_summary(message)
 
     @dp.message(Command("personality"))
     async def cmd_personality(message: types.Message):
-        await report_service.show_personality(message)
+        await commands.show_personality(message)
 
     @dp.message(Command("remember"))
     async def cmd_remember(message: types.Message):
         args = (message.text or "").split(maxsplit=1)
         note = args[1] if len(args) > 1 else ""
-        await memory_service.remember_text(message, note)
+        await commands.remember_text(message, note)
+
+    @dp.message(Command("continuity", "lce"))
+    async def cmd_continuity(message: types.Message):
+        await core.show_life_continuity(message)
+
+    @dp.message(Command("timeline"))
+    async def cmd_timeline(message: types.Message):
+        await core.show_timeline(message)
+
+    @dp.message(Command("metrics", "stats"))
+    async def cmd_metrics(message: types.Message):
+        await message.answer("🧠 <b>Метрики:</b>\nПамять активна и консолидируется в фоне.", parse_mode="HTML")
 
     @dp.message(Command("search"))
     async def cmd_search(message: types.Message):
@@ -94,9 +107,9 @@ def register(dp, bot) -> None:
         if action == "search":
             await callback.message.answer("Поиск в интернете отключён.")
         elif action == "summary":
-            await report_service.show_summary(callback.message)
+            await commands.show_summary(callback.message)
         elif action == "personality":
-            await report_service.show_personality(callback.message)
+            await commands.show_personality(callback.message)
         elif action == "help":
             msg = await callback.message.answer(HELP_TEXT, parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
             await msg.edit_reply_markup(reply_markup=get_main_keyboard())
@@ -151,7 +164,7 @@ def register(dp, bot) -> None:
         text = message.text or ""
         note = _parse_remember_command(text)
         if note is not None:
-            await memory_service.remember_text(message, note)
+            await commands.remember_text(message, note)
             return
         await core.process_llm_request(message, text)
 

@@ -67,10 +67,11 @@ async def run_subconscious_consolidation(bot, store: MemoryStore):
         res = parse_json_object(response)
         
         # 4. Process new patterns
+        from companion.models import Pattern
         patterns = res.get("new_patterns", [])
         for p in patterns:
             if isinstance(p, str) and len(p) > 10:
-                store.add_pattern(p, confidence=0.8, source="subconscious")
+                store.add_pattern(Pattern(pattern=p, category="behavior", confidence=0.8))
                 
         # 4.5. Process predictions
         import uuid

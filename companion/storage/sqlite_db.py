@@ -363,6 +363,25 @@ class MemoryDatabase:
           FOREIGN KEY (fact_id) REFERENCES facts(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_memory_access_log_fact_time ON memory_access_log(fact_id, accessed_at DESC);
+
+        CREATE TABLE IF NOT EXISTS state_models (
+          model_type TEXT PRIMARY KEY,
+          payload_json TEXT NOT NULL,
+          last_updated TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        CREATE TABLE IF NOT EXISTS shared_lore_candidates (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          candidate_phrase TEXT NOT NULL,
+          context TEXT,
+          timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+          status TEXT DEFAULT 'pending'
+        );
+
+        CREATE TABLE IF NOT EXISTS faiss_mapping (
+          faiss_id INTEGER PRIMARY KEY,
+          fact_id TEXT UNIQUE NOT NULL
+        );
         """
       )
       
@@ -1602,3 +1621,73 @@ class MemoryDatabase:
 
   async def async_batch_insert_beliefs(self, rows: list[dict[str, Any]]) -> None:
     await asyncio.to_thread(self.batch_insert_beliefs, rows)
+
+  # --- MIGRATION REPOSITORY METHODS ---
+
+  def get_state_model(self, model_type: str) -> dict[str, Any]:
+    with self._conn() as conn:
+      row = conn.execute("SELECT payload_json FROM state_models WHERE model_type=?", (model_type,)).fetchone()
+      if row:
+        return _loads(row["payload_json"], {})
+      return {}
+
+  async def async_get_state_model(self, model_type: str) -> dict[str, Any]:
+    return await asyncio.to_thread(self.get_state_model, model_type)
+
+  def save_state_model(self, model_type: str, data: dict[str, Any]) -> None:
+    with self._conn() as conn:
+      conn.execute(
+        "INSERT INTO state_models(model_type, payload_json) VALUES(?, ?) ON CONFLICT(model_type) DO UPDATE SET payload_json=excluded.payload_json, last_updated=CURRENT_TIMESTAMP",
+        (model_type, _json(data))
+      )
+
+  async def async_save_state_model(self, model_type: str, data: dict[str, Any]) -> None:
+    await asyncio.to_thread(self.save_state_model, model_type, data)
+
+  def get_meta(self, key: str, default: str = "") -> str:
+    with self._conn() as conn:
+      row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+      if row:
+        return row["value"]
+      return default
+
+  async def async_get_meta(self, key: str, default: str = "") -> str:
+    return await asyncio.to_thread(self.get_meta, key, default)
+
+  def set_meta(self, key: str, value: str) -> None:
+    with self._conn() as conn:
+      conn.execute(
+        "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value)
+      )
+
+  async def async_set_meta(self, key: str, value: str) -> None:
+    await asyncio.to_thread(self.set_meta, key, value)
+
+  def add_shared_lore_candidate(self, cand: dict[str, Any]) -> None:
+    with self._conn() as conn:
+      conn.execute(
+        "INSERT INTO shared_lore_candidates(candidate_phrase, context) VALUES(?, ?)",
+        (cand.get("candidate_phrase", ""), _json(cand))
+      )
+
+  async def async_add_shared_lore_candidate(self, cand: dict[str, Any]) -> None:
+    await asyncio.to_thread(self.add_shared_lore_candidate, cand)
+
+  def get_faiss_mapping(self) -> dict[str, str]:
+    with self._conn() as conn:
+      rows = conn.execute("SELECT faiss_id, fact_id FROM faiss_mapping").fetchall()
+      return {str(r["faiss_id"]): r["fact_id"] for r in rows}
+
+  async def async_get_faiss_mapping(self) -> dict[str, str]:
+    return await asyncio.to_thread(self.get_faiss_mapping)
+
+  def save_faiss_mapping(self, mapping: dict[str, str]) -> None:
+    tuples = [(int(k), v) for k, v in mapping.items()]
+    with self._conn() as conn:
+      conn.execute("DELETE FROM faiss_mapping")
+      if tuples:
+        conn.executemany("INSERT INTO faiss_mapping(faiss_id, fact_id) VALUES(?, ?)", tuples)
+
+  async def async_save_faiss_mapping(self, mapping: dict[str, str]) -> None:
+    await asyncio.to_thread(self.save_faiss_mapping, mapping)

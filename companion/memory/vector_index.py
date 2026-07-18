@@ -134,7 +134,6 @@ class VectorIndex:
         self._init_table()
         
         self.index_path = os.path.join(os.path.dirname(self.path) if self.path else ".", "faiss_index.bin")
-        self.mapping_path = os.path.join(os.path.dirname(self.path) if self.path else ".", "faiss_mapping.json")
         
         self.id_to_content: dict[int, str] = {}
         self.id_to_hash: dict[int, str] = {}
@@ -206,37 +205,39 @@ class VectorIndex:
         import json
         import faiss
         with self.lock:
-            if os.path.exists(self.index_path) and os.path.exists(self.mapping_path):
-                try:
-                    self.index = faiss.read_index(self.index_path)
-                    with open(self.mapping_path, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
+            if os.path.exists(self.index_path):
+                from companion.storage.sqlite_db import MemoryDatabase
+                db = MemoryDatabase()
+                data = db.get_state_model("faiss_mapping")
+                if data:
+                    try:
+                        self.index = faiss.read_index(self.index_path)
                         self.id_to_content = {int(k): v for k, v in data.get("id_to_content", {}).items()}
                         self.id_to_hash = {int(k): v for k, v in data.get("id_to_hash", {}).items()}
                         self.hash_to_id = data.get("hash_to_id", {})
                         self.id_to_type = {int(k): v for k, v in data.get("id_to_type", {}).items()}
                         self._next_id = data.get("next_id", 0)
-                    self._is_initialized = True
-                    return
-                except Exception as e:
-                    logger.warning(f"Failed to load FAISS index from disk, rebuilding: {e}")
+                        self._is_initialized = True
+                        return
+                    except Exception as e:
+                        logger.warning(f"Failed to load FAISS index from disk, rebuilding: {e}")
             
             self._rebuild_index()
 
     def save_index_to_disk(self):
         import faiss
-        import json
         with self.lock:
             if self._is_initialized and hasattr(self, 'index') and self.index is not None:
                 faiss.write_index(self.index, self.index_path)
-                with open(self.mapping_path, 'w', encoding='utf-8') as f:
-                    json.dump({
-                        "id_to_content": self.id_to_content,
-                        "id_to_hash": self.id_to_hash,
-                        "hash_to_id": self.hash_to_id,
-                        "id_to_type": self.id_to_type,
-                        "next_id": self._next_id
-                    }, f, ensure_ascii=False)
+                from companion.storage.sqlite_db import MemoryDatabase
+                db = MemoryDatabase()
+                db.save_state_model("faiss_mapping", {
+                    "id_to_content": self.id_to_content,
+                    "id_to_hash": self.id_to_hash,
+                    "hash_to_id": self.hash_to_id,
+                    "id_to_type": self.id_to_type,
+                    "next_id": self._next_id
+                })
 
     def _rebuild_index(self) -> None:
         import faiss
@@ -519,5 +520,10 @@ class VectorIndex:
                     self.id_to_type.pop(del_id, None)
                     ids_to_remove.append(del_id)
             if ids_to_remove:
-                self.index.remove_ids(np.array(ids_to_remove, dtype=np.int64))
+                try:
+                    self.index.remove_ids(np.array(ids_to_remove, dtype=np.int64))
+                except RuntimeError:
+                    # Index type (e.g. HNSW) doesn't support remove_ids, rebuild full index
+                    self._rebuild_index()
+                    return
                 self.save_index_to_disk()
