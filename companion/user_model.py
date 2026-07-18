@@ -430,6 +430,12 @@ class UserModel:
             # No running loop, run synchronously
             _sync_io(ident_snapshot, reflection)
 
+    def _save_model(self) -> None:
+        """Сохранить модель в БД."""
+        from companion.storage.sqlite_db import MemoryDatabase
+        db = MemoryDatabase()
+        db.save_state_model("user", self.data)
+
     def _load_model(self) -> None:
         """Загрузить модель из БД."""
         from companion.storage.sqlite_db import MemoryDatabase

@@ -861,8 +861,10 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
         )
         logger.info(f"[RAG] Собран бандл памяти. Фактов: {len(bundle.facts) if bundle.facts else 0}, Рефлексий: {len(bundle.reflections) if bundle.reflections else 0}.")
         if bundle.facts:
-            logger.info("[RAG DEBUG] Top 5 Facts:")
-            for i, f in enumerate(bundle.facts[:5]):
+            logger.info("[RAG DEBUG] Top 5 (Dynamic) Facts:")
+            # Filter out pinned facts (score 99.0) to only show dynamically retrieved ones
+            dynamic_facts = [f for f in bundle.facts if getattr(f, 'retrieval_score', 0.0) < 99.0]
+            for i, f in enumerate(dynamic_facts[:5]):
                 score_str = f"score={getattr(f, 'retrieval_score', 0.0):.3f}"
                 logger.info(f"  #{i+1}: {f.fact[:80]}... | {score_str}")
         master_summary = memory_store.load_master_summary()
@@ -904,11 +906,25 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
     # Фаза 1: Внутренняя генерация плана (CoT)
     @observe(as_type="generation", name="cot_phase_1")
     async def generate_plan() -> str:
+        history_text = ""
+        for m in history[-5:]:
+            role = m.get("role", "unknown")
+            if isinstance(role, str):
+                parts = m.get("parts", [])
+                text = parts[0].get("text", "") if parts else ""
+            else:
+                # Fallback if it's a Content object
+                role = getattr(m, "role", "unknown")
+                parts = getattr(m, "parts", [])
+                text = getattr(parts[0], "text", "") if parts else ""
+            history_text += f"[{str(role).upper()}]: {text}\n"
+            
         plan_prompt = (
-            "Перед тем как дать финальный ответ, проанализируй запрос и контекст, "
-            "выдели главные факты и напиши краткий внутренний план (Chain of Thought), "
+            "Перед тем как дать финальный ответ, проанализируй историю диалога, текущий запрос пользователя и контекст памяти. "
+            "Учти контекст последних реплик! Напиши краткий внутренний план (Chain of Thought), "
             "как лучше ответить.\n\n"
-            f"Запрос пользователя:\n{query}\n\nКонтекст:\n{ctx_block}"
+            f"История диалога (последние 5 сообщений):\n{history_text}\n"
+            f"Запрос пользователя:\n{query}\n\nКонтекст памяти:\n{ctx_block}"
         )
         try:
             from companion.llm.client import aio_oneshot
