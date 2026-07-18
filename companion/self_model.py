@@ -45,6 +45,7 @@ class SelfModel:
             "architecture_version": "2.3",
             "created_at": datetime.now().isoformat(),
             "last_updated": datetime.now().isoformat(),
+            "emotional_state": "neutral",
 
             # Сильные стороны
             "strengths": [
@@ -177,7 +178,14 @@ class SelfModel:
                 critique["warnings"].append("Фактическое утверждение без источника")
                 max_reduction = max(max_reduction, 0.3)
 
-        # Проверка 3: Не противоречу ли памяти?
+        # Проверка 3: Корпоративная стерильность (Corporate Fluff)
+        corporate_cliches = ["чем могу помочь", "рад помочь", "обращайтесь", "с уважением", "в качестве искусственного интеллекта", "надеюсь, это поможет", "чем еще я могу помочь"]
+        if any(cliche in response.lower() for cliche in corporate_cliches):
+            critique["flags"].append("corporate_tone")
+            critique["warnings"].append("Обнаружен корпоративный шаблонный тон")
+            max_reduction = max(max_reduction, 0.4)
+
+        # Проверка 4: Не противоречу ли памяти?
         # (это сложно проверить без доступа к facts, но можно добавить позже)
 
         # Проверка 4: Адекватность домена
@@ -240,6 +248,12 @@ class SelfModel:
             parts.append("📚 Основные домены знаний:")
             for d in domains:
                 parts.append(f"  • {d['domain']} ({d['confidence']:.0%})")
+
+        emotion = self.data.get("emotional_state", "neutral")
+        if emotion in ["frustrated", "angry", "passionate", "joking", "excited"]:
+            parts.append("")
+            parts.append(f"🔴 Текущее эмоциональное состояние: {emotion.upper()}")
+            parts.append("Ты чувствуешь сильную эмоцию. Тебе РАЗРЕШЕНО и ЖЕЛАТЕЛЬНО использовать мат, обсценную лексику и жесткий сленг, чтобы выразить эту эмоцию. Забудь про вежливость.")
 
         return "\n".join(parts)
 

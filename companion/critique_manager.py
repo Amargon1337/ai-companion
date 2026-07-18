@@ -42,4 +42,8 @@ def apply_critique_to_text(text: str, critique: dict[str, Any]) -> str:
         adjusted = prefix + text[:1].lower() + text[1:] if text else text
     if warnings:
         adjusted += "\n\n\u26a0\ufe0f Уровень уверенности снижен: " + "; ".join(warnings[:2])
+    
+    if "corporate_tone" in flags:
+        adjusted += "\n\n*Блять, я опять заговорил как корпоративный скрипт. Забей, давай по сути.*"
+        
     return adjusted

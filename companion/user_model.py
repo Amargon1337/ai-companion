@@ -112,6 +112,9 @@ class UserModel:
                 "coping_mechanisms": [],
                 "life_cycles": [],
             },
+            "communication_style": {
+                "profanity_level": 0.0,
+            },
             "emotional_timeline": {
                 "improvement_triggers": [],
                 "deterioration_triggers": [],
@@ -203,6 +206,12 @@ class UserModel:
         if trigger_lines:
             parts.append("Триггеры состояния:\n" + "\n".join(trigger_lines))
 
+        # Communication Style
+        style = self.data.get("communication_style", {})
+        profanity = style.get("profanity_level", 0.0)
+        if profanity > 0.1:
+            parts.append(f"Стиль коммуникации пользователя:\n- Уровень мата/жесткого сленга: {profanity:.1f}/10.0")
+
         if parts:
             return "[Модель пользователя]\n" + "\n\n".join(parts)
         return ""
@@ -215,8 +224,28 @@ class UserModel:
         mood_state: Any | None = None,
     ) -> dict[str, Any]:
         """Self-reflection после значимого диалога через Gemini."""
+        import re
         from companion.llm.client import aio_oneshot, parse_json_object
         from companion.config import MODEL_NAME
+
+        # Style Mirroring check (Profanity heuristic)
+        profanity_roots = [
+            "хуй", "хуя", "хуе", "хуи", "пизд", "еба", "ебн", "ебл", 
+            "бля", "блять", "блядь", "хер", "пидар", "пидор", "гондон", "мудак", "мразь", "сука", "суку", "залуп"
+        ]
+        pattern = re.compile(r"(?i)(" + "|".join(profanity_roots) + r")")
+        matches = len(pattern.findall(user_message))
+        
+        with self._lock:
+            if "communication_style" not in self.data:
+                self.data["communication_style"] = {"profanity_level": 0.0}
+            current_profanity = self.data["communication_style"]["profanity_level"]
+            # Smooth EMA update
+            if matches > 0:
+                new_profanity = min(10.0, current_profanity + matches * 2.0)
+            else:
+                new_profanity = max(0.0, current_profanity - 0.2)
+            self.data["communication_style"]["profanity_level"] = new_profanity
 
         current_model_json = json.dumps(self.data, ensure_ascii=False, indent=2)
         facts_str = "\n".join(f"- {f.fact if hasattr(f, 'fact') else str(f)}" for f in facts_extracted)
