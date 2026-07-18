@@ -889,11 +889,7 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
         else:
             base_payload = user_block
             
-        content_payload = (
-            f"[SYSTEM: Извлеченные воспоминания для текущего контекста]\n"
-            f"{ctx_block}\n\n"
-            f"[USER]\n{base_payload}"
-        )
+        content_payload = base_payload
 
     from companion.config import FINAL_RESPONSE_MODEL
     desired_model = "gemini-3.1-flash-lite" if force_flash else FINAL_RESPONSE_MODEL
@@ -925,8 +921,6 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
     if plan:
         logger.info("[ROUTER] Фаза 1 (CoT) успешно выполнена.")
         content_payload = (
-            f"[SYSTEM: Извлеченные воспоминания для текущего контекста]\n"
-            f"{ctx_block}\n\n"
             f"[SYSTEM: Внутренний план ответа]\n"
             f"{plan}\n\n"
             f"[USER]\n{base_payload}"
@@ -962,7 +956,7 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
                 model=base_chat_config["model"],
                 history=base_chat_config["history"],
                 config=llm.make_config(
-                    system_instruction=build_system_instruction(memory_store, retrieval_mgr, query),
+                    system_instruction=build_system_instruction(memory_store, retrieval_mgr, query, precomputed_context=ctx_block),
                     temperature=base_chat_config["temperature"],
                 )
             )
@@ -984,7 +978,7 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
                         model="gemini-3.1-flash-lite",
                         history=history,
                         config=llm.make_config(
-                            system_instruction=build_system_instruction(memory_store, retrieval_mgr, query),
+                            system_instruction=build_system_instruction(memory_store, retrieval_mgr, query, precomputed_context=ctx_block),
                             temperature=0.7,
                         )
                     )

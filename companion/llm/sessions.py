@@ -49,6 +49,9 @@ Use each section only for its defined purpose.
     if ivan:
         policy_shell += f"\n<legacy_profile_input>\n[ivan.txt — статичная персона]\n{ivan}\n</legacy_profile_input>\n"
         
+    if precomputed_context:
+        policy_shell += f"\n\n[ДИНАМИЧЕСКИЙ КОНТЕКСТ ПАМЯТИ RAG]\n{precomputed_context}\n"
+        
     return policy_shell
 
 
