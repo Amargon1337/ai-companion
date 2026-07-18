@@ -23,6 +23,7 @@ from companion.config import BASE_DIR, SUMMARY_THRESHOLD
 from companion.context import ContextAggregator
 from companion.critique_manager import apply_critique_to_text, run_self_critique
 from companion.llm import client as llm
+from companion.llm.analyzer import analyze_message
 from companion.llm.pipeline import run_compress_pipeline
 from companion.llm.sessions import create_default_session
 from companion.memory.retrieval import RetrievalBudgetManager
