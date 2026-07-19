@@ -341,8 +341,7 @@ class PolicyLayer:
             avoid_items.append("- НЕ строй теории")
         if policy.constraints.avoid_questions:
             avoid_items.append("- НЕ задавай вопросов")
-        if policy.constraints.avoid_long_text:
-            avoid_items.append("- НЕ пиши длинно")
+        # avoid_long_text is ignored to enforce maximal answers
 
         if avoid_items:
             constraints_lines.append("AVOID:")
@@ -351,6 +350,7 @@ class PolicyLayer:
 
         # Что делать
         do_items = []
+        do_items.append("- Отвечай МАКСИМАЛЬНО ПОДРОБНО И ДЛИННО (минимум 5-10 абзацев)")
         if policy.constraints.reduce_cognitive_load:
             do_items.append("- Снизь когнитивную нагрузку (простые слова, короткие фразы)")
         if policy.constraints.anchor_to_action:
