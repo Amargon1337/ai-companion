@@ -28,7 +28,11 @@ def build_system_instruction(
     strategy = STRATEGY_PROFILES.get(baseline_state, STRATEGY_PROFILES.get("neutral"))
     tone = TONE_PROFILES.get(baseline_state, TONE_PROFILES.get("neutral"))
 
+    import datetime
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     policy_shell = f"""# SYSTEM DIRECTIVES
+[ТЕКУЩЕЕ СИСТЕМНОЕ ВРЕМЯ: {now_str}]
 Each section is INDEPENDENT. Do not reinterpret, merge or summarize sections.
 Use each section only for its defined purpose.
 
