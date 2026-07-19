@@ -908,12 +908,11 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
     async def generate_plan() -> str:
         history_text = ""
         for m in history[-5:]:
-            role = m.get("role", "unknown")
-            if isinstance(role, str):
+            if isinstance(m, dict):
+                role = m.get("role", "unknown")
                 parts = m.get("parts", [])
-                text = parts[0].get("text", "") if parts else ""
+                text = parts[0].get("text", "") if (parts and isinstance(parts[0], dict)) else ""
             else:
-                # Fallback if it's a Content object
                 role = getattr(m, "role", "unknown")
                 parts = getattr(m, "parts", [])
                 text = getattr(parts[0], "text", "") if parts else ""
