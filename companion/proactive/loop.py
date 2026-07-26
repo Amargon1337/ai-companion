@@ -94,6 +94,9 @@ async def run_proactive_loop(bot, debug: bool = False):
             urgency=payload.urgency,
             message=message
         )
+        if payload.dream_id:
+            from companion.proactive.inner_monologue import mark_dream_used
+            mark_dream_used(user_model, payload.dream_id)
         logger.info(f"Proactive ping sent successfully to {target_user_id}")
     except Exception as e:
         logger.error(f"Failed to send proactive ping via Telegram: {e}")

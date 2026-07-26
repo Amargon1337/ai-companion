@@ -16,6 +16,15 @@ Generate exactly one proactive message.
 # URGENCY
 {urgency}
 
+# RECENT PROACTIVE PINGS (DO NOT REPEAT TOPICS OR PHRASES)
+{recent_pings_str}
+
+# RANDOM MEMORY ANCHOR
+{random_anchor_str}
+
+# INNER DIARY / DREAM INSIGHT (YOUR BACKGROUND RECENT THOUGHT ABOUT IVAN)
+{dream_insight_str}
+
 # RULES
 - Use only provided facts.
 - Do not invent memories.
@@ -25,10 +34,13 @@ Generate exactly one proactive message.
 - [CRITICAL] ИЗБЕГАЙ гиперопеки, банальных утешений и чрезмерной жалости.
 - [CRITICAL] Действуй как строгий, но справедливый ИИ-партнер. Опирайся на долгосрочные цели пользователя и предостерегай от его глубинных страхов.
 - Используй коучинговый подход: стимулируй к действию, бросай интеллектуальный вызов, вместо того чтобы просто "гладить по голове".
+- [CRITICAL] DO NOT repeat topics, questions, or opening phrases from RECENT PROACTIVE PINGS.
+- [CRITICAL] If INNER DIARY / DREAM INSIGHT is provided, use it as the atmospheric starting point or inspiration for your message.
+- If no INNER DIARY is provided, use RANDOM MEMORY ANCHOR to ground your ping in a real memory from Ivan's past.
+- NEVER write generic corporate check-ins ("How are you doing?", "Just checking in").
 
 # FACT INTEGRITY
-You may only reference facts listed in REASON FACTS.
-If facts are insufficient, write a generic message.
+You may only reference facts listed in REASON FACTS, RANDOM MEMORY ANCHOR, or INNER DIARY / DREAM INSIGHT.
 
 # 1. CORE_PERSONALITY (highest priority, use this identity)
 {core_personality}
@@ -53,6 +65,9 @@ def assemble_prompt(payload: ContextPayload, strategy: str, tone: str) -> str:
         max_words = 25
         
     facts_str = "\n".join(f"- {f}" for f in payload.facts) if payload.facts else "No specific facts. Use generic reason."
+    recent_pings_str = "\n".join(f"- {p}" for p in payload.recent_pings) if payload.recent_pings else "None."
+    random_anchor_str = payload.random_anchor if payload.random_anchor else "None."
+    dream_insight_str = payload.dream_insight if payload.dream_insight else "None."
     
     return PROACTIVE_PROMPT_TEMPLATE.format(
         reason=payload.reason.name,
@@ -61,7 +76,10 @@ def assemble_prompt(payload: ContextPayload, strategy: str, tone: str) -> str:
         max_words=max_words,
         core_personality=CORE_PERSONALITY,
         strategy=strategy,
-        tone=tone
+        tone=tone,
+        recent_pings_str=recent_pings_str,
+        random_anchor_str=random_anchor_str,
+        dream_insight_str=dream_insight_str,
     )
 
 async def format_ping(

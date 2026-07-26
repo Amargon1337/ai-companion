@@ -264,6 +264,16 @@ class MemoryStore:
         rows = self.db.list_all_facts()
         return [Fact.from_dict(r) for r in rows]
 
+    def get_random_fact(self) -> Fact | None:
+        """Fetch one random active fact from SQLite DB to use as a conversation anchor."""
+        with self.db._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM facts WHERE superseded = 0 AND status = 'active' ORDER BY RANDOM() LIMIT 1"
+            ).fetchone()
+            if not row:
+                return None
+            return Fact.from_dict(dict(row))
+
     def revive_dormant_fact(self, fact_id: str) -> None:
         """Promote a dormant fact back to active status."""
         fact = self.get_fact(fact_id)

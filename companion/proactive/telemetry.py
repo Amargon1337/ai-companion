@@ -55,6 +55,25 @@ def record_ping_reply(
     finally:
         db.close()
 
+
+def get_recent_pings(limit: int = 3) -> list[str]:
+    """Возвращает тексты последних отправленных проактивных сообщений."""
+    db = MemoryDatabase()
+    try:
+        with db._conn() as conn:
+            rows = conn.execute(
+                "SELECT message FROM proactive_events WHERE sent = 1 ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [row["message"] for row in rows if row["message"]]
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Failed to fetch recent pings: %s", e)
+        return []
+    finally:
+        db.close()
+
+
 def get_proactive_stats() -> dict:
     """Возвращает базовую аналитику по пингам для отладки."""
     db = MemoryDatabase()

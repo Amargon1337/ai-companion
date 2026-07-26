@@ -61,6 +61,7 @@ async def proactive_ping_loop(bot):
     from companion.proactive.loop import run_proactive_loop
     
     last_subconscious_run = 0.0
+    last_dreaming_run = 0.0
     
     while True:
         try:
@@ -74,6 +75,13 @@ async def proactive_ping_loop(bot):
                     from companion.proactive.subconscious import run_subconscious_consolidation
                     await run_subconscious_consolidation(bot, memory_store)
                     last_subconscious_run = now_dt.timestamp()
+
+            # Фоновый "Сон и Внутренний монолог" (Memory Dreaming / Inner Diary) запускаем раз в 4 часа
+            if (now_dt.timestamp() - last_dreaming_run) > 4 * 3600:
+                from companion.proactive.inner_monologue import run_memory_dreaming_cycle
+                from companion.user_model import user_model
+                await run_memory_dreaming_cycle(memory_store, user_model)
+                last_dreaming_run = now_dt.timestamp()
             
             # Не пингуем юзера ночью
             if not (10 <= hour < 23):

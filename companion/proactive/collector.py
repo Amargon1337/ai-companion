@@ -10,6 +10,11 @@ class ContextPayload:
     facts: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     urgency: int = 50  # 1-100 scale
+    recent_pings: list[str] = field(default_factory=list)
+    random_anchor: str = ""
+    dream_insight: str = ""
+    dream_id: str | None = None
+
 
 def collect_goal_context(decision: ReasonDecision, user_model: UserModel) -> ContextPayload:
     from companion.reasoning import reasoning_engine
@@ -106,6 +111,24 @@ def collect_context(decision: ReasonDecision, user_model: UserModel) -> ContextP
     handler = _REASON_HANDLERS.get(decision.reason)
     if not handler:
         # Fallback if unknown reason
-        return ContextPayload(reason=decision.reason, source_id=decision.source_id)
-        
-    return handler(decision, user_model)
+        payload = ContextPayload(reason=decision.reason, source_id=decision.source_id)
+    else:
+        payload = handler(decision, user_model)
+
+    from companion.proactive.telemetry import get_recent_pings
+    from companion.proactive.inner_monologue import get_latest_unused_dream
+    try:
+        from companion.bot_core import memory_store
+        random_fact = memory_store.get_random_fact()
+        if random_fact:
+            payload.random_anchor = random_fact.fact
+    except Exception:
+        pass
+
+    payload.recent_pings = get_recent_pings(limit=3)
+    dream_doc = get_latest_unused_dream(user_model)
+    if dream_doc and dream_doc.get("insight"):
+        payload.dream_insight = dream_doc["insight"]
+        payload.dream_id = dream_doc.get("id")
+
+    return payload
