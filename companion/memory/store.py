@@ -279,7 +279,9 @@ class MemoryStore:
         dormant_facts = self.list_facts("dormant")
         
         try:
-            results = self.vector.search(query, top_k=limit * 2, content_type="fact")
+            from companion.memory.hyde import should_use_hyde, generate_hypothetical_fact
+            vector_query = generate_hypothetical_fact(query) if should_use_hyde(query) else query
+            results = self.vector.search(vector_query, top_k=limit * 2, content_type="fact")
             if results:
                 by_hash_active = {self.vector._content_hash(f.fact): f for f in active_facts}
                 by_hash_dormant = {self.vector._content_hash(f.fact): f for f in dormant_facts}

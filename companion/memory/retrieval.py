@@ -434,3 +434,11 @@ class RetrievalBudgetManager:
         bm25_sim = min(1.0, word_overlap * 0.85 + (0.25 if tag_hit else 0.0))
 
         return max(overlap_score, bm25_sim)
+
+    def apply_hyde(self, query: str) -> str:
+        """Apply HyDE heuristic and generate a hypothetical fact if triggered."""
+        from companion.memory.hyde import should_use_hyde, generate_hypothetical_fact
+        if should_use_hyde(query):
+            return generate_hypothetical_fact(query)
+        return query
+

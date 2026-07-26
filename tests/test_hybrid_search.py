@@ -157,3 +157,58 @@ def test_search_default_hybrid(tmp_path):
     finally:
         cfg.DATA_DIR = original_data_dir
         cfg.SQLITE_PATH = original_sqlite
+
+
+def test_hyde_in_search_facts_vector_search(tmp_path):
+    """Test that MemoryStore.search_facts uses HyDE generated fact for vector search when triggered."""
+    original_data_dir = cfg.DATA_DIR
+    original_sqlite = cfg.SQLITE_PATH
+    cfg.DATA_DIR = str(tmp_path)
+    cfg.SQLITE_PATH = str(tmp_path / "companion.db")
+
+    try:
+        store = MemoryStore()
+        store.vector.embeddings_enabled = True
+        with patch("companion.memory.vector_index._embed_texts", side_effect=_mock_embed), \
+             patch("companion.llm.client.oneshot", return_value="Иван чувствует выгорание из-за работы и проектов") as mock_llm, \
+             patch.object(store.vector, "search", wraps=store.vector.search) as mock_vector_search:
+            fact = Fact(
+                id="hybrid_hyde_fact",
+                fact="Иван чувствует выгорание из-за работы и проектов",
+                date="2026-07-01",
+                importance=8,
+                confidence=0.9,
+                source="test",
+                source_type="test",
+                memory_kind="state",
+                tags=["work", "state"],
+                status="active",
+            )
+            store.add_fact(fact)
+
+            # 1) Short/emotional query -> should trigger HyDE
+            query = "Почему у меня нет сил на проекты?"
+            res = store.search_facts(query, limit=5)
+
+            mock_llm.assert_called_once()
+            assert mock_vector_search.call_count >= 1
+            for call_item in mock_vector_search.call_args_list:
+                assert call_item[0][0] == "Иван чувствует выгорание из-за работы и проектов"
+            assert len(res) >= 1
+
+            mock_llm.reset_mock()
+            mock_vector_search.reset_mock()
+
+            # 2) Long non-emotional query -> should NOT trigger HyDE
+            long_query = "Где Иван хранит резервные копии базы данных проектов в системе?"
+            _ = store.search_facts(long_query, limit=5)
+
+            mock_llm.assert_not_called()
+            assert mock_vector_search.call_count >= 1
+            for call_item in mock_vector_search.call_args_list:
+                assert call_item[0][0] == long_query
+
+    finally:
+        cfg.DATA_DIR = original_data_dir
+        cfg.SQLITE_PATH = original_sqlite
+

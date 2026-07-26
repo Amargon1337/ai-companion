@@ -88,3 +88,17 @@ class TestRetrievalBudgetManagerSelect:
         assert not any("Иван" in f for f in fact_texts), "personal fact leaked"
         assert not any("Морзик" in f for f in fact_texts), "anchor fact leaked"
         assert not any("амитриптилин" in f for f in fact_texts), "medical fact leaked"
+
+    def test_apply_hyde_heuristic(self, retrieval_mgr):
+        """Test that apply_hyde triggers for emotional/short queries and generates hypothetical facts."""
+        from unittest.mock import patch
+        emotional_query = "Почему у меня нет сил на проекты?"
+        non_emotional_query = "Где Иван хранит резервные копии базы данных проектов в системе?"
+
+        with patch("companion.llm.client.oneshot", return_value="Иван чувствует выгорание из-за работы."):
+            res_emotional = retrieval_mgr.apply_hyde(emotional_query)
+            assert res_emotional == "Иван чувствует выгорание из-за работы."
+
+            res_long = retrieval_mgr.apply_hyde(non_emotional_query)
+            assert res_long == non_emotional_query
+

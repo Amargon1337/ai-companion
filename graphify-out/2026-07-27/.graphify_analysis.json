@@ -102,6 +102,7 @@
       "companion_bot_core_extract_index",
       "companion_bot_core_extract_prospective_memory",
       "companion_bot_core_extract_response_text",
+      "companion_bot_core_fact_from_permanent_note",
       "companion_bot_core_generate_and_send_response",
       "companion_bot_core_get_compression_lock",
       "companion_bot_core_get_policy_decision",
@@ -157,6 +158,8 @@
       "companion_handlers_commands_show_timeline",
       "companion_handlers_commands_show_week_digest",
       "companion_handlers_commands_show_year",
+      "companion_llm_client_rationale_247",
+      "companion_llm_client_run_llm",
       "companion_runtime_state",
       "companion_runtime_state_rationale_1",
       "companion_runtime_state_runtimestate",
@@ -289,118 +292,13 @@
       "companion_storage_sqlite_db_memorydatabase_upsert_human_model"
     ],
     "4": [
-      "companion_context",
-      "companion_context_contextaggregator",
-      "companion_context_contextaggregator_build_prompt_block",
-      "companion_context_contextaggregator_init",
-      "companion_context_countervalue",
-      "companion_context_py_datetime",
-      "companion_context_rationale_1",
-      "companion_context_runtimecontext",
-      "companion_context_runtimecontext_to_prompt_xml",
-      "companion_context_runtimecontextprovider",
-      "companion_context_runtimecontextprovider_get_context",
-      "companion_context_runtimecontextprovider_init",
-      "companion_context_temporalcontextprovider",
-      "companion_context_temporalcontextprovider_get_context",
-      "companion_context_temporalcontextprovider_init",
-      "companion_context_temporaldeltaengine",
-      "companion_context_temporaldeltaengine_archive_counter",
-      "companion_context_temporaldeltaengine_create_counter",
-      "companion_context_temporaldeltaengine_delete_counter",
-      "companion_context_temporaldeltaengine_init",
-      "companion_context_temporaldeltaengine_list_values",
-      "companion_context_temporaldeltaengine_pause_counter",
-      "companion_context_temporaldeltaengine_resume_counter",
-      "companion_context_temporaldeltaengine_to_prompt_xml",
-      "companion_context_timezone",
-      "companion_context_viberesolver",
-      "companion_context_viberesolver_init",
-      "companion_context_viberesolver_load_rules",
-      "companion_context_viberesolver_resolve",
-      "companion_memory_semantic_ranker",
-      "companion_memory_semantic_ranker_rationale_1",
-      "companion_memory_semantic_ranker_semanticimportanceranker",
-      "companion_memory_semantic_ranker_semanticimportanceranker_access_factor",
-      "companion_memory_semantic_ranker_semanticimportanceranker_final_score",
-      "companion_memory_semantic_ranker_semanticimportanceranker_importance_weight",
-      "companion_memory_semantic_ranker_semanticimportanceranker_init",
-      "companion_memory_semantic_ranker_semanticimportanceranker_is_anchor",
-      "companion_memory_semantic_ranker_semanticimportanceranker_normalize_vector_score",
-      "companion_memory_semantic_ranker_semanticimportanceranker_recency_factor",
-      "companion_memory_semantic_ranker_semanticimportanceranker_rerank",
-      "companion_memory_semantic_ranker_semanticimportanceranker_update_access",
-      "date",
-      "range",
-      "tests_test_cognitive_context",
-      "tests_test_cognitive_context_test_context_aggregator_injects_once",
-      "tests_test_cognitive_context_test_schema_migration_adds_context_tables_and_fact_metadata",
-      "tests_test_cognitive_context_test_semantic_ranker_archive_filter_anchor_and_access",
-      "tests_test_cognitive_context_test_temporal_context_xml_and_vibe",
-      "tests_test_cognitive_context_test_temporal_counter_archive_and_soft_delete",
-      "tests_test_cognitive_context_test_temporal_delta_pause_resume"
-    ],
-    "5": [
-      "companion_memory_store_memorystore",
-      "companion_memory_store_memorystore_add_belief",
-      "companion_memory_store_memorystore_add_pattern",
-      "companion_memory_store_memorystore_add_reflection",
-      "companion_memory_store_memorystore_add_transition",
-      "companion_memory_store_memorystore_analyze_retrieval_effectiveness",
-      "companion_memory_store_memorystore_assert_locked",
-      "companion_memory_store_memorystore_async_add_pattern",
-      "companion_memory_store_memorystore_async_add_reflection",
-      "companion_memory_store_memorystore_async_search_patterns",
-      "companion_memory_store_memorystore_async_search_reflections",
-      "companion_memory_store_memorystore_async_update_fact",
-      "companion_memory_store_memorystore_confirm_or_review_transition",
-      "companion_memory_store_memorystore_delete_pattern",
-      "companion_memory_store_memorystore_find_similar_pattern",
-      "companion_memory_store_memorystore_get_compress_count",
-      "companion_memory_store_memorystore_get_pattern",
-      "companion_memory_store_memorystore_increment_compress_count",
-      "companion_memory_store_memorystore_list_beliefs",
-      "companion_memory_store_memorystore_list_patterns",
-      "companion_memory_store_memorystore_list_reflections",
-      "companion_memory_store_memorystore_load_master_summary",
-      "companion_memory_store_memorystore_load_recent_summaries",
-      "companion_memory_store_memorystore_normalize",
-      "companion_memory_store_memorystore_reindex_all",
-      "companion_memory_store_memorystore_save_master_summary",
-      "companion_memory_store_memorystore_save_summary",
-      "companion_memory_store_memorystore_search_patterns",
-      "companion_memory_store_memorystore_search_reflections",
-      "companion_memory_store_memorystore_search_summaries",
-      "companion_memory_store_memorystore_stats",
-      "companion_memory_store_memorystore_supersede_pattern",
-      "companion_memory_store_memorystore_touch_pattern",
-      "companion_memory_store_memorystore_update_pattern",
-      "companion_memory_store_memorystore_update_reflection",
-      "companion_memory_store_rationale_133",
-      "companion_memory_store_rationale_137",
-      "companion_memory_store_rationale_58",
-      "companion_memory_store_rationale_622",
-      "companion_memory_store_rationale_753",
-      "companion_memory_store_rationale_860",
-      "companion_memory_store_rationale_907",
-      "companion_memory_vector_index_get_embedding_stats",
-      "companion_models_pattern_from_dict",
-      "companion_models_reflection",
-      "companion_models_reflection_from_dict",
-      "companion_models_reflection_to_dict",
-      "tests_test_retrieval_testretrievalbudgetmanagerselect_test_reflections_limited"
-    ],
-    "6": [
-      "companion_memory_store_memorystore_init",
-      "companion_memory_store_memorystore_lock",
-      "companion_memory_store_py_lock",
-      "companion_memory_store_rationale_41",
       "companion_memory_vector_index",
       "companion_memory_vector_index_blob_to_float_list",
       "companion_memory_vector_index_configure_conn",
       "companion_memory_vector_index_cosine_similarity",
       "companion_memory_vector_index_embed_texts",
       "companion_memory_vector_index_float_list_to_blob",
+      "companion_memory_vector_index_get_embedding_stats",
       "companion_memory_vector_index_get_genai_client",
       "companion_memory_vector_index_py_any",
       "companion_memory_vector_index_rationale_1",
@@ -436,48 +334,46 @@
       "scripts_debug_db",
       "scripts_debug_db_rationale_1"
     ],
-    "7": [
-      "companion_llm_pipeline",
-      "companion_llm_pipeline_extract_causal_links",
-      "companion_llm_pipeline_extract_comm_prefs",
-      "companion_llm_pipeline_generate_personality_snapshot",
-      "companion_llm_pipeline_generate_reflections",
-      "companion_llm_pipeline_merge_personality",
-      "companion_llm_pipeline_personality_critical_section",
-      "companion_llm_pipeline_py_any",
-      "companion_llm_pipeline_rationale_1",
-      "companion_llm_pipeline_rationale_322",
-      "companion_llm_pipeline_rationale_522",
-      "companion_llm_pipeline_rationale_582",
-      "companion_llm_pipeline_rationale_687",
-      "companion_llm_pipeline_rationale_779",
-      "companion_llm_pipeline_run_compress_pipeline",
-      "companion_llm_pipeline_update_knowledge_domains_async",
-      "companion_llm_prompts",
-      "companion_llm_prompts_rationale_1",
-      "companion_memory_store_memorystore_get_comm_pref",
-      "companion_memory_store_memorystore_upsert_comm_pref",
-      "companion_memory_store_rationale_645",
-      "companion_models_commpref",
-      "companion_models_commpref_from_dict",
-      "companion_models_commpref_post_init",
-      "companion_models_commpref_to_dict",
-      "companion_models_rationale_185",
-      "scripts_debug_pipeline",
-      "scripts_debug_pipeline_rationale_1",
-      "tests_test_pipeline",
-      "tests_test_pipeline_mock_oneshot_structured",
-      "tests_test_pipeline_mockstructuredresult",
-      "tests_test_pipeline_mockstructuredresult_init",
-      "tests_test_pipeline_mockstructuredresult_model_dump",
-      "tests_test_pipeline_rationale_1",
-      "tests_test_pipeline_test_merge_personality_differential_and_decay",
-      "tests_test_pipeline_test_run_compress_pipeline_empty_response",
-      "tests_test_pipeline_test_run_compress_pipeline_error_handling",
-      "tests_test_pipeline_test_run_compress_pipeline_increments_count",
-      "tests_test_pipeline_test_run_compress_pipeline_returns_summary"
+    "5": [
+      "companion_context",
+      "companion_context_contextaggregator",
+      "companion_context_contextaggregator_build_prompt_block",
+      "companion_context_contextaggregator_init",
+      "companion_context_countervalue",
+      "companion_context_py_datetime",
+      "companion_context_rationale_1",
+      "companion_context_runtimecontext",
+      "companion_context_runtimecontext_to_prompt_xml",
+      "companion_context_runtimecontextprovider",
+      "companion_context_runtimecontextprovider_get_context",
+      "companion_context_runtimecontextprovider_init",
+      "companion_context_temporalcontextprovider",
+      "companion_context_temporalcontextprovider_get_context",
+      "companion_context_temporalcontextprovider_init",
+      "companion_context_temporaldeltaengine",
+      "companion_context_temporaldeltaengine_archive_counter",
+      "companion_context_temporaldeltaengine_create_counter",
+      "companion_context_temporaldeltaengine_delete_counter",
+      "companion_context_temporaldeltaengine_init",
+      "companion_context_temporaldeltaengine_list_values",
+      "companion_context_temporaldeltaengine_pause_counter",
+      "companion_context_temporaldeltaengine_resume_counter",
+      "companion_context_temporaldeltaengine_to_prompt_xml",
+      "companion_context_timezone",
+      "companion_context_viberesolver",
+      "companion_context_viberesolver_init",
+      "companion_context_viberesolver_load_rules",
+      "companion_context_viberesolver_resolve",
+      "date",
+      "range",
+      "tests_test_cognitive_context",
+      "tests_test_cognitive_context_test_context_aggregator_injects_once",
+      "tests_test_cognitive_context_test_schema_migration_adds_context_tables_and_fact_metadata",
+      "tests_test_cognitive_context_test_temporal_context_xml_and_vibe",
+      "tests_test_cognitive_context_test_temporal_counter_archive_and_soft_delete",
+      "tests_test_cognitive_context_test_temporal_delta_pause_resume"
     ],
-    "8": [
+    "6": [
       "companion_critique_manager",
       "companion_critique_manager_apply_critique_to_text",
       "companion_critique_manager_py_any",
@@ -514,7 +410,7 @@
       "tests_test_critique_manager_testapplycritiquetotext_test_uncertain_language_with_warnings",
       "tests_test_critique_manager_testapplycritiquetotext_test_warnings_in_low_confidence_add_both_prefix_and_warning"
     ],
-    "9": [
+    "7": [
       "companion_policy_layer",
       "companion_policy_layer_policyconstraints",
       "companion_policy_layer_policydecision",
@@ -551,7 +447,7 @@
       "tests_test_policy_layer_testpolicylayerenforceconstraints_test_preserves_newlines_and_formatting",
       "tests_test_policy_layer_testpolicylayerenforceconstraints_test_preserves_urls_with_query_params"
     ],
-    "10": [
+    "8": [
       "companion_storage_sqlite_db_memorydatabase_add_pattern",
       "companion_storage_sqlite_db_memorydatabase_async_add_shared_lore_candidate",
       "companion_storage_sqlite_db_memorydatabase_async_batch_insert_facts",
@@ -586,75 +482,36 @@
       "companion_storage_sqlite_db_memorydatabase_upsert_comm_pref",
       "companion_storage_sqlite_db_py_any"
     ],
-    "11": [
-      "basemiddleware",
-      "bot",
-      "bot_rationale_1",
-      "companion_bot_core_proactive_ping_loop",
-      "companion_bot_core_rationale_59",
-      "companion_handlers_commands_auto_add_event_from_message",
-      "companion_llm_pipeline_consolidate_facts",
-      "companion_llm_pipeline_extract_facts",
-      "companion_main",
-      "companion_main_authmiddleware",
-      "companion_main_authmiddleware_call",
-      "companion_main_main",
-      "companion_main_rationale_1",
-      "companion_main_run",
-      "companion_main_sanitize_and_scan_legacy_files",
-      "companion_security_sanitizer",
-      "companion_security_sanitizer_looks_like_injection",
-      "companion_security_sanitizer_rationale_1",
-      "companion_security_sanitizer_rationale_34",
-      "companion_security_sanitizer_sanitize_markup",
-      "scripts_sanitize_existing_data",
-      "scripts_sanitize_existing_data_migrate",
-      "scripts_sanitize_existing_data_rationale_1",
-      "tests_test_sanitizer",
-      "tests_test_sanitizer_mockstructuredresult",
-      "tests_test_sanitizer_mockstructuredresult_init",
-      "tests_test_sanitizer_test_consolidation_pending_review_ignored",
-      "tests_test_sanitizer_test_extract_facts_quarantine",
-      "tests_test_sanitizer_test_looks_like_injection",
-      "tests_test_sanitizer_test_pending_review_revival_guard",
-      "tests_test_sanitizer_test_sanitize_and_scan_legacy_files",
-      "tests_test_sanitizer_test_sanitize_markup"
+    "9": [
+      "companion_memory_store_memorystore",
+      "companion_memory_store_memorystore_add_transition",
+      "companion_memory_store_memorystore_assert_locked",
+      "companion_memory_store_memorystore_async_add_pattern",
+      "companion_memory_store_memorystore_async_search_patterns",
+      "companion_memory_store_memorystore_async_update_fact",
+      "companion_memory_store_memorystore_get_active_transitions",
+      "companion_memory_store_memorystore_get_comm_pref",
+      "companion_memory_store_memorystore_get_human_model",
+      "companion_memory_store_memorystore_get_pending_transitions",
+      "companion_memory_store_memorystore_get_recent_transitions",
+      "companion_memory_store_memorystore_get_transition",
+      "companion_memory_store_memorystore_high_importance_messages_for_period",
+      "companion_memory_store_memorystore_increment_compress_count",
+      "companion_memory_store_memorystore_load_recent_summaries",
+      "companion_memory_store_memorystore_log_message",
+      "companion_memory_store_memorystore_recent_messages",
+      "companion_memory_store_memorystore_save_summary",
+      "companion_memory_store_memorystore_search_summaries",
+      "companion_memory_store_memorystore_touch_transition",
+      "companion_memory_store_memorystore_upsert_comm_pref",
+      "companion_memory_store_memorystore_upsert_human_model",
+      "companion_memory_store_rationale_58",
+      "companion_memory_store_rationale_649",
+      "companion_memory_store_rationale_680",
+      "companion_memory_store_rationale_745",
+      "messagerecord"
     ],
-    "12": [
-      "companion_bot_core_fact_from_permanent_note",
-      "companion_memory_store_memorystore_add_fact",
-      "companion_memory_store_memorystore_apply_importance_decay",
-      "companion_memory_store_memorystore_async_add_fact",
-      "companion_memory_store_memorystore_async_search_facts",
-      "companion_memory_store_memorystore_facts_for_period",
-      "companion_memory_store_memorystore_find_similar_fact",
-      "companion_memory_store_memorystore_find_similar_fact_any_status",
-      "companion_memory_store_memorystore_get_active_fact_texts",
-      "companion_memory_store_memorystore_list_all_facts",
-      "companion_memory_store_memorystore_list_facts",
-      "companion_memory_store_memorystore_recent_facts",
-      "companion_memory_store_rationale_453",
-      "companion_memory_store_rationale_463",
-      "companion_memory_store_rationale_834",
-      "companion_models_fact",
-      "companion_models_fact_from_dict",
-      "tests_test_faiss_performance",
-      "tests_test_faiss_performance_rationale_1",
-      "tests_test_faiss_performance_rationale_12",
-      "tests_test_faiss_performance_rationale_56",
-      "tests_test_faiss_performance_test_faiss_correctness_after_add_and_delete",
-      "tests_test_faiss_performance_test_faiss_rebuild_avoidance_on_search",
-      "tests_test_hybrid_search",
-      "tests_test_hybrid_search_mock_embed",
-      "tests_test_hybrid_search_rationale_1",
-      "tests_test_hybrid_search_rationale_124",
-      "tests_test_hybrid_search_rationale_23",
-      "tests_test_hybrid_search_rationale_71",
-      "tests_test_hybrid_search_test_bm25_search_exact_keyword",
-      "tests_test_hybrid_search_test_rrf_hybrid_fusion",
-      "tests_test_hybrid_search_test_search_default_hybrid"
-    ],
-    "13": [
+    "10": [
       "companion_background_scheduler",
       "companion_background_scheduler_background_personality_micro_update",
       "companion_background_scheduler_background_user_model_reflection",
@@ -682,7 +539,34 @@
       "tests_test_background_scheduler_testcircuitbreaker_test_initial_state_allows_execution",
       "tests_test_background_scheduler_testcircuitbreaker_test_success_resets_failure_count"
     ],
-    "14": [
+    "11": [
+      "basemodel",
+      "companion_llm_client",
+      "companion_llm_client_build_safety_settings",
+      "companion_llm_client_causallinkitem",
+      "companion_llm_client_commprefextractionresult",
+      "companion_llm_client_commprefitem",
+      "companion_llm_client_consolidationitem",
+      "companion_llm_client_factitem",
+      "companion_llm_client_humanmodelextractionresult",
+      "companion_llm_client_humanmodelitem",
+      "companion_llm_client_knowledgedomainitem",
+      "companion_llm_client_knowledgedomainsextractionresult",
+      "companion_llm_client_lifetransitionextractionresult",
+      "companion_llm_client_lifetransitionitem",
+      "companion_llm_client_oneshot_structured_async",
+      "companion_llm_client_patternextractionresult",
+      "companion_llm_client_patternitem",
+      "companion_llm_client_rationale_1",
+      "companion_llm_client_rationale_24",
+      "companion_llm_client_rationale_355",
+      "companion_llm_client_rationale_367",
+      "companion_llm_client_rationale_378",
+      "companion_llm_client_rationale_461",
+      "companion_llm_client_reflectionitem",
+      "companion_llm_client_usermood"
+    ],
+    "12": [
       "companion_documents",
       "companion_documents_extract_content",
       "companion_documents_extract_docx",
@@ -709,80 +593,7 @@
       "tests_test_documents",
       "tests_test_documents_test_process_document_removes_temp_dir"
     ],
-    "15": [
-      "basemodel",
-      "companion_llm_client",
-      "companion_llm_client_build_safety_settings",
-      "companion_llm_client_causallinkitem",
-      "companion_llm_client_commprefextractionresult",
-      "companion_llm_client_commprefitem",
-      "companion_llm_client_consolidationitem",
-      "companion_llm_client_factitem",
-      "companion_llm_client_humanmodelextractionresult",
-      "companion_llm_client_humanmodelitem",
-      "companion_llm_client_knowledgedomainitem",
-      "companion_llm_client_knowledgedomainsextractionresult",
-      "companion_llm_client_lifetransitionextractionresult",
-      "companion_llm_client_lifetransitionitem",
-      "companion_llm_client_patternextractionresult",
-      "companion_llm_client_patternitem",
-      "companion_llm_client_rationale_1",
-      "companion_llm_client_rationale_24",
-      "companion_llm_client_rationale_355",
-      "companion_llm_client_rationale_367",
-      "companion_llm_client_rationale_378",
-      "companion_llm_client_reflectionitem",
-      "companion_llm_client_usermood"
-    ],
-    "16": [
-      "companion_llm_client_aio_delete_file",
-      "companion_llm_client_aio_get_file",
-      "companion_llm_client_aio_oneshot_multimodal",
-      "companion_llm_client_aio_upload_file",
-      "companion_llm_client_async_delete_file",
-      "companion_llm_client_async_oneshot",
-      "companion_llm_client_async_upload_file",
-      "companion_llm_client_delete_file",
-      "companion_llm_client_format_grounding_sources",
-      "companion_llm_client_get_aio_client",
-      "companion_llm_client_get_file",
-      "companion_llm_client_history_item",
-      "companion_llm_client_make_config",
-      "companion_llm_client_oneshot",
-      "companion_llm_client_oneshot_structured_async",
-      "companion_llm_client_py_any",
-      "companion_llm_client_rationale_247",
-      "companion_llm_client_rationale_461",
-      "companion_llm_client_run_llm",
-      "companion_llm_client_upload_file",
-      "companion_llm_init",
-      "generatecontentconfig"
-    ],
-    "17": [
-      "companion_memory_store_memorystore_async_add_relation",
-      "companion_models_factrelation",
-      "tests_test_contradiction_supersede",
-      "tests_test_contradiction_supersede_add",
-      "tests_test_contradiction_supersede_fake_embed",
-      "tests_test_contradiction_supersede_status",
-      "tests_test_contradiction_supersede_store",
-      "tests_test_contradiction_supersede_test_contradiction_deletes_stale_vector",
-      "tests_test_contradiction_supersede_test_contradiction_flips_old_to_superseded",
-      "tests_test_contradiction_supersede_test_injection_quarantine_still_pending_review",
-      "tests_test_contradiction_supersede_test_oscillation_leaves_single_active",
-      "tests_test_contradiction_supersede_test_protected_fact_untouched_by_contradiction",
-      "tests_test_contradiction_supersede_test_superseded_excluded_from_active_reads",
-      "tests_test_store_fixes",
-      "tests_test_store_fixes_make_fact",
-      "tests_test_store_fixes_rationale_1",
-      "tests_test_store_fixes_testcontradictionfix",
-      "tests_test_store_fixes_testcontradictionfix_test_contradiction_marks_old_fact_pending_review",
-      "tests_test_store_fixes_testcontradictionfix_test_contradiction_respects_protected_tags",
-      "tests_test_store_fixes_testduplicateinsertionfix",
-      "tests_test_store_fixes_testduplicateinsertionfix_test_add_fact_allows_near_duplicate_against_superseded",
-      "tests_test_store_fixes_testduplicateinsertionfix_test_add_fact_blocks_duplicate_from_different_sources"
-    ],
-    "18": [
+    "13": [
       "companion_scripts_storage_migration",
       "companion_scripts_storage_migration_migrate_data",
       "companion_storage_init",
@@ -806,48 +617,70 @@
       "companion_storage_sqlite_db_py_connection",
       "companion_storage_sqlite_db_rationale_1"
     ],
-    "19": [
-      "companion_llm_pipeline_extract_human_model",
-      "companion_llm_pipeline_rationale_361",
-      "companion_memory_store_memorystore_get_human_model",
-      "companion_memory_store_memorystore_upsert_human_model",
-      "companion_memory_store_rationale_676",
-      "companion_models_fact_to_dict",
-      "companion_models_factrelation_from_dict",
-      "companion_models_factrelation_to_dict",
-      "companion_models_humanmodel",
-      "companion_models_humanmodel_all_insights",
-      "companion_models_humanmodel_from_dict",
-      "companion_models_humanmodel_post_init",
-      "companion_models_humanmodel_to_dict",
-      "companion_models_humanmodelinsight",
-      "companion_models_humanmodelinsight_from_dict",
-      "companion_models_humanmodelinsight_to_dict",
-      "companion_models_py_any",
-      "companion_models_rationale_299",
-      "companion_models_rationale_347"
+    "14": [
+      "companion_llm_pipeline_generate_personality_snapshot",
+      "companion_llm_pipeline_generate_reflections",
+      "companion_llm_pipeline_merge_personality",
+      "companion_llm_pipeline_personality_critical_section",
+      "companion_llm_pipeline_py_any",
+      "companion_llm_pipeline_rationale_522",
+      "companion_llm_pipeline_rationale_582",
+      "companion_llm_pipeline_rationale_687",
+      "companion_llm_pipeline_run_compress_pipeline",
+      "tests_test_pipeline",
+      "tests_test_pipeline_mock_oneshot_structured",
+      "tests_test_pipeline_mockstructuredresult",
+      "tests_test_pipeline_mockstructuredresult_init",
+      "tests_test_pipeline_mockstructuredresult_model_dump",
+      "tests_test_pipeline_rationale_1",
+      "tests_test_pipeline_test_merge_personality_differential_and_decay",
+      "tests_test_pipeline_test_run_compress_pipeline_empty_response",
+      "tests_test_pipeline_test_run_compress_pipeline_error_handling",
+      "tests_test_pipeline_test_run_compress_pipeline_increments_count",
+      "tests_test_pipeline_test_run_compress_pipeline_returns_summary"
     ],
-    "20": [
-      "companion_llm_pipeline_extract_life_transitions",
-      "companion_llm_pipeline_rationale_407",
-      "companion_memory_store_memorystore_get_active_transitions",
-      "companion_memory_store_memorystore_get_pending_transitions",
-      "companion_memory_store_memorystore_get_recent_transitions",
-      "companion_memory_store_memorystore_get_transition",
-      "companion_memory_store_memorystore_touch_transition",
-      "companion_memory_store_rationale_741",
-      "companion_models_fact_post_init",
-      "companion_models_factrelation_post_init",
-      "companion_models_humanmodelinsight_post_init",
-      "companion_models_lifetransition",
-      "companion_models_lifetransition_from_dict",
-      "companion_models_lifetransition_post_init",
-      "companion_models_lifetransition_to_dict",
-      "companion_models_new_id",
-      "companion_models_rationale_228",
-      "companion_models_reflection_post_init"
+    "15": [
+      "companion_llm_client_aio_delete_file",
+      "companion_llm_client_aio_get_file",
+      "companion_llm_client_aio_oneshot_multimodal",
+      "companion_llm_client_aio_upload_file",
+      "companion_llm_client_async_delete_file",
+      "companion_llm_client_async_oneshot",
+      "companion_llm_client_async_upload_file",
+      "companion_llm_client_delete_file",
+      "companion_llm_client_format_grounding_sources",
+      "companion_llm_client_get_aio_client",
+      "companion_llm_client_get_file",
+      "companion_llm_client_history_item",
+      "companion_llm_client_make_config",
+      "companion_llm_client_oneshot",
+      "companion_llm_client_parse_json_array",
+      "companion_llm_client_py_any",
+      "companion_llm_client_upload_file",
+      "companion_llm_init",
+      "generatecontentconfig"
     ],
-    "21": [
+    "16": [
+      "companion_models_contextbundle",
+      "companion_models_rationale_438",
+      "companion_models_reflection",
+      "companion_models_reflection_from_dict",
+      "companion_models_reflection_to_dict",
+      "tests_test_retrieval",
+      "tests_test_retrieval_rationale_1",
+      "tests_test_retrieval_rationale_11",
+      "tests_test_retrieval_rationale_25",
+      "tests_test_retrieval_rationale_58",
+      "tests_test_retrieval_rationale_77",
+      "tests_test_retrieval_testretrievalbudgetmanagerselect",
+      "tests_test_retrieval_testretrievalbudgetmanagerselect_test_empty_facts_returns_empty_bundle",
+      "tests_test_retrieval_testretrievalbudgetmanagerselect_test_external_queries_prune_unrelated_facts",
+      "tests_test_retrieval_testretrievalbudgetmanagerselect_test_high_importance_facts_included",
+      "tests_test_retrieval_testretrievalbudgetmanagerselect_test_pinned_facts_always_included",
+      "tests_test_retrieval_testretrievalbudgetmanagerselect_test_reflections_limited",
+      "tests_test_retrieval_testretrievalbudgetmanagerselect_test_summary_tier_1_included"
+    ],
+    "17": [
       "companion_temporal",
       "companion_temporal_build_temporal_context_block",
       "companion_temporal_generate_temporal_guidance",
@@ -867,7 +700,45 @@
       "tests_test_temporal_test_temporal_context_block",
       "tests_test_temporal_test_temporal_guidance"
     ],
-    "22": [
+    "18": [
+      "companion_config",
+      "companion_config_bootstrap_log",
+      "companion_config_parse_admin_ids",
+      "companion_config_rationale_1",
+      "companion_memory_init",
+      "companion_memory_semantic_ranker",
+      "companion_memory_semantic_ranker_rationale_1",
+      "companion_memory_store",
+      "companion_memory_store_rationale_1",
+      "scripts_debug_pipeline",
+      "scripts_debug_pipeline_rationale_1",
+      "scripts_find_2gb_fact",
+      "tests_test_episodic_compression",
+      "tests_test_episodic_compression_mock_embed",
+      "tests_test_episodic_compression_rationale_1",
+      "tests_test_episodic_compression_rationale_23",
+      "tests_test_episodic_compression_test_episodic_memory_compressor"
+    ],
+    "19": [
+      "companion_memory_store_memorystore_add_fact",
+      "companion_memory_store_memorystore_apply_importance_decay",
+      "companion_memory_store_memorystore_async_add_fact",
+      "companion_memory_store_memorystore_async_search_facts",
+      "companion_memory_store_memorystore_compress_dormant_episodes",
+      "companion_memory_store_memorystore_facts_for_period",
+      "companion_memory_store_memorystore_find_similar_fact",
+      "companion_memory_store_memorystore_find_similar_fact_any_status",
+      "companion_memory_store_memorystore_get_active_fact_texts",
+      "companion_memory_store_memorystore_list_all_facts",
+      "companion_memory_store_memorystore_list_facts",
+      "companion_memory_store_memorystore_recent_facts",
+      "companion_memory_store_py_fact",
+      "companion_memory_store_rationale_457",
+      "companion_memory_store_rationale_467",
+      "companion_memory_store_rationale_838",
+      "companion_memory_store_rationale_858"
+    ],
+    "20": [
       "tests_conftest",
       "tests_conftest_make_fact",
       "tests_conftest_memory_store",
@@ -886,7 +757,7 @@
       "tests_test_retrieval_rationale_36",
       "tests_test_retrieval_testretrievalbudgetmanagerselect_test_char_budget_respected"
     ],
-    "23": [
+    "21": [
       "companion_llm_client_causallinkextractionresult",
       "companion_llm_client_consolidationresult",
       "companion_llm_client_factextractionresult",
@@ -904,24 +775,44 @@
       "tests_test_structured_parsing_test_oneshot_structured_personality_pipeline",
       "tests_test_structured_parsing_test_oneshot_structured_reflection"
     ],
-    "24": [
-      "companion_llm_sessions",
-      "companion_llm_sessions_build_system_instruction",
-      "companion_llm_sessions_create_default_session",
-      "companion_llm_sessions_py_any",
-      "companion_llm_sessions_rationale_1",
-      "companion_llm_sessions_rationale_118",
-      "companion_llm_sessions_reconstruct_recent_history",
-      "companion_memory_retrieval_py_any",
-      "companion_memory_retrieval_retrievalbudgetmanager",
-      "companion_memory_retrieval_retrievalbudgetmanager_init",
-      "tests_test_policy_engine",
-      "tests_test_policy_engine_mock_memory_store",
-      "tests_test_policy_engine_mock_retrieval_mgr",
-      "tests_test_policy_engine_test_build_system_instruction_depressed_state",
-      "tests_test_policy_engine_test_build_system_instruction_fallback_state"
+    "22": [
+      "companion_llm_pipeline",
+      "companion_llm_pipeline_consolidate_facts",
+      "companion_llm_pipeline_extract_causal_links",
+      "companion_llm_pipeline_extract_facts",
+      "companion_llm_pipeline_rationale_1",
+      "companion_llm_pipeline_rationale_779",
+      "companion_llm_pipeline_update_knowledge_domains_async",
+      "companion_llm_prompts",
+      "companion_llm_prompts_rationale_1",
+      "tests_test_sanitizer",
+      "tests_test_sanitizer_mockstructuredresult",
+      "tests_test_sanitizer_mockstructuredresult_init",
+      "tests_test_sanitizer_test_consolidation_pending_review_ignored",
+      "tests_test_sanitizer_test_extract_facts_quarantine",
+      "tests_test_sanitizer_test_pending_review_revival_guard",
+      "tests_test_sanitizer_test_sanitize_and_scan_legacy_files"
     ],
-    "25": [
+    "23": [
+      "companion_models_fact",
+      "tests_test_faiss_performance",
+      "tests_test_faiss_performance_rationale_1",
+      "tests_test_faiss_performance_rationale_12",
+      "tests_test_faiss_performance_rationale_56",
+      "tests_test_faiss_performance_test_faiss_correctness_after_add_and_delete",
+      "tests_test_faiss_performance_test_faiss_rebuild_avoidance_on_search",
+      "tests_test_hybrid_search",
+      "tests_test_hybrid_search_mock_embed",
+      "tests_test_hybrid_search_rationale_1",
+      "tests_test_hybrid_search_rationale_124",
+      "tests_test_hybrid_search_rationale_23",
+      "tests_test_hybrid_search_rationale_71",
+      "tests_test_hybrid_search_test_bm25_search_exact_keyword",
+      "tests_test_hybrid_search_test_rrf_hybrid_fusion",
+      "tests_test_hybrid_search_test_search_default_hybrid"
+    ],
+    "24": [
+      "companion_memory_episodic_compression",
       "companion_memory_episodic_compression_episodicmemorycompressor",
       "companion_memory_episodic_compression_episodicmemorycompressor_compress_group",
       "companion_memory_episodic_compression_episodicmemorycompressor_generate_summary_text",
@@ -929,16 +820,15 @@
       "companion_memory_episodic_compression_episodicmemorycompressor_group_facts",
       "companion_memory_episodic_compression_episodicmemorycompressor_init",
       "companion_memory_episodic_compression_episodicmemorycompressor_run_compression",
+      "companion_memory_episodic_compression_rationale_1",
       "companion_memory_episodic_compression_rationale_122",
       "companion_memory_episodic_compression_rationale_29",
       "companion_memory_episodic_compression_rationale_37",
       "companion_memory_episodic_compression_rationale_52",
       "companion_memory_episodic_compression_rationale_62",
-      "companion_memory_episodic_compression_rationale_79",
-      "companion_memory_store_memorystore_compress_dormant_episodes",
-      "companion_memory_store_rationale_854"
+      "companion_memory_episodic_compression_rationale_79"
     ],
-    "26": [
+    "25": [
       "companion_llm_client_aio_oneshot",
       "companion_llm_client_parse_json_object",
       "companion_llm_shadow_eval",
@@ -954,23 +844,54 @@
       "tests_test_shadow_eval_test_evaluate_identity_change_new",
       "tests_test_shadow_eval_test_evaluate_identity_change_valid"
     ],
+    "26": [
+      "companion_memory_store_memorystore_add_belief",
+      "companion_memory_store_memorystore_add_reflection",
+      "companion_memory_store_memorystore_async_add_reflection",
+      "companion_memory_store_memorystore_async_search_reflections",
+      "companion_memory_store_memorystore_get_compress_count",
+      "companion_memory_store_memorystore_list_beliefs",
+      "companion_memory_store_memorystore_list_reflections",
+      "companion_memory_store_memorystore_normalize",
+      "companion_memory_store_memorystore_reindex_all",
+      "companion_memory_store_memorystore_search_reflections",
+      "companion_memory_store_memorystore_stats",
+      "companion_memory_store_memorystore_update_reflection",
+      "companion_memory_store_py_reflection",
+      "companion_memory_store_rationale_864"
+    ],
     "27": [
-      "companion_models_contextbundle",
-      "companion_models_rationale_438",
-      "tests_test_retrieval",
-      "tests_test_retrieval_rationale_1",
-      "tests_test_retrieval_rationale_11",
-      "tests_test_retrieval_rationale_25",
-      "tests_test_retrieval_rationale_58",
-      "tests_test_retrieval_rationale_77",
-      "tests_test_retrieval_testretrievalbudgetmanagerselect",
-      "tests_test_retrieval_testretrievalbudgetmanagerselect_test_empty_facts_returns_empty_bundle",
-      "tests_test_retrieval_testretrievalbudgetmanagerselect_test_external_queries_prune_unrelated_facts",
-      "tests_test_retrieval_testretrievalbudgetmanagerselect_test_high_importance_facts_included",
-      "tests_test_retrieval_testretrievalbudgetmanagerselect_test_pinned_facts_always_included",
-      "tests_test_retrieval_testretrievalbudgetmanagerselect_test_summary_tier_1_included"
+      "companion_models_fact_from_dict",
+      "companion_models_fact_to_dict",
+      "companion_models_factrelation_from_dict",
+      "companion_models_factrelation_to_dict",
+      "companion_models_messagerecord",
+      "companion_models_messagerecord_from_dict",
+      "companion_models_messagerecord_post_init",
+      "companion_models_messagerecord_to_dict",
+      "companion_models_pattern",
+      "companion_models_pattern_from_dict",
+      "companion_models_pattern_post_init",
+      "companion_models_pattern_to_dict",
+      "companion_models_py_any",
+      "companion_models_rationale_148"
     ],
     "28": [
+      "companion_llm_pipeline_extract_human_model",
+      "companion_llm_pipeline_rationale_361",
+      "companion_models_humanmodel",
+      "companion_models_humanmodel_all_insights",
+      "companion_models_humanmodel_from_dict",
+      "companion_models_humanmodel_post_init",
+      "companion_models_humanmodel_to_dict",
+      "companion_models_humanmodelinsight",
+      "companion_models_humanmodelinsight_from_dict",
+      "companion_models_humanmodelinsight_post_init",
+      "companion_models_humanmodelinsight_to_dict",
+      "companion_models_rationale_299",
+      "companion_models_rationale_347"
+    ],
+    "29": [
       "companion_memory_store_memorystore_build_canonical_profile_text",
       "companion_memory_store_memorystore_build_personality_snapshot_text",
       "companion_memory_store_memorystore_get_connected_facts",
@@ -980,12 +901,12 @@
       "companion_memory_store_memorystore_update_transition",
       "companion_memory_store_py_any",
       "companion_memory_store_rationale_129",
-      "companion_memory_store_rationale_390",
+      "companion_memory_store_rationale_391",
       "companion_memory_store_rationale_65",
       "companion_memory_store_rationale_76",
       "companion_memory_store_rationale_80"
     ],
-    "29": [
+    "30": [
       "tests_test_run_llm_async",
       "tests_test_run_llm_async_async_send",
       "tests_test_run_llm_async_fakeresponse",
@@ -1000,7 +921,49 @@
       "tests_test_run_llm_async_test_run_llm_passthrough_sync_function",
       "tests_test_run_llm_async_test_sync_wrapper_runs_event_loop"
     ],
-    "30": [
+    "31": [
+      "basemiddleware",
+      "bot",
+      "bot_rationale_1",
+      "companion_bot_core_proactive_ping_loop",
+      "companion_bot_core_rationale_59",
+      "companion_main",
+      "companion_main_authmiddleware",
+      "companion_main_authmiddleware_call",
+      "companion_main_main",
+      "companion_main_rationale_1",
+      "companion_main_run",
+      "companion_main_sanitize_and_scan_legacy_files"
+    ],
+    "32": [
+      "companion_llm_sessions",
+      "companion_llm_sessions_build_system_instruction",
+      "companion_llm_sessions_create_default_session",
+      "companion_llm_sessions_py_any",
+      "companion_llm_sessions_rationale_1",
+      "companion_llm_sessions_rationale_118",
+      "companion_llm_sessions_reconstruct_recent_history",
+      "tests_test_policy_engine",
+      "tests_test_policy_engine_mock_memory_store",
+      "tests_test_policy_engine_mock_retrieval_mgr",
+      "tests_test_policy_engine_test_build_system_instruction_depressed_state",
+      "tests_test_policy_engine_test_build_system_instruction_fallback_state"
+    ],
+    "33": [
+      "companion_memory_retrieval_py_any",
+      "companion_memory_retrieval_py_fact",
+      "companion_memory_retrieval_py_reflection",
+      "companion_memory_retrieval_rationale_362",
+      "companion_memory_retrieval_retrievalbudgetmanager",
+      "companion_memory_retrieval_retrievalbudgetmanager_compute_child_relevance",
+      "companion_memory_retrieval_retrievalbudgetmanager_extract_pinned_facts",
+      "companion_memory_retrieval_retrievalbudgetmanager_get_summary_child_ids",
+      "companion_memory_retrieval_retrievalbudgetmanager_init",
+      "companion_memory_retrieval_retrievalbudgetmanager_is_parent_summary",
+      "companion_memory_retrieval_retrievalbudgetmanager_select",
+      "contextbundle"
+    ],
+    "34": [
       "concept:SQLite \u0432\u0441\u0442\u0440\u043e\u0435\u043d \u0432 Python 3 \u2014 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u044b\u0439 \u043f\u0430\u043a\u0435\u0442 \u043d\u0435 \u043d\u0443\u0436\u0435\u043d",
       "dependency:SpeechRecognition",
       "dependency:aiogram",
@@ -1014,20 +977,97 @@
       "dependency:yt-dlp",
       "doc:requirements.txt"
     ],
-    "31": [
-      "companion_memory_episodic_compression",
-      "companion_memory_episodic_compression_rationale_1",
-      "companion_memory_init",
-      "companion_memory_store",
-      "companion_memory_store_rationale_1",
-      "scripts_find_2gb_fact",
-      "tests_test_episodic_compression",
-      "tests_test_episodic_compression_mock_embed",
-      "tests_test_episodic_compression_rationale_1",
-      "tests_test_episodic_compression_rationale_23",
-      "tests_test_episodic_compression_test_episodic_memory_compressor"
+    "35": [
+      "companion_handlers_commands_auto_add_event_from_message",
+      "companion_security_sanitizer",
+      "companion_security_sanitizer_looks_like_injection",
+      "companion_security_sanitizer_rationale_1",
+      "companion_security_sanitizer_rationale_34",
+      "companion_security_sanitizer_sanitize_markup",
+      "scripts_sanitize_existing_data",
+      "scripts_sanitize_existing_data_migrate",
+      "scripts_sanitize_existing_data_rationale_1",
+      "tests_test_sanitizer_test_looks_like_injection",
+      "tests_test_sanitizer_test_sanitize_markup"
     ],
-    "32": [
+    "36": [
+      "companion_llm_pipeline_extract_life_transitions",
+      "companion_llm_pipeline_rationale_407",
+      "companion_models_fact_post_init",
+      "companion_models_factrelation_post_init",
+      "companion_models_lifetransition",
+      "companion_models_lifetransition_from_dict",
+      "companion_models_lifetransition_post_init",
+      "companion_models_lifetransition_to_dict",
+      "companion_models_new_id",
+      "companion_models_rationale_228",
+      "companion_models_reflection_post_init"
+    ],
+    "37": [
+      "companion_memory_semantic_ranker_semanticimportanceranker",
+      "companion_memory_semantic_ranker_semanticimportanceranker_access_factor",
+      "companion_memory_semantic_ranker_semanticimportanceranker_final_score",
+      "companion_memory_semantic_ranker_semanticimportanceranker_importance_weight",
+      "companion_memory_semantic_ranker_semanticimportanceranker_init",
+      "companion_memory_semantic_ranker_semanticimportanceranker_is_anchor",
+      "companion_memory_semantic_ranker_semanticimportanceranker_normalize_vector_score",
+      "companion_memory_semantic_ranker_semanticimportanceranker_recency_factor",
+      "companion_memory_semantic_ranker_semanticimportanceranker_rerank",
+      "companion_memory_semantic_ranker_semanticimportanceranker_update_access",
+      "tests_test_cognitive_context_test_semantic_ranker_archive_filter_anchor_and_access"
+    ],
+    "38": [
+      "companion_memory_store_memorystore_add_pattern",
+      "companion_memory_store_memorystore_delete_pattern",
+      "companion_memory_store_memorystore_find_similar_pattern",
+      "companion_memory_store_memorystore_get_pattern",
+      "companion_memory_store_memorystore_list_patterns",
+      "companion_memory_store_memorystore_search_patterns",
+      "companion_memory_store_memorystore_supersede_pattern",
+      "companion_memory_store_memorystore_touch_pattern",
+      "companion_memory_store_memorystore_update_pattern",
+      "companion_memory_store_rationale_626",
+      "pattern"
+    ],
+    "39": [
+      "companion_memory_store_memorystore_async_add_relation",
+      "factrelation",
+      "tests_test_graphrag",
+      "tests_test_graphrag_mock_embed",
+      "tests_test_graphrag_rationale_1",
+      "tests_test_graphrag_rationale_111",
+      "tests_test_graphrag_rationale_174",
+      "tests_test_graphrag_rationale_24",
+      "tests_test_graphrag_test_get_connected_facts_bfs",
+      "tests_test_graphrag_test_graphrag_retrieval_select_integration",
+      "tests_test_graphrag_test_parent_child_unpacking_integration"
+    ],
+    "40": [
+      "tests_test_contradiction_supersede",
+      "tests_test_contradiction_supersede_add",
+      "tests_test_contradiction_supersede_fake_embed",
+      "tests_test_contradiction_supersede_status",
+      "tests_test_contradiction_supersede_store",
+      "tests_test_contradiction_supersede_test_contradiction_deletes_stale_vector",
+      "tests_test_contradiction_supersede_test_contradiction_flips_old_to_superseded",
+      "tests_test_contradiction_supersede_test_injection_quarantine_still_pending_review",
+      "tests_test_contradiction_supersede_test_oscillation_leaves_single_active",
+      "tests_test_contradiction_supersede_test_protected_fact_untouched_by_contradiction",
+      "tests_test_contradiction_supersede_test_superseded_excluded_from_active_reads"
+    ],
+    "41": [
+      "companion_models_factrelation",
+      "tests_test_store_fixes",
+      "tests_test_store_fixes_make_fact",
+      "tests_test_store_fixes_rationale_1",
+      "tests_test_store_fixes_testcontradictionfix",
+      "tests_test_store_fixes_testcontradictionfix_test_contradiction_marks_old_fact_pending_review",
+      "tests_test_store_fixes_testcontradictionfix_test_contradiction_respects_protected_tags",
+      "tests_test_store_fixes_testduplicateinsertionfix",
+      "tests_test_store_fixes_testduplicateinsertionfix_test_add_fact_allows_near_duplicate_against_superseded",
+      "tests_test_store_fixes_testduplicateinsertionfix_test_add_fact_blocks_duplicate_from_different_sources"
+    ],
+    "42": [
       "concept:Acceptance Criteria",
       "concept:Content Completeness",
       "concept:Initial Request \u2014 2026-07-17T09:57:12Z",
@@ -1039,18 +1079,7 @@
       "concept:Requirements",
       "doc:ORIGINAL_REQUEST.md"
     ],
-    "33": [
-      "companion_llm_client_parse_json_array",
-      "companion_proactive_prospective",
-      "companion_proactive_prospective_build_due_task_payload",
-      "companion_proactive_prospective_coerce_due_ts",
-      "companion_proactive_prospective_extract_prospective_tasks",
-      "companion_proactive_prospective_heuristic_extract",
-      "companion_proactive_prospective_looks_future_relevant",
-      "companion_proactive_prospective_py_any",
-      "companion_proactive_prospective_rationale_1"
-    ],
-    "34": [
+    "43": [
       "companion_memory_store_memorystore_add_relation",
       "companion_memory_store_memorystore_delete_fact",
       "companion_memory_store_memorystore_get_fact",
@@ -1061,7 +1090,7 @@
       "companion_memory_store_rationale_241",
       "companion_memory_store_rationale_268"
     ],
-    "35": [
+    "44": [
       "companion_models",
       "companion_models_compute_insight_status",
       "companion_models_compute_pattern_status",
@@ -1072,7 +1101,7 @@
       "companion_models_rationale_403",
       "companion_models_rationale_422"
     ],
-    "36": [
+    "45": [
       "companion_storage_sqlite_db_loads",
       "companion_storage_sqlite_db_memorydatabase_due_prospective_tasks",
       "companion_storage_sqlite_db_memorydatabase_get_state_model",
@@ -1083,7 +1112,7 @@
       "companion_storage_sqlite_db_memorydatabase_row_prospective_task",
       "row"
     ],
-    "37": [
+    "46": [
       "concept:Artifact Index",
       "concept:BRIEFING \u2014 2026-07-17T09:57:12Z",
       "concept:Mission",
@@ -1094,7 +1123,7 @@
       "concept:\ud83d\udd12 My Identity",
       "doc:BRIEFING.md"
     ],
-    "38": [
+    "47": [
       "companion_llm_analyzer",
       "companion_llm_analyzer_analyze_message",
       "companion_llm_analyzer_default_analysis",
@@ -1104,17 +1133,7 @@
       "companion_llm_telemetry_observe",
       "companion_llm_telemetry_rationale_30"
     ],
-    "39": [
-      "companion_llm_pipeline_extract_patterns",
-      "companion_llm_pipeline_pattern_redundant",
-      "companion_llm_pipeline_rationale_264",
-      "companion_llm_pipeline_rationale_501",
-      "companion_models_pattern",
-      "companion_models_pattern_post_init",
-      "companion_models_pattern_to_dict",
-      "companion_models_rationale_148"
-    ],
-    "40": [
+    "48": [
       "companion_memory_importance",
       "companion_memory_importance_days_since",
       "companion_memory_importance_decay_factor",
@@ -1124,35 +1143,26 @@
       "companion_memory_importance_retrieval_score",
       "companion_memory_importance_score_message_importance"
     ],
-    "41": [
-      "companion_memory_retrieval",
-      "companion_memory_retrieval_is_explicit_search_query",
-      "companion_memory_retrieval_mood_to_retrieval_boost",
-      "companion_memory_retrieval_rationale_1",
-      "companion_memory_retrieval_rationale_26",
-      "companion_memory_retrieval_rationale_331",
-      "companion_memory_retrieval_retrievalbudgetmanager_extract_pinned_facts",
-      "companion_memory_retrieval_retrievalbudgetmanager_select"
+    "49": [
+      "companion_proactive_prospective",
+      "companion_proactive_prospective_build_due_task_payload",
+      "companion_proactive_prospective_coerce_due_ts",
+      "companion_proactive_prospective_extract_prospective_tasks",
+      "companion_proactive_prospective_heuristic_extract",
+      "companion_proactive_prospective_looks_future_relevant",
+      "companion_proactive_prospective_py_any",
+      "companion_proactive_prospective_rationale_1"
     ],
-    "42": [
-      "companion_config",
-      "companion_config_bootstrap_log",
-      "companion_config_parse_admin_ids",
-      "companion_config_rationale_1",
-      "scripts_review_quarantine",
-      "scripts_review_quarantine_rationale_1",
-      "scripts_review_quarantine_review_quarantine"
+    "50": [
+      "companion_llm_pipeline_extract_comm_prefs",
+      "companion_llm_pipeline_rationale_322",
+      "companion_models_commpref",
+      "companion_models_commpref_from_dict",
+      "companion_models_commpref_post_init",
+      "companion_models_commpref_to_dict",
+      "companion_models_rationale_185"
     ],
-    "43": [
-      "companion_memory_store_memorystore_high_importance_messages_for_period",
-      "companion_memory_store_memorystore_log_message",
-      "companion_memory_store_memorystore_recent_messages",
-      "companion_models_messagerecord",
-      "companion_models_messagerecord_from_dict",
-      "companion_models_messagerecord_post_init",
-      "companion_models_messagerecord_to_dict"
-    ],
-    "44": [
+    "51": [
       "concept:Caveats",
       "concept:Conclusion",
       "concept:Handoff Report",
@@ -1161,7 +1171,7 @@
       "concept:Verification Method",
       "doc:handoff.md"
     ],
-    "45": [
+    "52": [
       "path",
       "scripts_fix_jsonl_encoding",
       "scripts_fix_jsonl_encoding_decode_mojibake",
@@ -1170,16 +1180,7 @@
       "scripts_fix_jsonl_encoding_rationale_1",
       "scripts_fix_jsonl_encoding_rationale_10"
     ],
-    "46": [
-      "tests_test_graphrag",
-      "tests_test_graphrag_mock_embed",
-      "tests_test_graphrag_rationale_1",
-      "tests_test_graphrag_rationale_111",
-      "tests_test_graphrag_rationale_24",
-      "tests_test_graphrag_test_get_connected_facts_bfs",
-      "tests_test_graphrag_test_graphrag_retrieval_select_integration"
-    ],
-    "47": [
+    "53": [
       "companion_llm_master_summary",
       "companion_llm_master_summary_rationale_1",
       "companion_llm_master_summary_rationale_107",
@@ -1187,126 +1188,184 @@
       "companion_llm_master_summary_update_master_summary",
       "companion_llm_master_summary_validate_master_summary"
     ],
-    "48": [
+    "54": [
+      "companion_memory_retrieval",
+      "companion_memory_retrieval_is_explicit_search_query",
+      "companion_memory_retrieval_mood_to_retrieval_boost",
+      "companion_memory_retrieval_rationale_1",
+      "companion_memory_retrieval_rationale_26"
+    ],
+    "55": [
       "companion_storage_sqlite_db_memorydatabase_get_fact",
       "companion_storage_sqlite_db_memorydatabase_hydrate_fact_metadata",
       "companion_storage_sqlite_db_memorydatabase_list_all_facts",
       "companion_storage_sqlite_db_memorydatabase_list_facts",
       "companion_storage_sqlite_db_memorydatabase_row_fact"
     ],
-    "49": [
+    "56": [
+      "companion_llm_pipeline_extract_patterns",
+      "companion_llm_pipeline_pattern_redundant",
+      "companion_llm_pipeline_rationale_264",
+      "companion_llm_pipeline_rationale_501"
+    ],
+    "57": [
+      "companion_memory_store_memorystore_init",
+      "companion_memory_store_memorystore_lock",
+      "companion_memory_store_rationale_41",
+      "lock"
+    ],
+    "58": [
+      "scripts_review_quarantine",
+      "scripts_review_quarantine_rationale_1",
+      "scripts_review_quarantine_review_quarantine"
+    ],
+    "59": [
       "companion_init",
       "companion_init_rationale_1"
     ],
-    "50": [
+    "60": [
+      "companion_memory_store_memorystore_analyze_retrieval_effectiveness",
+      "companion_memory_store_rationale_911"
+    ],
+    "61": [
+      "companion_memory_store_memorystore_confirm_or_review_transition",
+      "companion_memory_store_rationale_757"
+    ],
+    "62": [
+      "companion_memory_store_memorystore_load_master_summary",
+      "companion_memory_store_rationale_133"
+    ],
+    "63": [
+      "companion_memory_store_memorystore_save_master_summary",
+      "companion_memory_store_rationale_137"
+    ],
+    "64": [
       "companion_proactive_init",
       "companion_proactive_init_rationale_1"
     ],
-    "51": [
+    "65": [
       "companion_security_init",
       "companion_security_init_rationale_1"
     ],
-    "52": [
+    "66": [
       "companion_services_init",
       "companion_services_init_rationale_1"
     ],
-    "53": [
+    "67": [
       "companion_storage_sqlite_db_memorydatabase_archive_audit_log",
       "companion_storage_sqlite_db_rationale_52"
     ],
-    "54": [
+    "68": [
       "companion_storage_sqlite_db_memorydatabase_update_fact_fields",
       "companion_storage_sqlite_db_rationale_901"
     ],
-    "55": [
+    "69": [
       "companion_bot_core_py_message"
     ],
-    "56": [
+    "70": [
+      "companion_memory_store_py_lock"
+    ],
+    "71": [
       "companion_memory_vector_index_py_connection"
     ],
-    "57": [
+    "72": [
       "doc:.pre-commit-config.yaml"
     ],
-    "58": [
+    "73": [
       "doc:censorship_points.txt"
     ],
-    "59": [
+    "74": [
       "doc:docker-compose.yml"
     ],
-    "60": [
+    "75": [
       "doc:git.txt"
     ],
-    "61": [
+    "76": [
       "scripts_count_stats"
     ],
-    "62": [
+    "77": [
       "tests_init"
     ]
   },
   "cohesion": {
     "0": 0.058549931600547195,
-    "1": 0.05824561403508772,
+    "1": 0.055501460564751706,
     "2": 0.058469945355191254,
     "3": 0.06140350877192982,
-    "4": 0.07346938775510205,
-    "5": 0.06560283687943262,
-    "6": 0.09513742071881606,
-    "7": 0.07827260458839407,
-    "8": 0.08403361344537816,
-    "9": 0.09915966386554621,
-    "10": 0.06060606060606061,
-    "11": 0.09475806451612903,
-    "12": 0.09274193548387097,
-    "13": 0.15384615384615385,
-    "14": 0.11333333333333333,
-    "15": 0.1422924901185771,
-    "16": 0.14285714285714285,
-    "17": 0.18614718614718614,
-    "18": 0.11255411255411256,
-    "19": 0.14035087719298245,
-    "20": 0.1111111111111111,
-    "21": 0.21568627450980393,
-    "22": 0.125,
-    "23": 0.225,
-    "24": 0.21904761904761905,
-    "25": 0.17142857142857143,
-    "26": 0.25274725274725274,
+    "4": 0.10609756097560975,
+    "5": 0.1021021021021021,
+    "6": 0.08403361344537816,
+    "7": 0.09915966386554621,
+    "8": 0.06060606060606061,
+    "9": 0.09401709401709402,
+    "10": 0.15384615384615385,
+    "11": 0.13,
+    "12": 0.11333333333333333,
+    "13": 0.11255411255411256,
+    "14": 0.15263157894736842,
+    "15": 0.17543859649122806,
+    "16": 0.13725490196078433,
+    "17": 0.21568627450980393,
+    "18": 0.14705882352941177,
+    "19": 0.15441176470588236,
+    "20": 0.125,
+    "21": 0.225,
+    "22": 0.16666666666666666,
+    "23": 0.19166666666666668,
+    "24": 0.17142857142857143,
+    "25": 0.25274725274725274,
+    "26": 0.17582417582417584,
     "27": 0.16483516483516483,
-    "28": 0.15384615384615385,
-    "29": 0.24358974358974358,
-    "30": 0.16666666666666666,
-    "31": 0.2,
-    "32": 0.2,
-    "33": 0.3611111111111111,
-    "34": 0.2222222222222222,
-    "35": 0.2777777777777778,
-    "36": 0.2777777777777778,
-    "37": 0.2222222222222222,
-    "38": 0.32142857142857145,
-    "39": 0.25,
-    "40": 0.32142857142857145,
-    "41": 0.25,
-    "42": 0.2857142857142857,
-    "43": 0.38095238095238093,
-    "44": 0.2857142857142857,
-    "45": 0.42857142857142855,
-    "46": 0.38095238095238093,
-    "47": 0.4,
-    "48": 0.4,
-    "49": 1.0,
-    "50": 1.0,
-    "51": 1.0,
-    "52": 1.0,
-    "53": 1.0,
-    "54": 1.0,
-    "55": 1.0,
-    "56": 1.0,
-    "57": 1.0,
-    "58": 1.0,
+    "28": 0.16666666666666666,
+    "29": 0.15384615384615385,
+    "30": 0.24358974358974358,
+    "31": 0.24242424242424243,
+    "32": 0.24242424242424243,
+    "33": 0.30303030303030304,
+    "34": 0.16666666666666666,
+    "35": 0.2545454545454545,
+    "36": 0.18181818181818182,
+    "37": 0.3090909090909091,
+    "38": 0.2,
+    "39": 0.2727272727272727,
+    "40": 0.34545454545454546,
+    "41": 0.37777777777777777,
+    "42": 0.2,
+    "43": 0.2222222222222222,
+    "44": 0.2777777777777778,
+    "45": 0.2777777777777778,
+    "46": 0.2222222222222222,
+    "47": 0.32142857142857145,
+    "48": 0.32142857142857145,
+    "49": 0.42857142857142855,
+    "50": 0.2857142857142857,
+    "51": 0.2857142857142857,
+    "52": 0.42857142857142855,
+    "53": 0.4,
+    "54": 0.4,
+    "55": 0.4,
+    "56": 0.5,
+    "57": 0.5,
+    "58": 0.6666666666666666,
     "59": 1.0,
     "60": 1.0,
     "61": 1.0,
-    "62": 1.0
+    "62": 1.0,
+    "63": 1.0,
+    "64": 1.0,
+    "65": 1.0,
+    "66": 1.0,
+    "67": 1.0,
+    "68": 1.0,
+    "69": 1.0,
+    "70": 1.0,
+    "71": 1.0,
+    "72": 1.0,
+    "73": 1.0,
+    "74": 1.0,
+    "75": 1.0,
+    "76": 1.0,
+    "77": 1.0
   },
   "gods": [
     {
@@ -1317,17 +1376,12 @@
     {
       "id": "companion_memory_store_memorystore",
       "label": "MemoryStore",
-      "degree": 142
+      "degree": 133
     },
     {
       "id": "companion_models_fact",
       "label": "Fact",
-      "degree": 77
-    },
-    {
-      "id": "companion_models_factrelation",
-      "label": "FactRelation",
-      "degree": 29
+      "degree": 55
     },
     {
       "id": "companion_user_model_usermodel",
@@ -1335,18 +1389,23 @@
       "degree": 29
     },
     {
-      "id": "companion_memory_vector_index_vectorindex",
-      "label": "VectorIndex",
-      "degree": 26
-    },
-    {
       "id": "companion_proactive_reasons_reasondecision",
       "label": "ReasonDecision",
       "degree": 24
     },
     {
+      "id": "companion_memory_vector_index_vectorindex",
+      "label": "VectorIndex",
+      "degree": 23
+    },
+    {
       "id": "companion_reasoning_reasoningengine",
       "label": "ReasoningEngine",
+      "degree": 22
+    },
+    {
+      "id": "companion_models_factrelation",
+      "label": "FactRelation",
       "degree": 22
     },
     {
@@ -1355,9 +1414,9 @@
       "degree": 21
     },
     {
-      "id": "companion_models_reflection",
-      "label": "Reflection",
-      "degree": 20
+      "id": "companion_bot_core_send_long_message",
+      "label": "send_long_message()",
+      "degree": 18
     }
   ],
   "surprises": [
@@ -1371,6 +1430,17 @@
       "confidence": "INFERRED",
       "relation": "indirect_call",
       "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; bridges separate communities; peripheral node `mock_memory_store()` unexpectedly reaches hub `MemoryStore`"
+    },
+    {
+      "source": "mock_retrieval_mgr()",
+      "target": "RetrievalBudgetManager",
+      "source_files": [
+        "tests/test_policy_engine.py",
+        "companion/memory/retrieval.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "indirect_call",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; bridges separate communities; peripheral node `mock_retrieval_mgr()` unexpectedly reaches hub `RetrievalBudgetManager`"
     },
     {
       "source": "test_schema_migration_adds_context_tables_and_fact_metadata()",
@@ -1404,17 +1474,6 @@
       "confidence": "INFERRED",
       "relation": "uses",
       "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; bridges separate communities"
-    },
-    {
-      "source": "clean_db()",
-      "target": "MemoryDatabase",
-      "source_files": [
-        "tests/test_telemetry.py",
-        "companion/storage/sqlite_db.py"
-      ],
-      "confidence": "EXTRACTED",
-      "relation": "calls",
-      "why": "connects across different repos/directories; bridges separate communities; peripheral node `clean_db()` unexpectedly reaches hub `MemoryDatabase`"
     }
   ],
   "tokens": {
