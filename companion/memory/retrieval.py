@@ -217,6 +217,10 @@ class RetrievalBudgetManager:
                             conn_fact.retrieval_score = max(4.0 - hop_dist * 1.0, 1.0)
                             mmr_ranked.append((conn_fact, conn_fact.retrieval_score))
                             existing_ids.add(conn_fact.id)
+                        else:
+                            for f_ex, _ in mmr_ranked:
+                                if f_ex.id == conn_fact.id:
+                                    f_ex.retrieval_score = max(getattr(f_ex, "retrieval_score", 0.0), 3.0)
                     mmr_ranked = sorted(mmr_ranked, key=lambda item: item[1], reverse=True)
             except Exception as e:
                 import logging
@@ -253,6 +257,26 @@ class RetrievalBudgetManager:
             f.retrieval_score = 99.0
             
         ranked_facts = pinned_facts + [f for f, s in mmr_ranked]
+
+        # Phase 5: Cross-Encoder Reranker (final context filtering)
+        if store_ref and hasattr(store_ref, "db") and hasattr(store_ref.db, "get_fact_relations"):
+            try:
+                for f in ranked_facts:
+                    rels = store_ref.db.get_fact_relations(f.id)
+                    if rels:
+                        f.retrieval_score = max(getattr(f, "retrieval_score", 0.0), 3.0)
+            except Exception:
+                pass
+
+        from companion.memory.reranker import CrossEncoderReranker
+        reranker = CrossEncoderReranker()
+        ranked_facts = reranker.rerank(
+            query,
+            ranked_facts,
+            top_k=self.max_facts,
+            faiss_scores=faiss_scores,
+            explicit_search=explicit_search,
+        )
 
         # Rank reflections (already filtered by FAISS in bot_core)
         active_refl = [r for r in reflections if r.status == "active"]
@@ -313,6 +337,14 @@ class RetrievalBudgetManager:
 
         # T5: Historical summaries (2000 tokens = 8000 chars)
         summaries = limit_list(summaries, 8000, lambda s: s)
+
+        from companion.temporal import format_relative_time
+        for f in ranked_facts:
+            date_str = getattr(f, "date", None) or getattr(f, "created_at", "")
+            if date_str:
+                rel = format_relative_time(date_str)
+                if rel:
+                    f.date = rel
 
         bundle = ContextBundle(
             facts=ranked_facts,

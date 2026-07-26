@@ -2,10 +2,84 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
+try:
+    from zoneinfo import ZoneInfo
+    MINSK_TZ = ZoneInfo("Europe/Minsk")
+except Exception:
+    MINSK_TZ = timezone(timedelta(hours=3))
+
 logger = logging.getLogger(__name__)
+
+
+def get_current_time_minsk() -> datetime:
+    """Return current time in Europe/Minsk timezone."""
+    return datetime.now(MINSK_TZ)
+
+
+def _plural_ru(n: int, form1: str, form2: str, form5: str) -> str:
+    n = abs(n) % 100
+    n1 = n % 10
+    if 10 < n < 20:
+        return form5
+    if 1 < n1 < 5:
+        return form2
+    if n1 == 1:
+        return form1
+    return form5
+
+
+def format_relative_time(ts_str: str, now: datetime | None = None) -> str:
+    """Convert absolute timestamp string into Russian human-readable relative time."""
+    if not ts_str or not ts_str.strip():
+        return ""
+    try:
+        ts_clean = ts_str.strip()
+        if "T" in ts_clean:
+            dt = datetime.fromisoformat(ts_clean)
+        elif " " in ts_clean:
+            dt = datetime.strptime(ts_clean[:19], "%Y-%m-%d %H:%M:%S")
+        elif len(ts_clean) == 10 and ts_clean.count("-") == 2:
+            dt = datetime.strptime(ts_clean, "%Y-%m-%d")
+        else:
+            return ts_str
+
+        now_dt = now or get_current_time_minsk()
+        if dt.tzinfo is not None and now_dt.tzinfo is None:
+            dt = dt.replace(tzinfo=None)
+        elif dt.tzinfo is None and now_dt.tzinfo is not None:
+            now_dt = now_dt.replace(tzinfo=None)
+
+        diff = now_dt - dt
+        seconds = diff.total_seconds()
+        if seconds < 60:
+            return "только что"
+        minutes = int(seconds // 60)
+        if minutes < 60:
+            return f"{minutes} {_plural_ru(minutes, 'минуту', 'минуты', 'минут')} назад"
+        hours = int(seconds // 3600)
+        if hours < 24:
+            return f"{hours} {_plural_ru(hours, 'час', 'часа', 'часов')} назад"
+        days = int(seconds // 86400)
+        if days == 1:
+            return "вчера"
+        if days == 2:
+            return "позавчера"
+        if days < 7:
+            return f"{days} {_plural_ru(days, 'день', 'дня', 'дней')} назад"
+        weeks = int(days // 7)
+        if weeks < 5:
+            return f"{weeks} {_plural_ru(weeks, 'неделю', 'недели', 'недель')} назад"
+        months = int(days // 30)
+        if months < 12:
+            return f"{months} {_plural_ru(months, 'месяц', 'месяца', 'месяцев')} назад"
+        years = max(1, int(days // 365))
+        return f"{years} {_plural_ru(years, 'год', 'года', 'лет')} назад"
+    except Exception:
+        return ts_str
+
 
 RUSSIAN_DAYS = {
     0: "Понедельник",
@@ -118,20 +192,21 @@ def generate_temporal_guidance(phase_name: str, day_name: str, gap_hours: float)
     return " ".join(guidelines)
 
 
-def build_temporal_context_block(store: Any) -> str:
+def build_temporal_context_block(store: Any = None) -> str:
     """Construct full markdown TEMPORAL & CONTEXTUAL AWARENESS block for system instruction."""
-    now = datetime.now()
+    now = get_current_time_minsk()
     now_str = now.strftime("%d.%m.%Y %H:%M")
     day_name = get_day_name_ru(now)
     phase_name, phase_cat = get_day_phase(now)
-    gap_hours, gap_desc = get_inactivity_gap(store)
+    gap_hours, gap_desc = get_inactivity_gap(store) if store else (0.0, "Диалог продолжается")
     guidance = generate_temporal_guidance(phase_name, day_name, gap_hours)
 
     lines = [
         "# TEMPORAL & CONTEXTUAL AWARENESS",
-        f"- Текущая дата и время: {day_name}, {now_str}",
+        f"Текущее локальное время: {day_name}, {now_str}. Анализируй время суток при ответе. Если сейчас глубокая ночь (с 01:00 до 05:00), а Иван пишет тебе, органично поинтересуйся, почему он не спит (возможно, опять засиделся в Reaper, играет в Dota 2 или пишет 'Ивангелие'). Утром (с 06:00 до 11:00) используй утренние приветствия.",
         f"- Фаза суток: {phase_name} ({phase_cat})",
         f"- Интервал с прошлого сообщения: {gap_desc}",
         f"- Контекстное указание: {guidance}",
     ]
     return "\n".join(lines)
+

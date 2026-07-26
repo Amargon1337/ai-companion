@@ -611,12 +611,13 @@ class ContextBundle:
             memory_parts.append("[Паттерны поведения пользователя]\n" + "\n".join(lines))
 
         if self.facts:
+            from companion.temporal import format_relative_time
             lines = []
             for f in self.facts:
                 date_str = getattr(f, "date", None) or getattr(f, "created_at", "")
-                if isinstance(date_str, str) and len(date_str) >= 10:
-                    date_str = date_str[:10]
-                lines.append(f"• [{f.memory_kind}|{date_str}] {sanitize_markup(f.fact) or ''}")
+                rel_time = format_relative_time(date_str) if date_str else ""
+                time_label = rel_time or (date_str[:10] if isinstance(date_str, str) and len(date_str) >= 10 else "недавно")
+                lines.append(f"• [{f.memory_kind}|{time_label}] {sanitize_markup(f.fact) or ''}")
             memory_parts.append("[Релевантные факты]\n" + "\n".join(lines))
         if self.summaries:
             sanitized_sum = [sanitize_markup(s) or "" for s in self.summaries]

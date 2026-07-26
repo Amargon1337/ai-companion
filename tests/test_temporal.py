@@ -49,3 +49,23 @@ def test_temporal_context_block():
     assert "# TEMPORAL & CONTEXTUAL AWARENESS" in block
     assert "Фаза суток:" in block
     assert "Интервал с прошлого сообщения:" in block
+    assert "Если сейчас глубокая ночь (с 01:00 до 05:00)" in block
+    assert "Утром (с 06:00 до 11:00)" in block
+
+
+def test_format_relative_time():
+    from datetime import datetime, timedelta
+    from companion.temporal import format_relative_time, get_current_time_minsk
+
+    now = datetime(2026, 7, 27, 12, 0, 0)
+    assert format_relative_time("2026-07-27T11:55:00", now=now) == "5 минут назад"
+    assert format_relative_time("2026-07-26T12:00:00", now=now) == "вчера"
+    assert format_relative_time("2026-07-13", now=now) == "2 недели назад"
+
+
+def test_get_current_time_minsk():
+    from companion.temporal import get_current_time_minsk
+    now_minsk = get_current_time_minsk()
+    assert now_minsk is not None
+    assert hasattr(now_minsk, "tzinfo")
+
