@@ -6,7 +6,12 @@ from companion.proactive.engagement import evaluate_engagement, record_ping_sent
 @pytest.fixture
 def clean_user_model():
     model = UserModel()
-    # Reset lock for testing if needed
+    model.data["proactivity"] = {
+        "last_ping_time": 0.0,
+        "consecutive_ignored_pings": 0,
+        "total_pings_sent": 0,
+    }
+    model.data["emotional_timeline"]["state_history"] = []
     return model
 
 def test_engagement_user_is_active(clean_user_model):

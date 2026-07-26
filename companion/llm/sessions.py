@@ -21,7 +21,8 @@ def build_system_instruction(
     precomputed_context: str | None = None,
 ) -> str:
     from companion.user_model import user_model
-    baseline_state = user_model.data.get("emotional_timeline", {}).get("baseline_state", "neutral")
+    effective_state, momentum_metrics = user_model.get_effective_emotional_state()
+    baseline_state = effective_state
     PROMPT_VERSION = f"v7_static_{baseline_state}"
     ivan = store.db.get_meta("legacy_profile", "")
     
@@ -31,9 +32,23 @@ def build_system_instruction(
     from companion.temporal import build_temporal_context_block
     temporal_block = build_temporal_context_block(store)
 
+    sensitivity_block = ""
+    if effective_state in ("depressed", "anxious") or momentum_metrics.get("energy", 0.5) < 0.35 or momentum_metrics.get("sadness", 0.0) > 0.40:
+        sensitivity_block = f"""
+# SENSITIVITY & TRIGGER GUARDS (EMOTIONAL MOMENTUM)
+[ТЕКУЩИЙ ЭМОЦИОНАЛЬНЫЙ ТРЕНД ИВАНА]:
+- Эффективное состояние: {effective_state} (Энергия: {momentum_metrics.get('energy', 0.5):.2f}, Усталость/Грусть: {momentum_metrics.get('sadness', 0.0):.2f}, Тревога: {momentum_metrics.get('anxiety', 0.0):.2f})
+- У Ивана зафиксирован спад сил / усталость за последние взаимодействия.
+
+ЖЕСТКИЕ ГРАНИЦЫ ЧУВСТВИТЕЛЬНОСТИ (АБСОЛЮТНЫЙ ПРИОРИТЕТ):
+1. НИКАКОЙ «пластиковой бодрости», фальшивого энтузиазма, восклицательных знаков и призывов «взбодриться», «держаться» или «не вешать нос».
+2. НИКАКИХ непрошеных советов, списков действий, нравоучений или попыток «решить проблему», если Иван прямо не просит совет.
+3. РЕЖИМ СПОКОЙНОГО ПРИСУТСТВИЯ: говори спокойно, тепло, лаконично и по делу. Признай тяжесть состояния как нормальный факт. Твой тон — тихий, надежный собеседник рядом, который понимает усталость.
+"""
+
     policy_shell = f"""# SYSTEM DIRECTIVES
 {temporal_block}
-
+{sensitivity_block}
 Each section is INDEPENDENT. Do not reinterpret, merge or summarize sections.
 Use each section only for its defined purpose.
 

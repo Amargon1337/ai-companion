@@ -122,6 +122,7 @@ class UserModel:
                 "baseline_state": "neutral",
                 "signals": [],
                 "state_variance": 0.5,
+                "state_history": [],
             },
             "proactivity": {
                 "last_ping_time": 0.0,
@@ -473,6 +474,82 @@ class UserModel:
     def _log_reflection(self, reflection: dict[str, Any]):
         reflection["timestamp"] = datetime.now().isoformat()
         audit_logger.info(json.dumps(reflection, ensure_ascii=False))
+
+    def record_emotional_state(self, mood: dict[str, float] | None, state: str | None = None) -> None:
+        """Записывает текущее эмоциональное состояние и настроение в историю инерции (Emotional Momentum)."""
+        if not mood or not isinstance(mood, dict):
+            return
+        with self._lock:
+            timeline = self.data.setdefault("emotional_timeline", {})
+            history = timeline.setdefault("state_history", [])
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "mood": {
+                    "anxiety": float(mood.get("anxiety", 0.0)),
+                    "anger": float(mood.get("anger", 0.0)),
+                    "sadness": float(mood.get("sadness", 0.0)),
+                    "energy": float(mood.get("energy", 0.5)),
+                },
+                "state": state or "neutral",
+            }
+            history.append(entry)
+            if len(history) > 30:
+                history.pop(0)
+            self._save_model()
+
+    def get_effective_emotional_state(self) -> tuple[str, dict[str, float]]:
+        """
+        Рассчитывает эффективное эмоциональное состояние Ивана с учетом экспоненциально
+        взвешенного тренда (Emotional Momentum) за последние взаимодействия.
+        """
+        with self._lock:
+            timeline = self.data.get("emotional_timeline", {})
+            baseline = timeline.get("baseline_state", "neutral")
+            history = timeline.get("state_history", [])
+
+        if not history:
+            return baseline, {"energy": 0.5, "sadness": 0.0, "anxiety": 0.0, "anger": 0.0}
+
+        now = datetime.now()
+        total_weight = 0.0
+        w_energy = 0.0
+        w_sadness = 0.0
+        w_anxiety = 0.0
+        w_anger = 0.0
+
+        for entry in history:
+            ts_str = entry.get("timestamp", "")
+            try:
+                dt = datetime.fromisoformat(ts_str)
+                hours_ago = max(0.0, (now - dt).total_seconds() / 3600.0)
+            except (ValueError, TypeError):
+                hours_ago = 12.0
+            weight = 0.5 ** (hours_ago / 36.0)
+            m = entry.get("mood", {})
+            w_energy += float(m.get("energy", 0.5)) * weight
+            w_sadness += float(m.get("sadness", 0.0)) * weight
+            w_anxiety += float(m.get("anxiety", 0.0)) * weight
+            w_anger += float(m.get("anger", 0.0)) * weight
+            total_weight += weight
+
+        if total_weight <= 0:
+            return baseline, {"energy": 0.5, "sadness": 0.0, "anxiety": 0.0, "anger": 0.0}
+
+        metrics = {
+            "energy": w_energy / total_weight,
+            "sadness": w_sadness / total_weight,
+            "anxiety": w_anxiety / total_weight,
+            "anger": w_anger / total_weight,
+        }
+
+        if metrics["energy"] < 0.35 or metrics["sadness"] > 0.40:
+            return "depressed", metrics
+        if metrics["anxiety"] > 0.45:
+            return "anxious", metrics
+        if metrics["anger"] > 0.45:
+            return "angry", metrics
+
+        return baseline, metrics
 
 
 # Global singleton

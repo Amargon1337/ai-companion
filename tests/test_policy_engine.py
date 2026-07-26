@@ -34,6 +34,7 @@ def test_build_system_instruction_depressed_state(mock_reasoning, mock_memory_st
     # Set the state to depressed
     from companion.user_model import user_model
     user_model.data["emotional_timeline"]["baseline_state"] = "depressed"
+    user_model.data["emotional_timeline"]["state_history"] = []
     
     # Invalidate cache if it existed
     from companion.llm.sessions import _PROMPT_CACHE
@@ -62,6 +63,7 @@ def test_build_system_instruction_fallback_state(mock_reasoning, mock_memory_sto
     # Set the state to an invalid one
     from companion.user_model import user_model
     user_model.data["emotional_timeline"]["baseline_state"] = "super_burnt_out_and_tired"
+    user_model.data["emotional_timeline"]["state_history"] = []
     
     # Invalidate cache if it existed
     from companion.llm.sessions import _PROMPT_CACHE

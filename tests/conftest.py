@@ -99,3 +99,21 @@ def sample_facts():
         make_fact("Пьёт амитриптилин 125мг", importance=8, tags=["medical"]),
         make_fact("Был в парке", importance=3, tags=[]),
     ]
+
+
+@pytest.fixture(autouse=True)
+def reset_user_model_state():
+    """Ensure user_model singleton is reset between tests."""
+    from companion.user_model import user_model
+    with user_model._lock:
+        user_model.data.setdefault("emotional_timeline", {})["baseline_state"] = "neutral"
+        user_model.data["emotional_timeline"]["state_history"] = []
+        user_model.data.setdefault("proactivity", {})["last_ping_time"] = 0.0
+        user_model.data.setdefault("proactivity", {})["consecutive_ignored_pings"] = 0
+    yield
+    with user_model._lock:
+        user_model.data.setdefault("emotional_timeline", {})["baseline_state"] = "neutral"
+        user_model.data["emotional_timeline"]["state_history"] = []
+        user_model.data.setdefault("proactivity", {})["last_ping_time"] = 0.0
+        user_model.data.setdefault("proactivity", {})["consecutive_ignored_pings"] = 0
+

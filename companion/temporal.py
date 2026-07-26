@@ -125,6 +125,8 @@ def get_inactivity_gap(store: Any) -> tuple[float, str]:
                 return 0.0, "Первое начало диалога"
             
             last_ts_str = row[0]
+            if not isinstance(last_ts_str, str):
+                return 0.0, "Первое начало диалога"
             # Handle ISO format
             if "T" in last_ts_str:
                 last_dt = datetime.fromisoformat(last_ts_str)
@@ -201,9 +203,18 @@ def build_temporal_context_block(store: Any = None) -> str:
     gap_hours, gap_desc = get_inactivity_gap(store) if store else (0.0, "Диалог продолжается")
     guidance = generate_temporal_guidance(phase_name, day_name, gap_hours)
 
+    from companion.user_model import user_model
+    effective_state, momentum_metrics = user_model.get_effective_emotional_state()
+    is_low_energy = effective_state in ("depressed", "anxious") or momentum_metrics.get("energy", 0.5) < 0.35 or momentum_metrics.get("sadness", 0.0) > 0.40
+
+    if is_low_energy:
+        morning_phrase = "Утром (с 06:00 до 11:00) учитывай зафиксированный спад сил Ивана после тяжелых дней. НЕ ИСПОЛЬЗУЙ бодрые утренние приветствия. Начни разговор мягко и спокойно без давления и восклицаний."
+    else:
+        morning_phrase = "Утром (с 06:00 до 11:00) используй утренние приветствия."
+
     lines = [
         "# TEMPORAL & CONTEXTUAL AWARENESS",
-        f"Текущее локальное время: {day_name}, {now_str}. Анализируй время суток при ответе. Если сейчас глубокая ночь (с 01:00 до 05:00), а Иван пишет тебе, органично поинтересуйся, почему он не спит (возможно, опять засиделся в Reaper, играет в Dota 2 или пишет 'Ивангелие'). Утром (с 06:00 до 11:00) используй утренние приветствия.",
+        f"Текущее локальное время: {day_name}, {now_str}. Анализируй время суток при ответе. Если сейчас глубокая ночь (с 01:00 до 05:00), а Иван пишет тебе, органично поинтересуйся, почему он не спит (возможно, опять засиделся в Reaper, играет в Dota 2 или пишет 'Ивангелие'). {morning_phrase}",
         f"- Фаза суток: {phase_name} ({phase_cat})",
         f"- Интервал с прошлого сообщения: {gap_desc}",
         f"- Контекстное указание: {guidance}",

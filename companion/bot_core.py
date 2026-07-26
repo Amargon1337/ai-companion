@@ -379,6 +379,9 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
         state.command = analysis["command"]
         state.needs_clarification = analysis.get("needs_clarification", "")
 
+        from companion.user_model import user_model
+        user_model.record_emotional_state(state.mood_state, state.user_state)
+
         await asyncio.to_thread(
             memory_store.log_message,
             "user", query, analysis["estimated_importance"],

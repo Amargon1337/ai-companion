@@ -315,7 +315,43 @@ class PolicyLayer:
                 line_text = "".join(t["text"] for t in pl["tokens"])
                 rebuilt_lines.append(line_text)
 
-        return "\n".join(rebuilt_lines)
+        result_text = "\n".join(rebuilt_lines)
+        return self.enforce_sensitivity_guards(result_text)
+
+    def enforce_sensitivity_guards(self, text: str, effective_state: str | None = None) -> str:
+        """
+        Фильтрует проявления «токсичного позитива» и избыточных восклицаний,
+        если Иван находится в состоянии спада сил, усталости или депрессии/тревоги.
+        """
+        if effective_state is None:
+            from companion.user_model import user_model
+            effective_state, _ = user_model.get_effective_emotional_state()
+
+        if not text or effective_state not in ("depressed", "anxious"):
+            return text
+        import re
+
+        # 1. Заменяем множественные и избыточные восклицательные знаки на точку
+        text = re.sub(r'!{2,}', '.', text)
+        text = re.sub(r'([a-zA-Zа-яА-ЯёЁ])!', r'\1.', text)
+
+        # 2. Фильтруем типовые лозунги токсичного позитива
+        toxic_patterns = [
+            r'(?i)\bне вешай нос\b[.,]?',
+            r'(?i)\bвсё будет хорошо\b[.,]?',
+            r'(?i)\bвсё будет отлично\b[.,]?',
+            r'(?i)\bглавное\s*—?\s*позитивный настрой\b[.,]?',
+            r'(?i)\bдавай взбодримся\b[.,]?',
+            r'(?i)\bулыбнись\b[.,]?',
+            r'(?i)\bдержи хвост пистолетом\b[.,]?',
+            r'(?i)\bвыше нос\b[.,]?',
+        ]
+        for pattern in toxic_patterns:
+            text = re.sub(pattern, '', text).strip()
+
+        # Очищаем возможные двойные пробелы после удаления фраз
+        text = re.sub(r'\s{2,}', ' ', text).strip()
+        return text
 
 
     def format_prompt_with_policy(
