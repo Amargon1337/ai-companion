@@ -168,3 +168,89 @@ def test_graphrag_retrieval_select_integration(tmp_path):
     finally:
         cfg.DATA_DIR = original_data_dir
         cfg.SQLITE_PATH = original_sqlite
+
+
+def test_parent_child_unpacking_integration(tmp_path):
+    """Test that Parent Summary facts unpack relevant dormant Child Facts via 'summarizes'."""
+    original_data_dir = cfg.DATA_DIR
+    original_sqlite = cfg.SQLITE_PATH
+    cfg.DATA_DIR = str(tmp_path)
+    cfg.SQLITE_PATH = str(tmp_path / "companion.db")
+
+    try:
+        store = MemoryStore()
+        store.vector.embeddings_enabled = True
+        with patch("companion.memory.vector_index._embed_texts", side_effect=_mock_embed):
+            parent_summary = Fact(
+                id="graphrag_summary",
+                fact="[Сводка за 2026-07] Иван изучал программирование на Rust",
+                date="2026-07",
+                importance=8,
+                confidence=0.9,
+                source="episodic_compression",
+                source_type="system",
+                memory_kind="summary",
+                tags=["episodic_summary", "coding"],
+                status="active",
+            )
+            child_relevant = Fact(
+                id="graphrag_child_relevant",
+                fact="Иван написал первую программу на языке Rust в июле",
+                date="2026-07-05",
+                importance=6,
+                confidence=0.9,
+                source="test",
+                source_type="test",
+                memory_kind="event",
+                tags=["coding", "rust"],
+                status="dormant",
+            )
+            child_irrelevant = Fact(
+                id="graphrag_child_irrelevant",
+                fact="Иван купил зеленый чай и печенье в магазине",
+                date="2026-07-06",
+                importance=5,
+                confidence=0.9,
+                source="test",
+                source_type="test",
+                memory_kind="event",
+                tags=["food"],
+                status="dormant",
+            )
+            store.add_fact(parent_summary)
+            store.add_fact(child_relevant)
+            store.add_fact(child_irrelevant)
+
+            rel1 = FactRelation(
+                from_id=parent_summary.id,
+                to_id=child_relevant.id,
+                relation="summarizes",
+                reason="Episodic compression",
+                confidence=0.9,
+            )
+            rel2 = FactRelation(
+                from_id=parent_summary.id,
+                to_id=child_irrelevant.id,
+                relation="summarizes",
+                reason="Episodic compression",
+                confidence=0.9,
+            )
+            store.add_relation(rel1)
+            store.add_relation(rel2)
+
+            retrieval_mgr = RetrievalBudgetManager(store=store)
+            bundle = retrieval_mgr.select(
+                query="программирование на Rust",
+                facts=[parent_summary],
+                reflections=[],
+                faiss_scores={parent_summary.id: 0.9, child_relevant.id: 0.85},
+            )
+
+            bundle_ids = [f.id for f in bundle.facts]
+            assert "graphrag_summary" in bundle_ids
+            assert "graphrag_child_relevant" in bundle_ids
+            assert "graphrag_child_irrelevant" not in bundle_ids
+    finally:
+        cfg.DATA_DIR = original_data_dir
+        cfg.SQLITE_PATH = original_sqlite
+

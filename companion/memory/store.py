@@ -386,6 +386,7 @@ class MemoryStore:
         max_hops: int = 2,
         max_facts: int = 10,
         min_confidence: float = 0.6,
+        exclude_relations: set[str] | None = None,
     ) -> list[tuple[Fact, int, str]]:
         """Multi-hop GraphRAG traversal: find active facts connected to anchor fact_ids.
 
@@ -428,6 +429,9 @@ class MemoryStore:
                     neighbor_id = from_id
                     rel_desc = inv_map.get(rel_type, f"inverse_{rel_type}")
                 else:
+                    continue
+
+                if exclude_relations and (rel_type in exclude_relations or rel_desc in exclude_relations):
                     continue
 
                 if neighbor_id in visited:

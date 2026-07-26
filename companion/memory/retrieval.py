@@ -205,7 +205,11 @@ class RetrievalBudgetManager:
                 anchor_ids = [f.id for f in pinned_facts] + [f.id for f, _ in mmr_ranked[:5]]
                 if anchor_ids:
                     conn_tuples = store_ref.get_connected_facts(
-                        fact_ids=anchor_ids, max_hops=2, max_facts=6, min_confidence=0.6
+                        fact_ids=anchor_ids,
+                        max_hops=2,
+                        max_facts=6,
+                        min_confidence=0.6,
+                        exclude_relations={"summarizes", "summarized_by", "inverse_summarizes", "inverse_summarized_by"},
                     )
                     existing_ids = {f.id for f in (pinned_facts + [f for f, _ in mmr_ranked])}
                     for conn_fact, hop_dist, rel_desc in conn_tuples:
@@ -217,6 +221,33 @@ class RetrievalBudgetManager:
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).warning("GraphRAG multi-hop retrieval failed: %s", e)
+
+            try:
+                # Parent-Child Unpacking (Phase 3+)
+                existing_ids = {f.id for f in pinned_facts} | {f.id for f, _ in mmr_ranked}
+                parent_candidates = list(pinned_facts) + [f for f, _ in mmr_ranked]
+                unpacked_children: list[tuple[Fact, float]] = []
+                for parent_fact in parent_candidates:
+                    if self._is_parent_summary(parent_fact, store_ref):
+                        child_ids = self._get_summary_child_ids(parent_fact.id, store_ref)
+                        for child_id in child_ids:
+                            if child_id in existing_ids:
+                                continue
+                            child_fact = store_ref.get_fact(child_id)
+                            if not child_fact or child_fact.status not in {"active", "dormant"}:
+                                continue
+                            rel_score = self._compute_child_relevance(query, child_fact, faiss_scores)
+                            if rel_score >= 0.75:
+                                parent_score = 10.0 if parent_fact.id in {p.id for p in pinned_facts} else getattr(parent_fact, "retrieval_score", 5.0)
+                                child_fact.retrieval_score = max(parent_score - 0.05, rel_score * 5.0)
+                                unpacked_children.append((child_fact, child_fact.retrieval_score))
+                                existing_ids.add(child_id)
+                if unpacked_children:
+                    mmr_ranked.extend(unpacked_children)
+                    mmr_ranked = sorted(mmr_ranked, key=lambda item: item[1], reverse=True)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("GraphRAG parent-child unpacking failed: %s", e)
 
         for f in pinned_facts:
             f.retrieval_score = 99.0
@@ -346,3 +377,60 @@ class RetrievalBudgetManager:
         # Phase 2.4: Pinned facts are identity and must be fully preserved
         pinned = sorted(pinned, key=lambda f: f.importance, reverse=True)
         return pinned
+
+    def _is_parent_summary(self, fact: Fact, store: Any = None) -> bool:
+        if fact.memory_kind == "summary":
+            return True
+        if any("summary" in str(t).lower() for t in fact.tags):
+            return True
+        if fact.source == "episodic_compression":
+            return True
+        if store and hasattr(store, "db") and hasattr(store.db, "get_fact_relations"):
+            for r in store.db.get_fact_relations(fact.id):
+                if r.get("from_id") == fact.id and r.get("relation") == "summarizes":
+                    return True
+                if r.get("to_id") == fact.id and r.get("relation") == "summarized_by":
+                    return True
+        return False
+
+    def _get_summary_child_ids(self, parent_id: str, store: Any) -> list[str]:
+        if not store or not hasattr(store, "db") or not hasattr(store.db, "get_fact_relations"):
+            return []
+        child_ids: list[str] = []
+        for rel in store.db.get_fact_relations(parent_id):
+            if rel.get("from_id") == parent_id and rel.get("relation") == "summarizes":
+                child_ids.append(str(rel.get("to_id")))
+            elif rel.get("to_id") == parent_id and rel.get("relation") == "summarized_by":
+                child_ids.append(str(rel.get("from_id")))
+        seen = set()
+        unique_ids = []
+        for cid in child_ids:
+            if cid not in seen and cid != parent_id:
+                seen.add(cid)
+                unique_ids.append(cid)
+        return unique_ids
+
+    def _compute_child_relevance(self, query: str, child_fact: Fact, faiss_scores: dict[str, float]) -> float:
+        if not query or not query.strip():
+            return 0.0
+        score = faiss_scores.get(child_fact.id, 0.0)
+        if score > 0.0:
+            return score
+
+        from companion.memory.text_sim import text_overlap
+        overlap_score = text_overlap(query, child_fact.fact)
+
+        q_lower = query.lower().strip()
+        f_lower = child_fact.fact.lower()
+        tags_lower = [str(t).lower() for t in child_fact.tags]
+
+        if q_lower in f_lower:
+            return 1.0
+
+        qw = set(q_lower.split())
+        fw = set(f_lower.split())
+        word_overlap = len(qw & fw) / max(len(qw), 1)
+        tag_hit = any(q_lower in t or t in q_lower for t in tags_lower)
+        bm25_sim = min(1.0, word_overlap * 0.85 + (0.25 if tag_hit else 0.0))
+
+        return max(overlap_score, bm25_sim)
