@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import sqlite3
 import struct
 from contextlib import closing, contextmanager
@@ -147,6 +148,11 @@ class VectorIndex:
         # Load existing database embeddings into memory index at startup
         self._load_index()
 
+    @property
+    def content_list(self) -> list[str]:
+        with self.lock:
+            return list(self.id_to_content.values())
+
     def test_embeddings(self) -> bool:
         """Perform a test embedding request to validate API config."""
         try:
@@ -188,6 +194,23 @@ class VectorIndex:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_type ON embeddings(content_type)")
             except sqlite3.OperationalError:
                 pass
+            try:
+                conn.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS embeddings_fts USING fts5(
+                        content,
+                        content_hash UNINDEXED,
+                        content_type UNINDEXED,
+                        tokenize='unicode61'
+                    )
+                """)
+                conn.execute("""
+                    INSERT INTO embeddings_fts(content, content_hash, content_type)
+                    SELECT content, content_hash, content_type
+                    FROM embeddings
+                    WHERE content_hash NOT IN (SELECT content_hash FROM embeddings_fts)
+                """)
+            except sqlite3.OperationalError as exc:
+                logger.warning("FTS5 table initialization or sync failed: %s", exc)
             conn.commit()
 
     @contextmanager
@@ -218,6 +241,7 @@ class VectorIndex:
                         self.id_to_type = {int(k): v for k, v in data.get("id_to_type", {}).items()}
                         self._next_id = data.get("next_id", 0)
                         self._is_initialized = True
+                        self._sync_fts()
                         return
                     except Exception as e:
                         logger.warning(f"Failed to load FAISS index from disk, rebuilding: {e}")
@@ -303,6 +327,7 @@ class VectorIndex:
             
         self._is_initialized = True
         self.save_index_to_disk()
+        self._sync_fts()
 
     def _content_hash(self, text: str) -> str:
         import hashlib
@@ -330,6 +355,15 @@ class VectorIndex:
                            VALUES (?, ?, ?, ?)""",
                         (h, text, blob, content_type),
                     )
+                if content_type != "query":
+                    try:
+                        conn.execute("DELETE FROM embeddings_fts WHERE content_hash=?", (h,))
+                        conn.execute(
+                            "INSERT INTO embeddings_fts (content, content_hash, content_type) VALUES (?, ?, ?)",
+                            (text, h, content_type),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
                 
             if content_type == "query":
                 return
@@ -440,13 +474,181 @@ class VectorIndex:
         for text, vec in zip(missing_texts, vectors):
             self.upsert_embedding(text, vec, content_type)
 
-    def search(self, query: str, top_k: int = 10, content_type: str | None = None) -> list[dict[str, Any]]:
+    def _sync_fts(self) -> None:
+        """Synchronize FTS5 virtual table with loaded index."""
+        with self.lock:
+            if not self._is_initialized:
+                return
+            items = [
+                (self.id_to_content[idx], self.id_to_hash[idx], self.id_to_type.get(idx, "fact"))
+                for idx in self.id_to_content
+            ]
+        with self._conn() as conn:
+            try:
+                conn.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS embeddings_fts USING fts5(
+                        content,
+                        content_hash UNINDEXED,
+                        content_type UNINDEXED,
+                        tokenize='unicode61'
+                    )
+                """)
+                existing_hashes = {
+                    row[0]
+                    for row in conn.execute("SELECT content_hash FROM embeddings_fts").fetchall()
+                }
+                new_items = [item for item in items if item[1] not in existing_hashes]
+                if new_items:
+                    conn.executemany(
+                        "INSERT INTO embeddings_fts (content, content_hash, content_type) VALUES (?, ?, ?)",
+                        new_items,
+                    )
+                valid_hashes = {item[1] for item in items}
+                to_delete = existing_hashes - valid_hashes
+                if to_delete:
+                    conn.executemany(
+                        "DELETE FROM embeddings_fts WHERE content_hash=?",
+                        [(h,) for h in to_delete],
+                    )
+            except sqlite3.OperationalError as exc:
+                logger.warning("FTS5 table synchronization failed: %s", exc)
+
+    def search_bm25(self, query: str, top_k: int = 10, content_type: str | None = None) -> list[dict[str, Any]]:
+        """Search full-text SQLite FTS5 index using BM25 ranking."""
+        terms = re.findall(r"[^\W\d_]+|\d+", query.lower(), re.UNICODE)
+        terms = [t for t in terms if len(t) >= 2]
+        if not terms:
+            return []
+
+        fts_query = " OR ".join(f'"{t}"' for t in set(terms))
+
+        with self.lock:
+            if not self._is_initialized:
+                self._load_index()
+
+        with self._conn() as conn:
+            try:
+                if content_type:
+                    cursor = conn.execute(
+                        """
+                        SELECT content, content_hash, bm25(embeddings_fts) as bm25_score
+                        FROM embeddings_fts
+                        WHERE embeddings_fts MATCH ? AND content_type = ?
+                        ORDER BY bm25_score ASC
+                        LIMIT ?
+                        """,
+                        (fts_query, content_type, min(500, top_k * 5)),
+                    )
+                else:
+                    cursor = conn.execute(
+                        """
+                        SELECT content, content_hash, bm25(embeddings_fts) as bm25_score
+                        FROM embeddings_fts
+                        WHERE embeddings_fts MATCH ?
+                        ORDER BY bm25_score ASC
+                        LIMIT ?
+                        """,
+                        (fts_query, min(500, top_k * 5)),
+                    )
+                rows = cursor.fetchall()
+                results = []
+                for idx, (content, content_hash, bm25_score) in enumerate(rows, start=1):
+                    results.append({
+                        "content": content,
+                        "content_hash": content_hash,
+                        "bm25_score": float(bm25_score),
+                        "bm25_rank": idx,
+                    })
+                return results[:top_k]
+            except sqlite3.OperationalError as exc:
+                logger.warning("FTS5 BM25 search failed: %s", exc)
+                return []
+
+    def search_hybrid(
+        self,
+        query: str,
+        top_k: int = 10,
+        content_type: str | None = None,
+        rrf_k: int = 60,
+        alpha: float = 0.5,
+    ) -> list[dict[str, Any]]:
+        """Combine FAISS vector search and SQLite FTS5 BM25 search via Reciprocal Rank Fusion (RRF)."""
+        vec_results = self.search(query, top_k=max(30, top_k * 3), content_type=content_type, hybrid=False)
+        bm25_results = self.search_bm25(query, top_k=max(30, top_k * 3), content_type=content_type)
+
+        if not vec_results and not bm25_results:
+            return []
+
+        by_hash: dict[str, dict[str, Any]] = {}
+
+        for rank, item in enumerate(vec_results, start=1):
+            h = item["content_hash"]
+            by_hash[h] = {
+                "content": item["content"],
+                "content_hash": h,
+                "vector_score": float(item["score"]),
+                "vec_rank": rank,
+                "bm25_rank": None,
+                "bm25_score": None,
+            }
+
+        for rank, item in enumerate(bm25_results, start=1):
+            h = item["content_hash"]
+            if h not in by_hash:
+                by_hash[h] = {
+                    "content": item["content"],
+                    "content_hash": h,
+                    "vector_score": 0.5,
+                    "vec_rank": None,
+                    "bm25_rank": rank,
+                    "bm25_score": float(item["bm25_score"]),
+                }
+            else:
+                by_hash[h]["bm25_rank"] = rank
+                by_hash[h]["bm25_score"] = float(item["bm25_score"])
+
+        combined: list[dict[str, Any]] = []
+        max_possible_rrf = 2.0 / (rrf_k + 1)
+
+        for h, data in by_hash.items():
+            rrf_score = 0.0
+            if data["vec_rank"] is not None:
+                rrf_score += 1.0 / (rrf_k + data["vec_rank"])
+            if data["bm25_rank"] is not None:
+                rrf_score += 1.0 / (rrf_k + data["bm25_rank"])
+
+            norm_rrf = min(1.0, rrf_score / max_possible_rrf)
+            vec_score = data["vector_score"]
+            combined_score = alpha * vec_score + (1.0 - alpha) * norm_rrf
+
+            combined.append({
+                "content": data["content"],
+                "content_hash": h,
+                "score": round(combined_score, 4),
+                "vector_score": round(vec_score, 4),
+                "rrf_score": round(rrf_score, 6),
+                "bm25_rank": data["bm25_rank"],
+            })
+
+        combined.sort(key=lambda x: x["score"], reverse=True)
+        return combined[:top_k]
+
+    def search(
+        self,
+        query: str,
+        top_k: int = 10,
+        content_type: str | None = None,
+        hybrid: bool = True,
+    ) -> list[dict[str, Any]]:
         if not self.embeddings_enabled:
             return []
         with self.lock:
             if not self._is_initialized:
                 self._load_index()
-            
+
+        if hybrid:
+            return self.search_hybrid(query, top_k=top_k, content_type=content_type)
+
         qvec = self.compute_and_cache(query, content_type="query")
         if qvec is None:
             return []
@@ -509,6 +711,13 @@ class VectorIndex:
                     "UPDATE facts SET embedding=NULL WHERE fact=?",
                     [(t,) for t in texts],
                 )
+                try:
+                    conn.executemany(
+                        "DELETE FROM embeddings_fts WHERE content_hash=?",
+                        [(h,) for h in hashes],
+                    )
+                except sqlite3.OperationalError:
+                    pass
             
             import numpy as np
             ids_to_remove = []

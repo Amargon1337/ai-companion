@@ -48,6 +48,34 @@ class MemoryDatabase:
         logging.getLogger(__name__).warning(f"Error on PRAGMA optimize: {e}")
       self.conn.close()
 
+  def archive_audit_log(self, days: int = 30) -> int:
+    """Archive audit_log records older than `days` into data/audit_archive.db."""
+    archive_path = os.path.join(os.path.dirname(self.path), "audit_archive.db")
+    with self._lock:
+      self.conn.execute(f"ATTACH DATABASE '{archive_path}' AS archive;")
+      self.conn.execute("""
+        CREATE TABLE IF NOT EXISTS archive.audit_log (
+          audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          table_name TEXT NOT NULL,
+          record_id TEXT NOT NULL,
+          action TEXT NOT NULL,
+          old_state TEXT,
+          new_state TEXT,
+          timestamp TEXT
+        );
+      """)
+      res = self.conn.execute("""
+        INSERT INTO archive.audit_log (table_name, record_id, action, old_state, new_state, timestamp)
+        SELECT table_name, record_id, action, old_state, new_state, timestamp FROM main.audit_log
+        WHERE timestamp < datetime('now', '-' || ? || ' days');
+      """, (days,))
+      moved = res.rowcount
+      self.conn.execute("DELETE FROM main.audit_log WHERE timestamp < datetime('now', '-' || ? || ' days');", (days,))
+      self.conn.commit()
+      self.conn.execute("DETACH DATABASE archive;")
+      self.conn.commit()
+      return moved
+
   @contextmanager
   def _conn(self) -> Generator[sqlite3.Connection, None, None]:
     with self._lock:
@@ -142,6 +170,7 @@ class MemoryDatabase:
           created_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_beliefs_status_composite ON beliefs(status, importance DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_beliefs_unique_text ON beliefs(belief);
 
         CREATE TABLE IF NOT EXISTS patterns (
           id TEXT PRIMARY KEY,
@@ -284,25 +313,6 @@ class MemoryDatabase:
         );
         CREATE INDEX IF NOT EXISTS idx_causal_links_confidence ON causal_links(confidence);
 
-        CREATE TABLE IF NOT EXISTS predictions (
-          prediction_id TEXT PRIMARY KEY,
-          hypothesis TEXT NOT NULL,
-          confidence REAL DEFAULT 0.5,
-          timeframe TEXT DEFAULT '',
-          conditions TEXT DEFAULT '[]',
-          based_on TEXT DEFAULT '[]',
-          outcome TEXT DEFAULT 'pending',
-          created_at TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_predictions_outcome ON predictions(outcome);
-
-        CREATE TABLE IF NOT EXISTS todos (
-          id TEXT PRIMARY KEY,
-          text TEXT NOT NULL,
-          done INTEGER DEFAULT 0,
-          created_at TEXT,
-          completed_at TEXT
-        );
 
         CREATE TABLE IF NOT EXISTS monthbooks (
           ym TEXT PRIMARY KEY,
@@ -822,34 +832,6 @@ class MemoryDatabase:
   async def async_delete_causal_link(self, link_id: str) -> bool:
     return await asyncio.to_thread(self.delete_causal_link, link_id)
 
-  def upsert_prediction(self, row: dict[str, Any]) -> None:
-    with self._conn() as conn:
-      self._upsert_prediction_conn(conn, row)
-
-  async def async_upsert_prediction(self, row: dict[str, Any]) -> None:
-    await asyncio.to_thread(self.upsert_prediction, row)
-
-  def list_predictions(self, outcome: str | None = None) -> list[dict[str, Any]]:
-    with self._conn() as conn:
-      if outcome is None:
-        rows = conn.execute("SELECT * FROM predictions ORDER BY created_at DESC").fetchall()
-      else:
-        rows = conn.execute(
-          "SELECT * FROM predictions WHERE outcome=? ORDER BY created_at DESC",
-          (outcome,),
-        ).fetchall()
-    return [self._row_prediction(r) for r in rows]
-
-  async def async_list_predictions(self, outcome: str | None = None) -> list[dict[str, Any]]:
-    return await asyncio.to_thread(self.list_predictions, outcome)
-
-  def delete_prediction(self, prediction_id: str) -> bool:
-    with self._conn() as conn:
-      cur = conn.execute("DELETE FROM predictions WHERE prediction_id=?", (prediction_id,))
-      return cur.rowcount > 0
-
-  async def async_delete_prediction(self, prediction_id: str) -> bool:
-    return await asyncio.to_thread(self.delete_prediction, prediction_id)
 
   def _row_goal(self, row: sqlite3.Row) -> dict[str, Any]:
     d = dict(row)
@@ -862,11 +844,7 @@ class MemoryDatabase:
     d["evidence"] = _loads(d.get("evidence"))
     return d
 
-  def _row_prediction(self, row: sqlite3.Row) -> dict[str, Any]:
-    d = dict(row)
-    d["conditions"] = _loads(d.get("conditions"))
-    d["based_on"] = _loads(d.get("based_on"))
-    return d
+
 
   def get_meta(self, key: str, default: str = "0") -> str:
     with self._conn() as conn:
@@ -1489,56 +1467,6 @@ class MemoryDatabase:
   async def async_list_permanent_notes(self) -> list[str]:
     return await asyncio.to_thread(self.list_permanent_notes)
 
-  def save_todo(self, task_id: str, text: str, done: bool = False, created_at: str | None = None) -> None:
-    from datetime import datetime
-    created_at = created_at or datetime.now().isoformat()
-    with self._conn() as conn:
-      conn.execute(
-        "INSERT INTO todos(id,text,done,created_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET text=excluded.text, done=excluded.done",
-        (task_id, text, int(done), created_at),
-      )
-
-  async def async_save_todo(self, task_id: str, text: str, done: bool = False) -> None:
-    await asyncio.to_thread(self.save_todo, task_id, text, done)
-
-  def list_todos(self, include_done: bool = True) -> list[dict[str, Any]]:
-    with self._conn() as conn:
-      if include_done:
-        rows = conn.execute("SELECT * FROM todos ORDER BY done ASC, created_at ASC").fetchall()
-      else:
-        rows = conn.execute("SELECT * FROM todos WHERE done=0 ORDER BY created_at ASC").fetchall()
-    return [dict(r) for r in rows]
-
-  async def async_list_todos(self, include_done: bool = True) -> list[dict[str, Any]]:
-    return await asyncio.to_thread(self.list_todos, include_done)
-
-  def complete_todo(self, task_id: str) -> bool:
-    from datetime import datetime
-    with self._conn() as conn:
-      cur = conn.execute(
-        "UPDATE todos SET done=1, completed_at=? WHERE id=?",
-        (datetime.now().isoformat(), task_id),
-      )
-      return cur.rowcount > 0
-
-  async def async_complete_todo(self, task_id: str) -> bool:
-    return await asyncio.to_thread(self.complete_todo, task_id)
-
-  def delete_todo(self, task_id: str) -> bool:
-    with self._conn() as conn:
-      cur = conn.execute("DELETE FROM todos WHERE id=?", (task_id,))
-      return cur.rowcount > 0
-
-  async def async_delete_todo(self, task_id: str) -> bool:
-    return await asyncio.to_thread(self.delete_todo, task_id)
-
-  def clear_done_todos(self) -> int:
-    with self._conn() as conn:
-      cur = conn.execute("DELETE FROM todos WHERE done=1")
-      return cur.rowcount
-
-  async def async_clear_done_todos(self) -> int:
-    return await asyncio.to_thread(self.clear_done_todos)
 
   def save_monthbook(self, ym: str, content: str) -> None:
     from datetime import datetime

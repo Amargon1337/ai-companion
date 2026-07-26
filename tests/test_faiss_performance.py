@@ -60,10 +60,18 @@ def test_faiss_correctness_after_add_and_delete(tmp_path):
     cfg.DATA_DIR = str(tmp_path)
     cfg.SQLITE_PATH = str(tmp_path / "companion.db")
     
+    def _mock_embed(texts):
+        import hashlib
+        res = []
+        for t in texts:
+            h = int(hashlib.md5(t.encode("utf-8")).hexdigest()[:8], 16)
+            res.append([float((h >> (i % 32)) & 1) + 0.1 for i in range(768)])
+        return res
+
     try:
         store = MemoryStore()
         store.vector.embeddings_enabled = True
-        with patch("companion.memory.vector_index._embed_texts", lambda texts: [[0.1] * 768 for _ in texts]):
+        with patch("companion.memory.vector_index._embed_texts", side_effect=_mock_embed):
             store.vector.embeddings_enabled = True
             # 1. Add first fact
             fact1 = Fact(

@@ -754,6 +754,7 @@ async def run_compress_pipeline(
 
         await generate_personality_snapshot(store, summary)
         await asyncio.to_thread(store.apply_importance_decay)
+        await asyncio.to_thread(store.compress_dormant_episodes)
         await asyncio.to_thread(store.analyze_retrieval_effectiveness)
 
         # Обновить knowledge_domains на основе новых фактов

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -87,24 +88,57 @@ def sanitize_and_scan_legacy_files() -> None:
 
     # 2. Sanitize world model
     try:
-        data = db.get_state_model("world")
-        if data:
+        wm_path = os.path.join(DATA_DIR, "world_model.json")
+        if os.path.exists(wm_path):
+            with open(wm_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
             contexts = data.get("active_contexts", [])
-            new_active = []
+            pending_contexts = data.get("pending_review_contexts", [])
+            sanitized_contexts = []
             updated = False
             for ctx in contexts:
-                sanitized = sanitize_markup(ctx) or ""
-                if _looks_like_injection(sanitized):
+                sanitized_ctx = sanitize_markup(ctx) or ""
+                if _looks_like_injection(sanitized_ctx):
+                    pending_contexts.append(ctx)
                     with open(quarantine_log_path, "a", encoding="utf-8") as qf:
-                        qf.write(f"[{datetime.now().isoformat()}] [SUSPICIOUS] [world_model] {ctx}\n")
+                        qf.write(f"[{datetime.now().isoformat()}] [SUSPICIOUS] [world_model.json] {ctx}\n")
+                    logger.warning("Suspicious injection pattern detected in world_model.json! Moved to pending_review_contexts and logged.")
                     updated = True
-                else:
-                    new_active.append(sanitized)
-                    if sanitized != ctx:
-                        updated = True
+                    continue
+                if sanitized_ctx != ctx:
+                    updated = True
+                sanitized_contexts.append(sanitized_ctx)
             if updated:
-                data["active_contexts"] = new_active
+                data["active_contexts"] = sanitized_contexts
+                data["pending_review_contexts"] = pending_contexts
+                tmp = wm_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, wm_path)
+                logger.info("world_model.json updated (sanitized and/or quarantined).")
                 db.save_state_model("world", data)
+        else:
+            data = db.get_state_model("world")
+            if data:
+                contexts = data.get("active_contexts", [])
+                pending_contexts = data.get("pending_review_contexts", [])
+                new_active = []
+                updated = False
+                for ctx in contexts:
+                    sanitized = sanitize_markup(ctx) or ""
+                    if _looks_like_injection(sanitized):
+                        pending_contexts.append(ctx)
+                        with open(quarantine_log_path, "a", encoding="utf-8") as qf:
+                            qf.write(f"[{datetime.now().isoformat()}] [SUSPICIOUS] [world_model] {ctx}\n")
+                        updated = True
+                    else:
+                        new_active.append(sanitized)
+                        if sanitized != ctx:
+                            updated = True
+                if updated:
+                    data["active_contexts"] = new_active
+                    data["pending_review_contexts"] = pending_contexts
+                    db.save_state_model("world", data)
     except Exception as e:
         logger.error(f"Error sanitizing world model: {e}")
 

@@ -68,10 +68,12 @@ class RetrievalBudgetManager:
         char_budget: int = RETRIEVAL_CHAR_BUDGET,
         max_facts: int = RETRIEVAL_MAX_FACTS,
         max_reflections: int = RETRIEVAL_MAX_REFLECTIONS,
+        store: Any = None,
     ) -> None:
         self.char_budget = char_budget
         self.max_facts = max_facts
         self.max_reflections = max_reflections
+        self.store = store
 
     def select(
         self,
@@ -97,6 +99,7 @@ class RetrievalBudgetManager:
         comm_prefs: "Any" = None,
         human_model: "Any" = None,
         life_transitions: "Any" = None,
+        store: "Any" = None,
     ) -> ContextBundle:
         summaries = summaries or []
         active_goals = active_goals or []
@@ -196,6 +199,25 @@ class RetrievalBudgetManager:
             
         mmr_ranked = sorted(mmr_ranked, key=lambda item: item[1], reverse=True)
         
+        store_ref = store or getattr(self, "store", None)
+        if store_ref is not None:
+            try:
+                anchor_ids = [f.id for f in pinned_facts] + [f.id for f, _ in mmr_ranked[:5]]
+                if anchor_ids:
+                    conn_tuples = store_ref.get_connected_facts(
+                        fact_ids=anchor_ids, max_hops=2, max_facts=6, min_confidence=0.6
+                    )
+                    existing_ids = {f.id for f in (pinned_facts + [f for f, _ in mmr_ranked])}
+                    for conn_fact, hop_dist, rel_desc in conn_tuples:
+                        if conn_fact.id not in existing_ids:
+                            conn_fact.retrieval_score = max(4.0 - hop_dist * 1.0, 1.0)
+                            mmr_ranked.append((conn_fact, conn_fact.retrieval_score))
+                            existing_ids.add(conn_fact.id)
+                    mmr_ranked = sorted(mmr_ranked, key=lambda item: item[1], reverse=True)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("GraphRAG multi-hop retrieval failed: %s", e)
+
         for f in pinned_facts:
             f.retrieval_score = 99.0
             

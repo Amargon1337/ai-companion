@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
+from companion.config import MODEL_NAME
 from companion.llm import client as llm
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,7 @@ async def extract_prospective_tasks(store, message_text: str, source_message_id:
         message=clean[:1500],
     )
     try:
-        raw = await llm.aio_oneshot(prompt, model="gemini-3.1-flash-lite")
+        raw = await llm.aio_oneshot(prompt, model=MODEL_NAME)
         items = llm.parse_json_array(raw)
     except Exception as exc:
         logger.debug("Prospective extraction skipped: %s", exc)

@@ -105,46 +105,6 @@ class CausalLink:
         return cls(**data)
 
 
-class Prediction:
-    """Прогноз о будущем состоянии."""
-
-    def __init__(
-        self,
-        hypothesis: str,
-        confidence: float,
-        timeframe: str,  # "1 week", "1 month", etc.
-        conditions: list[str] | None = None,
-        based_on: list[str] | None = None,
-        outcome: str | None = None,  # verified, falsified, pending
-        created_at: str | None = None,
-        prediction_id: str | None = None,
-    ):
-        self.hypothesis = hypothesis
-        self.confidence = confidence
-        self.timeframe = timeframe
-        self.conditions = conditions or []
-        self.based_on = based_on or []
-        self.outcome = outcome or "pending"
-        self.created_at = created_at or datetime.now().isoformat()
-        self.prediction_id = prediction_id or f"pred_{os.urandom(4).hex()}"
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "prediction_id": self.prediction_id,
-            "hypothesis": self.hypothesis,
-            "confidence": self.confidence,
-            "timeframe": self.timeframe,
-            "conditions": self.conditions,
-            "based_on": self.based_on,
-            "outcome": self.outcome,
-            "created_at": self.created_at,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Prediction:
-        return cls(**data)
-
-
 class ReasoningEngine:
     """Движок разума — модель мира, цели, причинность, прогнозы."""
 
@@ -223,23 +183,6 @@ class ReasoningEngine:
         result = []
         for _, link in scored[:limit]:
             result.append(f"• {link.cause} -> {link.effect} ({link.confidence:.0%})")
-        return result
-
-    def get_prediction_context(self, query: str, limit: int = 3) -> list[str]:
-        predictions = self.list_predictions("pending")
-        if not predictions:
-            return []
-        q = query.lower()
-        scored = []
-        for pred in predictions:
-            haystack = f"{pred.hypothesis} {' '.join(pred.conditions)} {' '.join(pred.based_on)}".lower()
-            score = sum(1 for word in q.split() if len(word) > 3 and word in haystack)
-            if score > 0 or self._is_future_query(query):
-                scored.append((score + pred.confidence, pred))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        result = []
-        for _, pred in scored[:limit]:
-            result.append(f"• {pred.hypothesis} [{pred.confidence:.0%}] | {pred.timeframe}")
         return result
 
     def get_world_model_context(self, query: str = "") -> str:
@@ -369,18 +312,6 @@ class ReasoningEngine:
         dfs(start, 0)
         return chain
 
-    # ═══ Predictions ═══
-
-    def add_prediction(self, prediction: Prediction) -> None:
-        """Добавить прогноз."""
-        self.db.upsert_prediction(prediction.to_dict())
-
-    def list_predictions(self, outcome: str | None = None) -> list[Prediction]:
-        """Список прогнозов."""
-        predictions = [Prediction.from_dict(data) for data in self.db.list_predictions(outcome)]
-
-        return sorted(predictions, key=lambda p: p.created_at, reverse=True)
-
     # ═══ Reasoning ═══
 
     def build_situation_model(self, goal_id: str | None = None) -> str:
@@ -437,56 +368,6 @@ class ReasoningEngine:
             lines.append("▶️ Следующие шаги:")
             for i, action in enumerate(goal.next_actions[:3], 1):
                 lines.append(f"  {i}. {action}")
-
-        return "\n".join(lines)
-
-    def analyze_causality(self, event: str) -> str:
-        """Анализ причинно-следственных связей для события."""
-        chain = self.get_causal_chain(event, max_depth=3)
-
-        if not chain:
-            return f"Нет установленных причинно-следственных связей для '{event}'."
-
-        lines = [
-            f"🔗 Причинно-следственная цепочка от '{event}':",
-            "",
-        ]
-
-        for cause, effect, conf in chain:
-            conf_bar = "█" * int(conf * 10) + "░" * (10 - int(conf * 10))
-            lines.append(f"{cause}")
-            lines.append(f"  ↓ [{conf_bar}] {conf:.0%}")
-            lines.append(f"{effect}")
-            lines.append("")
-
-        return "\n".join(lines)
-
-    def get_predictions_summary(self) -> str:
-        """Сводка по прогнозам."""
-        pending = self.list_predictions("pending")
-        verified = self.list_predictions("verified")
-        falsified = self.list_predictions("falsified")
-
-        total = len(pending) + len(verified) + len(falsified)
-        accuracy = len(verified) / (len(verified) + len(falsified)) if (len(verified) + len(falsified)) > 0 else 0
-
-        lines = [
-            "🔮 Прогнозы:",
-            "",
-            f"Всего: {total}",
-            f"Ожидают проверки: {len(pending)}",
-            f"Подтвердились: {len(verified)}",
-            f"Не подтвердились: {len(falsified)}",
-            f"Точность: {accuracy:.0%}" if (len(verified) + len(falsified)) > 0 else "Точность: N/A",
-            "",
-        ]
-
-        if pending:
-            lines.append("Активные прогнозы:")
-            for pred in pending[:3]:
-                conf_bar = "█" * int(pred.confidence * 10) + "░" * (10 - int(pred.confidence * 10))
-                lines.append(f"  • {pred.hypothesis}")
-                lines.append(f"    [{conf_bar}] {pred.confidence:.0%} | {pred.timeframe}")
 
         return "\n".join(lines)
 

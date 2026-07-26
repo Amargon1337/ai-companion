@@ -8,7 +8,17 @@ from typing import Any, Literal
 
 MemoryKind = Literal["permanent", "state", "event"]
 FactStatus = Literal["active", "superseded", "inactive", "archived", "dormant", "pending_review"]
-RelationType = Literal["supersedes", "contradicts", "confirms", "related_to"]
+RelationType = Literal[
+    "supersedes",
+    "contradicts",
+    "confirms",
+    "related_to",
+    "caused_by",
+    "causes",
+    "supports",
+    "summarized_by",
+    "summarizes",
+]
 InsightStatus = Literal["active", "archived", "refuted", "aging", "stale"]
 
 

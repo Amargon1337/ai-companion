@@ -90,11 +90,10 @@ def _bootstrap_log(msg: str) -> None:
 
 
 
-MODEL_NAME = "gemini-3.1-flash-lite"
-FINAL_RESPONSE_MODEL = "gemini-3.1-flash-lite"
-# Для поиска с Google Search grounding используем Gemini 2.5 Flash
-# Поддерживает grounding и работает на бесплатном тарифе (июнь 2026)
-SEARCH_MODEL = "gemini-3.1-flash-lite"
+MODEL_NAME = os.getenv("MODEL_NAME", "gemini-3.5-flash-lite")
+FINAL_RESPONSE_MODEL = os.getenv("FINAL_RESPONSE_MODEL", "gemini-3.5-flash-lite")
+# Для поиска с Google Search grounding используем Gemini Flash Lite
+SEARCH_MODEL = os.getenv("SEARCH_MODEL", "gemini-3.5-flash-lite")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "768"))
 

@@ -48,9 +48,9 @@ def test_build_system_instruction_depressed_state(mock_reasoning, mock_memory_st
     assert "Ivan DB" in prompt
     
     # 2. Assert strategy and tone are depressed
-    assert "мягкий и бережный тон" in prompt
-    assert "НИКАКОГО сарказма" in prompt
-    assert "валидируй эмоции" in prompt
+    assert "спокойный, сдержанный тон" in prompt
+    assert "сарказма" in prompt
+    assert "признай тяжесть состояния как системный факт" in prompt
     assert "НИКАКИХ непрошеных советов" in prompt
     
     # 3. Assert NO neutral or energized tones leaked

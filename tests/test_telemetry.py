@@ -6,26 +6,28 @@ from companion.storage.sqlite_db import MemoryDatabase
 
 @pytest.fixture
 def clean_db():
-    # Use a temporary DB for testing
     test_db_path = "test_telemetry.db"
-    if os.path.exists(test_db_path):
-        os.remove(test_db_path)
-        
-    db = MemoryDatabase(test_db_path)
-    
-    # We must patch MemoryDatabase in telemetry to use this test db,
-    # or just rely on the fact that MemoryDatabase without args uses SQLITE_PATH
-    # So let's patch the SQLITE_PATH in companion.config
     import companion.config
     old_path = companion.config.SQLITE_PATH
     companion.config.SQLITE_PATH = test_db_path
     
+    if os.path.exists(test_db_path):
+        try:
+            os.remove(test_db_path)
+        except OSError:
+            pass
+        
+    db = MemoryDatabase(test_db_path)
+    
     yield db
     
+    db.close()
     companion.config.SQLITE_PATH = old_path
     if os.path.exists(test_db_path):
         try:
             os.remove(test_db_path)
+        except OSError:
+            pass
         except:
             pass
 

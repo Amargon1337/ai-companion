@@ -178,17 +178,33 @@ def _get_aio_client():
     return _aio_client
 
 
-async def aio_oneshot(prompt: str, model: str = MODEL_NAME, **kwargs: Any) -> str:
+async def aio_oneshot(prompt: str, model: str = MODEL_NAME, timeout: float = 25.0, **kwargs: Any) -> str:
     c = _get_aio_client()
-    temp = c.aio.chats.create(model=model, config=make_config(**kwargs))
-    r = await temp.send_message(prompt)
-    return (r.text or "").strip().replace("```json", "").replace("```", "").strip()
+    async def _call():
+        temp = c.aio.chats.create(model=model, config=make_config(**kwargs))
+        r = await temp.send_message(prompt)
+        return (r.text or "").strip().replace("```json", "").replace("```", "").strip()
+
+    try:
+        return await asyncio.wait_for(_call(), timeout=timeout)
+    except asyncio.TimeoutError:
+        import logging
+        logging.getLogger(__name__).error(f"Gemini API aio_oneshot timed out after {timeout}s")
+        raise TimeoutError(f"Gemini API timeout after {timeout}s")
 
 
-async def aio_oneshot_multimodal(contents: list[Any], model: str = MODEL_NAME, **kwargs: Any) -> str:
+async def aio_oneshot_multimodal(contents: list[Any], model: str = MODEL_NAME, timeout: float = 25.0, **kwargs: Any) -> str:
     c = _get_aio_client()
-    r = await c.aio.models.generate_content(model=model, contents=contents, config=make_config(**kwargs))
-    return (r.text or "").strip().replace("```json", "").replace("```", "").strip()
+    async def _call():
+        r = await c.aio.models.generate_content(model=model, contents=contents, config=make_config(**kwargs))
+        return (r.text or "").strip().replace("```json", "").replace("```", "").strip()
+
+    try:
+        return await asyncio.wait_for(_call(), timeout=timeout)
+    except asyncio.TimeoutError:
+        import logging
+        logging.getLogger(__name__).error(f"Gemini API aio_oneshot_multimodal timed out after {timeout}s")
+        raise TimeoutError(f"Gemini API timeout after {timeout}s")
 
 
 async def aio_upload_file(path: str) -> Any:

@@ -14,10 +14,10 @@ class ContextPayload:
 def collect_goal_context(decision: ReasonDecision, user_model: UserModel) -> ContextPayload:
     from companion.reasoning import reasoning_engine
     # Fallback for V1
-    goal_snapshot = reasoning_engine.get_predictions_summary()
+    active_goals = reasoning_engine.get_goal_snapshot()
     facts = []
-    if goal_snapshot:
-        facts.append("Найдены активные прогнозы:\n" + goal_snapshot)
+    if active_goals:
+        facts.append("Найдены активные цели:\n" + "\n".join(active_goals))
         
     identity = user_model.data.get("identity", {})
     want = identity.get("who_they_want_to_be")

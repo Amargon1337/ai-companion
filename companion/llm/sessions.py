@@ -28,11 +28,12 @@ def build_system_instruction(
     strategy = STRATEGY_PROFILES.get(baseline_state, STRATEGY_PROFILES.get("neutral"))
     tone = TONE_PROFILES.get(baseline_state, TONE_PROFILES.get("neutral"))
 
-    import datetime
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    from companion.temporal import build_temporal_context_block
+    temporal_block = build_temporal_context_block(store)
 
     policy_shell = f"""# SYSTEM DIRECTIVES
-[ТЕКУЩЕЕ СИСТЕМНОЕ ВРЕМЯ: {now_str}]
+{temporal_block}
+
 Each section is INDEPENDENT. Do not reinterpret, merge or summarize sections.
 Use each section only for its defined purpose.
 
@@ -52,9 +53,32 @@ Use each section only for its defined purpose.
 """
     if ivan:
         policy_shell += f"\n<legacy_profile_input>\n[ivan.txt — статичная персона]\n{ivan}\n</legacy_profile_input>\n"
+
+    master_summary = store.load_master_summary()
+    if master_summary:
+        policy_shell += f"\n<conversational_memory>\n[Master Summary — долговременный контекст]\n{master_summary[:2000]}\n</conversational_memory>\n"
         
     if precomputed_context:
         policy_shell += f"\n\n[ДИНАМИЧЕСКИЙ КОНТЕКСТ ПАМЯТИ RAG]\n{precomputed_context}\n"
+    elif retrieval and query:
+        bundle = retrieval.select(
+            query=query,
+            facts=store.list_facts("active"),
+            reflections=store.list_reflections(),
+            summaries=store.load_recent_summaries(5),
+            permanent_notes="\n".join(store.db.list_permanent_notes()),
+            identity_vault_block=getattr(store, "identity", None) and store.identity.to_prompt_block() or "",
+            personality_snapshot=store.build_canonical_profile_text(),
+            active_goals=[],
+            causal_links=[],
+            predictions=[],
+            world_model_context="",
+            user_model_context="",
+            runtime_context_block="",
+            comm_prefs=store.get_comm_pref(),
+            human_model=store.get_human_model(),
+        )
+        policy_shell += f"\n\n[ДИНАМИЧЕСКИЙ КОНТЕКСТ ПАМЯТИ RAG]\n{bundle.to_prompt_block()}\n"
         
     return policy_shell
 
@@ -122,10 +146,13 @@ def _reconstruct_recent_history(store: MemoryStore, limit: int = 15) -> list[dic
     # Конвертируем в формат Gemini history
     history = []
     for msg in reversed(recent):
-        role = "model" if msg.role == "assistant" else msg.role
+        role = "model" if msg.role in ("assistant", "model") else "user"
+        text = msg.text or ""
+        if msg.role not in ("user", "assistant", "model") and text:
+            text = f"[Note]: {text}"
         history.append({
             "role": role,
-            "parts": [{"text": msg.text}]
+            "parts": [{"text": text}]
         })
 
     logger.info(f"Reconstructed {len(history)} messages from SQLite for session continuity")

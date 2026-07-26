@@ -422,13 +422,13 @@ class UserModel:
             if snapshot.get("roles"):
                 memory_store.identity.update_identity("roles", ", ".join(snapshot["roles"]), confidence=0.85, source="user_model_reflection", explicit_overwrite=True)
 
-        import asyncio
         try:
             loop = asyncio.get_running_loop()
-            loop.run_in_executor(None, _sync_io, ident_snapshot, reflection)
+            await loop.run_in_executor(None, _sync_io, ident_snapshot, reflection)
         except RuntimeError:
             # No running loop, run synchronously
             _sync_io(ident_snapshot, reflection)
+        return reflection
 
     def _save_model(self) -> None:
         """Сохранить модель в БД."""

@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 # Global singletons
 memory_store = MemoryStore()
-retrieval_mgr = RetrievalBudgetManager()
+retrieval_mgr = RetrievalBudgetManager(store=memory_store)
 context_aggregator = ContextAggregator(memory_store.db)
 
 # In-memory sessions
@@ -203,49 +203,6 @@ async def show_reasoning_state(message: types.Message) -> None:
         lines.append("")
     lines.append(f"Последнее обновление: {world_model.get('last_updated', '?')[:16]}")
     await send_long_message(message, "\n".join(lines))
-
-
-async def show_todos(message: types.Message) -> None:
-    todos = await memory_store.db.async_list_todos()
-    if not todos:
-        await message.answer("Список пуст.")
-        return
-    lines = [f"{i}. [{'✓' if t['done'] else '○'}] {t['text']}" for i, t in enumerate(todos, 1)]
-    await message.answer("\n".join(lines))
-
-
-async def add_todo(message: types.Message, text: str) -> None:
-    task_text = text.strip()
-    if not task_text:
-        await message.answer("Что добавить в задачи?")
-        return
-    await memory_store.db.async_save_todo(f"todo_{uuid.uuid4().hex[:10]}", task_text)
-    await message.answer("Задача добавлена.")
-
-
-async def complete_todo(message: types.Message, text: str) -> None:
-    todos = await memory_store.db.async_list_todos()
-    idx = _extract_index(text) - 1
-    if idx < 0 or idx >= len(todos):
-        await message.answer("Нет такого номера.")
-        return
-    await memory_store.db.async_complete_todo(todos[idx]["id"])
-    await message.answer("Готово.")
-
-
-async def delete_todo(message: types.Message, text: str) -> None:
-    todos = await memory_store.db.async_list_todos()
-    idx = _extract_index(text) - 1
-    if idx < 0 or idx >= len(todos):
-        await message.answer("Нет такого номера.")
-        return
-    await memory_store.db.async_delete_todo(todos[idx]["id"])
-    await message.answer("Готово.")
-
-
-async def clear_done_todos(message: types.Message) -> None:
-    deleted = await memory_store.db.async_clear_done_todos()
-    await message.answer(f"Выполненные очищены: {deleted}.")
 
 
 async def show_self_description(message: types.Message) -> None:
@@ -555,8 +512,7 @@ async def process_multimodal_request(message: types.Message):
 from companion.config import LLM_COMMAND_CONFIDENCE_THRESHOLD
 
 MUTATING_COMMANDS = {
-    "reset_context", "clear_done", "complete_todo",
-    "delete_todo", "add_goal", "diary_entry", "add_todo"
+    "reset_context", "add_goal", "diary_entry"
 }
 
 PENDING_COMMANDS: dict[str, dict[str, Any]] = {}
@@ -588,8 +544,6 @@ async def _route_command(message: types.Message, command: str, text: str) -> boo
         "show_reasoning": show_reasoning_state,
         "self_description": show_self_description,
         "knowledge_map": show_selfmap,
-        "show_todos": show_todos,
-        "clear_done": clear_done_todos,
     }
 
     handler = routing.get(command)
@@ -607,18 +561,6 @@ async def _route_command(message: types.Message, command: str, text: str) -> boo
         await commands.add_diary_entry(message, payload if payload else text)
         return True
 
-    if command == "add_todo":
-        payload = _strip_prefix(text, ["добавь задачу", "создай задачу", "новая задача"])
-        await add_todo(message, payload if payload else text)
-        return True
-
-    if command == "complete_todo":
-        await complete_todo(message, text)
-        return True
-
-    if command == "delete_todo":
-        await delete_todo(message, text)
-        return True
 
     if command == "monthbook":
         match = _re.search(r"(20\d{2}-\d{2})", text)
@@ -790,9 +732,6 @@ async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, 
 
         raw_goals = memory_store.db.list_goals(status="active")[:2]
         formatted_goals = [f"{g.get('title', '')}: {g.get('description', '')}" for g in raw_goals]
-        
-        raw_preds = memory_store.db.list_predictions(outcome="pending")[:3]
-        formatted_preds = [f"Предикт: {p.get('hypothesis')} (Условия/Время: {p.get('timeframe')} {', '.join(p.get('conditions', []))})" for p in raw_preds]
 
         return {
             "facts": facts_list,
@@ -809,7 +748,7 @@ async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, 
             "recent": memory_store.recent_messages(min_importance=6, limit=10),
             "active_goals": formatted_goals if formatted_goals else (reasoning_context.get("active_goals", []) if reasoning_context else []),
             "causal_links": reasoning_context.get("causal_links", []) if reasoning_context else [],
-            "predictions": formatted_preds if formatted_preds else [],
+            "predictions": [],
             "world_model_context": reasoning_context.get("world_model_context", "") if reasoning_context else "",
             "faiss_scores": faiss_scores,
             "runtime_context_block": context_aggregator.build_prompt_block(),
@@ -834,9 +773,32 @@ async def _init_user_session(uid, query):
     await _persist_session(uid)
 
 
+def _sanitize_chat_history(raw_history: Any) -> list[dict]:
+    """Ensures every history item is a dict with role strictly in ('user', 'model')."""
+    if not raw_history:
+        return []
+    clean = []
+    for m in raw_history:
+        if isinstance(m, dict):
+            raw_role = m.get("role")
+            parts = m.get("parts", [])
+            text = parts[0].get("text", "") if (parts and isinstance(parts[0], dict)) else str(parts)
+        else:
+            raw_role = getattr(m, "role", None)
+            parts = getattr(m, "parts", [])
+            text = getattr(parts[0], "text", "") if parts else str(parts)
+
+        role = "model" if raw_role in ("assistant", "model") else "user"
+        if raw_role not in ("user", "model", "assistant") and text:
+            text = f"[Note]: {text}"
+        clean.append({"role": role, "parts": [{"text": text or ""}]})
+    return clean
+
+
 @observe(name="generate_and_send_response")
 async def _generate_and_send_response(message, chat, state, content_payload, query, ctx_data, policy_decision, uid, force_flash: bool = False):
-    history = chat.history if hasattr(chat, "history") else []
+    raw_history = chat.get_history() if hasattr(chat, "get_history") else getattr(chat, "history", getattr(chat, "_curated_history", []))
+    history = _sanitize_chat_history(raw_history)
     bundle = None
     ctx_block = None
     if isinstance(content_payload, str) and query:
@@ -858,6 +820,7 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             comm_prefs=ctx_data.get("comm_prefs"),
             human_model=ctx_data.get("human_model"),
             life_transitions=ctx_data.get("life_transitions"),
+            store=memory_store,
         )
         logger.info(f"[RAG] Собран бандл памяти. Фактов: {len(bundle.facts) if bundle.facts else 0}, Рефлексий: {len(bundle.reflections) if bundle.reflections else 0}.")
         if bundle.facts:
@@ -893,15 +856,16 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             
         content_payload = base_payload
 
-    from companion.config import FINAL_RESPONSE_MODEL
-    desired_model = "gemini-3.1-flash-lite" if force_flash else FINAL_RESPONSE_MODEL
+    from companion.config import FINAL_RESPONSE_MODEL, MODEL_NAME
+    desired_model = MODEL_NAME if force_flash else FINAL_RESPONSE_MODEL
     current_model = getattr(chat, "model", None)
     
     if current_model != desired_model:
         logger.info(f"[ROUTER] Switching model from {current_model} to {desired_model}")
         
     if not history:
-        history = chat.get_history() if hasattr(chat, "get_history") else getattr(chat, "history", getattr(chat, "_curated_history", []))
+        raw_history = chat.get_history() if hasattr(chat, "get_history") else getattr(chat, "history", getattr(chat, "_curated_history", []))
+        history = _sanitize_chat_history(raw_history)
 
     # Фаза 1: Внутренняя генерация плана (CoT)
     @observe(as_type="generation", name="cot_phase_1")
@@ -927,7 +891,7 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
         )
         try:
             from companion.llm.client import aio_oneshot
-            return await aio_oneshot(plan_prompt, model="gemini-3.1-flash-lite", temperature=0.5)
+            return await aio_oneshot(plan_prompt, model=MODEL_NAME, temperature=0.5)
         except Exception as e:
             logger.warning(f"Phase 1 plan generation failed: {e}")
             return ""
@@ -987,11 +951,11 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
                 response = await execute_final_response(chat, content_payload)
             except Exception as e:
                 # Если мы уже на flash-lite или нас принудительно переключили, не пытаемся фоллбэчиться
-                if not force_flash and desired_model != "gemini-3.1-flash-lite":
+                if not force_flash and desired_model != MODEL_NAME:
                     logger.warning(f"[ROUTER] [WARN] Primary model failed, falling back to Flash-lite: {e}")
                     chat = llm.client.chats.create(
-                        model="gemini-3.1-flash-lite",
-                        history=history,
+                        model=MODEL_NAME,
+                        history=_sanitize_chat_history(history),
                         config=llm.make_config(
                             system_instruction=build_system_instruction(memory_store, retrieval_mgr, query, precomputed_context=ctx_block),
                             temperature=0.7,

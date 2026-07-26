@@ -332,10 +332,11 @@ class MemoryStore:
         to_fact = self.get_fact(rel.to_id)
         if not from_fact or not to_fact:
             return
-        if from_fact.status != "active" or to_fact.status != "active":
+        allowed_statuses = {"active", "dormant"} if rel.relation in {"summarizes", "summarized_by"} else {"active"}
+        if from_fact.status not in allowed_statuses or to_fact.status not in allowed_statuses:
             logger.warning(
-                "Relation check failed: either source %s (%s) or target %s (%s) is not active",
-                rel.from_id, from_fact.status, rel.to_id, to_fact.status
+                "Relation check failed: either source %s (%s) or target %s (%s) is not in %s",
+                rel.from_id, from_fact.status, rel.to_id, to_fact.status, allowed_statuses
             )
             return
 
@@ -379,12 +380,78 @@ class MemoryStore:
                 )
                 self.vector.delete_for_content(old_fact.fact)
 
+    def get_connected_facts(
+        self,
+        fact_ids: list[str],
+        max_hops: int = 2,
+        max_facts: int = 10,
+        min_confidence: float = 0.6,
+    ) -> list[tuple[Fact, int, str]]:
+        """Multi-hop GraphRAG traversal: find active facts connected to anchor fact_ids.
+
+        Returns:
+            List of (Fact, hop_distance, relation_description) tuples.
+        """
+        if not fact_ids or max_hops < 1 or max_facts < 1:
+            return []
+
+        visited: set[str] = set(fact_ids)
+        queue: list[tuple[str, int, str]] = [(fid, 0, "anchor") for fid in fact_ids]
+        results: list[tuple[Fact, int, str]] = []
+
+        inv_map = {
+            "supersedes": "superseded_by",
+            "superseded_by": "supersedes",
+            "caused_by": "causes",
+            "causes": "caused_by",
+            "supports": "supported_by",
+            "summarized_by": "summarizes",
+            "summarizes": "summarized_by",
+        }
+
+        while queue and len(results) < max_facts:
+            curr_id, curr_hop, _ = queue.pop(0)
+            if curr_hop >= max_hops:
+                continue
+            rels = self.db.get_fact_relations(curr_id)
+            for rel in rels:
+                if float(rel.get("confidence", 0.8)) < min_confidence:
+                    continue
+                from_id = rel.get("from_id", "")
+                to_id = rel.get("to_id", "")
+                rel_type = str(rel.get("relation", "related_to"))
+
+                if from_id == curr_id:
+                    neighbor_id = to_id
+                    rel_desc = rel_type
+                elif to_id == curr_id:
+                    neighbor_id = from_id
+                    rel_desc = inv_map.get(rel_type, f"inverse_{rel_type}")
+                else:
+                    continue
+
+                if neighbor_id in visited:
+                    continue
+                visited.add(neighbor_id)
+
+                neighbor_fact = self.get_fact(neighbor_id)
+                allowed_statuses = {"active", "dormant"} if rel_desc in {"summarizes", "summarized_by", "inverse_summarizes", "inverse_summarized_by"} else {"active"}
+                if not neighbor_fact or neighbor_fact.status not in allowed_statuses:
+                    continue
+
+                results.append((neighbor_fact, curr_hop + 1, rel_desc))
+                if len(results) >= max_facts:
+                    break
+                queue.append((neighbor_id, curr_hop + 1, rel_desc))
+
+        return results
+
     def get_active_fact_texts(self) -> list[str]:
         return [f.fact for f in self.list_facts("active")]
 
     def find_similar_fact(self, text: str, threshold: float = 0.85) -> Fact | None:
         """Dedup via FAISS vector search cosine similarity."""
-        results = self.vector.search(text, top_k=1, content_type="fact")
+        results = self.vector.search(text, top_k=1, content_type="fact", hybrid=False)
         if results and results[0]["score"] >= threshold:
             match_hash = results[0]["content_hash"]
             for f in self.list_facts("active"):
@@ -392,15 +459,19 @@ class MemoryStore:
                     return f
         return None
 
-    def find_similar_fact_any_status(self, text: str, threshold: float = 0.85) -> Fact | None:
+    def find_similar_fact_any_status(self, text: str, threshold: float = 0.88) -> Fact | None:
         """Dedup check across active and dormant facts only."""
-        results = self.vector.search(text, top_k=1, content_type="fact")
-        if results and results[0]["score"] >= threshold:
-            match_hash = results[0]["content_hash"]
-            for f in self.list_all_facts():
-                if f.status in {"active", "dormant"} and self.vector._content_hash(f.fact) == match_hash:
-                    return f
-        return None
+        from companion.memory.text_sim import text_overlap
+        norm = self._normalize(text)
+        candidates = [f for f in self.list_all_facts() if f.status in {"active", "dormant"}]
+        best: Fact | None = None
+        best_score = 0.0
+        for f in candidates:
+            score = text_overlap(norm, self._normalize(f.fact))
+            if score > best_score:
+                best_score = score
+                best = f
+        return best if best_score >= threshold else None
 
     @staticmethod
     def _normalize(text: str) -> str:
@@ -504,7 +575,7 @@ class MemoryStore:
         return [(p, 0.0) for p in fallback[:limit]]
 
     def find_similar_pattern(self, text: str, threshold: float = 0.85) -> "Pattern | None":
-        results = self.vector.search(text, top_k=1, content_type="pattern")
+        results = self.vector.search(text, top_k=1, content_type="pattern", hybrid=False)
         if results and results[0]["score"] >= threshold:
             match_hash = results[0]["content_hash"]
             for p in self.list_patterns("active"):
@@ -778,6 +849,12 @@ class MemoryStore:
                 conn.execute("UPDATE facts SET status='dormant', facts_sent_count=0 WHERE id=?", (fid,))
 
         return len(to_dormant)
+
+    def compress_dormant_episodes(self, batch_size: int = 10, min_facts: int = 3) -> list[Fact]:
+        """Phase 3: Run episodic compression on unsummarized dormant facts."""
+        from companion.memory.episodic_compression import EpisodicMemoryCompressor
+        compressor = EpisodicMemoryCompressor(self, batch_size=batch_size, min_facts_to_compress=min_facts)
+        return compressor.run_compression()
 
     def reindex_all(self) -> dict[str, int]:
         """Reindex all facts, beliefs, reflections, and causal links into vector index."""
