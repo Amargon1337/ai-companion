@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 from companion.config import EMBEDDING_MODEL as _EMBEDDING_MODEL
 from companion.config import EMBEDDING_DIM as _EMBEDDING_DIM
+from companion.config import FAISS_FLUSH_EVERY as _FAISS_FLUSH_EVERY
 
 
 EMBEDDING_FAILURES = 0
@@ -143,6 +144,8 @@ class VectorIndex:
         self._next_id = 0
         
         self._is_initialized = False
+        self._dirty_updates = 0
+        self._flush_every = max(1, _FAISS_FLUSH_EVERY)
         self.embeddings_enabled = True
         
         # Load existing database embeddings into memory index at startup
@@ -230,10 +233,11 @@ class VectorIndex:
         with self.lock:
             if os.path.exists(self.index_path):
                 from companion.storage.sqlite_db import MemoryDatabase
-                db = MemoryDatabase()
-                data = db.get_state_model("faiss_mapping")
-                if data:
-                    try:
+                db = MemoryDatabase(self.path)
+                try:
+                    data = db.get_state_model("faiss_mapping")
+                    dirty = db.get_meta("faiss_index_dirty", "0") == "1"
+                    if data and not dirty:
                         self.index = faiss.read_index(self.index_path)
                         self.id_to_content = {int(k): v for k, v in data.get("id_to_content", {}).items()}
                         self.id_to_hash = {int(k): v for k, v in data.get("id_to_hash", {}).items()}
@@ -243,8 +247,12 @@ class VectorIndex:
                         self._is_initialized = True
                         self._sync_fts()
                         return
-                    except Exception as e:
-                        logger.warning(f"Failed to load FAISS index from disk, rebuilding: {e}")
+                    if dirty:
+                        logger.warning("FAISS index has unflushed changes; rebuilding from SQLite")
+                except Exception as e:
+                    logger.warning(f"Failed to load FAISS index from disk, rebuilding: {e}")
+                finally:
+                    db.close()
             
             self._rebuild_index()
 
@@ -254,14 +262,30 @@ class VectorIndex:
             if self._is_initialized and hasattr(self, 'index') and self.index is not None:
                 faiss.write_index(self.index, self.index_path)
                 from companion.storage.sqlite_db import MemoryDatabase
-                db = MemoryDatabase()
-                db.save_state_model("faiss_mapping", {
-                    "id_to_content": self.id_to_content,
-                    "id_to_hash": self.id_to_hash,
-                    "hash_to_id": self.hash_to_id,
-                    "id_to_type": self.id_to_type,
-                    "next_id": self._next_id
-                })
+                db = MemoryDatabase(self.path)
+                try:
+                    db.save_state_model("faiss_mapping", {
+                        "id_to_content": self.id_to_content,
+                        "id_to_hash": self.id_to_hash,
+                        "hash_to_id": self.hash_to_id,
+                        "id_to_type": self.id_to_type,
+                        "next_id": self._next_id
+                    })
+                    db.set_meta("faiss_index_dirty", "0")
+                    self._dirty_updates = 0
+                finally:
+                    db.close()
+
+    def flush_index(self) -> None:
+        if self._dirty_updates:
+            self.save_index_to_disk()
+
+    def _mark_dirty(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES('faiss_index_dirty', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value='1'"
+        )
+        self._dirty_updates += 1
 
     def _rebuild_index(self) -> None:
         import faiss
@@ -343,6 +367,7 @@ class VectorIndex:
         h = self._content_hash(text)
         blob = _float_list_to_blob(embedding)
         with self.lock:
+            needs_index_add = content_type != "query" and self._is_initialized and h not in self.hash_to_id
             with self._conn() as conn:
                 if content_type == "fact":
                     if fact_id:
@@ -355,7 +380,8 @@ class VectorIndex:
                            VALUES (?, ?, ?, ?)""",
                         (h, text, blob, content_type),
                     )
-                if content_type != "query":
+                if needs_index_add:
+                    self._mark_dirty(conn)
                     try:
                         conn.execute("DELETE FROM embeddings_fts WHERE content_hash=?", (h,))
                         conn.execute(
@@ -388,7 +414,8 @@ class VectorIndex:
             faiss.normalize_L2(vec)
             ids_arr = np.array([current_id], dtype=np.int64)
             self.index.add_with_ids(vec, ids_arr)
-            self.save_index_to_disk()
+            if self._dirty_updates >= self._flush_every:
+                self.save_index_to_disk()
 
     def get_embedding(self, text: str) -> list[float] | None:
         h = self._content_hash(text)
@@ -463,6 +490,7 @@ class VectorIndex:
                 vec = existing_by_hash.get(self._content_hash(text))
                 if vec:
                     self.upsert_embedding(text, vec, content_type)
+            self.flush_index()
             return
             
         try:
@@ -473,6 +501,7 @@ class VectorIndex:
             
         for text, vec in zip(missing_texts, vectors):
             self.upsert_embedding(text, vec, content_type)
+        self.flush_index()
 
     def _sync_fts(self) -> None:
         """Synchronize FTS5 virtual table with loaded index."""
@@ -702,7 +731,10 @@ class VectorIndex:
             return
         hashes = [self._content_hash(t) for t in texts]
         with self.lock:
+            needs_index_update = any(h in self.hash_to_id for h in hashes)
             with self._conn() as conn:
+                if needs_index_update:
+                    self._mark_dirty(conn)
                 conn.executemany(
                     "DELETE FROM embeddings WHERE content_hash=?",
                     [(h,) for h in hashes],

@@ -123,13 +123,14 @@ class PolicyLayer:
                     constraints=PolicyConstraints(
                         avoid_explanation=True,
                         avoid_theorizing=True,
+                        avoid_questions=True,
                         validate_feelings=True,
                         reduce_cognitive_load=False,
-                        max_questions=1,
+                        max_questions=0,
                         tone="empathic",
                     ),
-                    reasoning="В депрессии важна валидация без перегрузки информацией",
-                    confidence=0.90,
+                    reasoning="[ZERO-ADVICE PROTOCOL] В депрессии или при спаде сил важна валидация без советов, списков действий и вопросов (max_questions = 0).",
+                    confidence=0.95,
                 )
             ],
 
@@ -345,6 +346,10 @@ class PolicyLayer:
             r'(?i)\bулыбнись\b[.,]?',
             r'(?i)\bдержи хвост пистолетом\b[.,]?',
             r'(?i)\bвыше нос\b[.,]?',
+            r'(?i)\bне опускай руки\b[.,]?',
+            r'(?i)\bвсё наладится\b[.,]?',
+            r'(?i)\bпосмотри на это с позитивной стороны\b[.,]?',
+            r'(?i)\bвсё к лучшему\b[.,]?',
         ]
         for pattern in toxic_patterns:
             text = re.sub(pattern, '', text).strip()
@@ -377,6 +382,9 @@ class PolicyLayer:
             avoid_items.append("- НЕ строй теории")
         if policy.constraints.avoid_questions:
             avoid_items.append("- НЕ задавай вопросов")
+        if policy.constraints.max_questions == 0:
+            avoid_items.append("- [ZERO-ADVICE PROTOCOL] НЕ задавай ни одного вопроса в ответе!")
+            avoid_items.append("- [ZERO-ADVICE PROTOCOL] НЕ давай советов, списков шагов или планов по решению проблемы.")
         # avoid_long_text is ignored to enforce maximal answers
 
         if avoid_items:
@@ -402,7 +410,7 @@ class PolicyLayer:
             constraints_lines.append("")
 
         # Лимиты
-        if policy.constraints.max_questions:
+        if policy.constraints.max_questions is not None:
             constraints_lines.append(f"Max questions: {policy.constraints.max_questions}")
 
         constraints_lines.append(f"Tone: {policy.constraints.tone}")

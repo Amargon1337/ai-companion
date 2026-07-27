@@ -20,6 +20,7 @@ from companion.background_scheduler import (
     safe_task,
 )
 from companion.config import BASE_DIR, SUMMARY_THRESHOLD
+from companion.config import LLM_HISTORY_TOKEN_BUDGET, LLM_INPUT_TOKEN_BUDGET
 from companion.context import ContextAggregator
 from companion.critique_manager import apply_critique_to_text, run_self_critique
 from companion.llm import client as llm
@@ -29,6 +30,7 @@ from companion.llm.sessions import create_default_session
 from companion.memory.retrieval import RetrievalBudgetManager
 from companion.memory.store import MemoryStore
 from companion.models import Fact
+from companion.llm.token_budget import estimate_tokens, trim_history
 from companion.policy_layer import policy_layer
 from companion.policy_layer import UserState as PolicyUserState
 from companion.reasoning import reasoning_engine
@@ -803,7 +805,7 @@ def _sanitize_chat_history(raw_history: Any) -> list[dict]:
         if raw_role not in ("user", "model", "assistant") and text:
             text = f"[Note]: {text}"
         clean.append({"role": role, "parts": [{"text": text or ""}]})
-    return clean
+    return trim_history(clean, LLM_HISTORY_TOKEN_BUDGET)
 
 
 @observe(name="generate_and_send_response")
@@ -942,11 +944,21 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             # Фаза 2: Контекст в конце промпта и удаление CoT
             from companion.llm.sessions import build_system_instruction
             
+            system_instruction = build_system_instruction(
+                memory_store, retrieval_mgr, query, precomputed_context=ctx_block
+            )
+            reserved_tokens = estimate_tokens(system_instruction) + estimate_tokens(str(content_payload))
+            history_budget = min(
+                LLM_HISTORY_TOKEN_BUDGET,
+                max(0, LLM_INPUT_TOKEN_BUDGET - reserved_tokens),
+            )
+            bounded_history = trim_history(base_chat_config["history"], history_budget)
+
             chat = llm.client.chats.create(
                 model=base_chat_config["model"],
-                history=base_chat_config["history"],
+                history=bounded_history,
                 config=llm.make_config(
-                    system_instruction=build_system_instruction(memory_store, retrieval_mgr, query, precomputed_context=ctx_block),
+                    system_instruction=system_instruction,
                     temperature=base_chat_config["temperature"],
                 )
             )
@@ -966,9 +978,9 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
                     logger.warning(f"[ROUTER] [WARN] Primary model failed, falling back to Flash-lite: {e}")
                     chat = llm.client.chats.create(
                         model=MODEL_NAME,
-                        history=_sanitize_chat_history(history),
+                        history=bounded_history,
                         config=llm.make_config(
-                            system_instruction=build_system_instruction(memory_store, retrieval_mgr, query, precomputed_context=ctx_block),
+                            system_instruction=system_instruction,
                             temperature=0.7,
                         )
                     )

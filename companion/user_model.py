@@ -211,7 +211,7 @@ class UserModel:
         style = self.data.get("communication_style", {})
         profanity = style.get("profanity_level", 0.0)
         if profanity > 0.1:
-            parts.append(f"Стиль коммуникации пользователя:\n- Уровень мата/жесткого сленга: {profanity:.1f}/10.0")
+            parts.append(f"Стиль коммуникации пользователя:\n- Уровень неформальной лексики/экспрессивного сленга: {profanity:.1f}/10.0")
 
         if parts:
             return "[Модель пользователя]\n" + "\n\n".join(parts)
@@ -231,8 +231,8 @@ class UserModel:
 
         # Style Mirroring check (Profanity heuristic)
         profanity_roots = [
-            "хуй", "хуя", "хуе", "хуи", "пизд", "еба", "ебн", "ебл", 
-            "бля", "блять", "блядь", "хер", "пидар", "пидор", "гондон", "мудак", "мразь", "сука", "суку", "залуп"
+            "блин", "черт", "фиг", "хрен", "жесть", "капец", "пипец", "фигеть", 
+            "елки", "е-мое", "зараза", "дурак", "идиот", "мрак", "отстой", "бесит"
         ]
         pattern = re.compile(r"(?i)(" + "|".join(profanity_roots) + r")")
         matches = len(pattern.findall(user_message))

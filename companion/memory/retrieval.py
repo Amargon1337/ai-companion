@@ -6,9 +6,12 @@ from companion.config import (
     RETRIEVAL_CHAR_BUDGET,
     RETRIEVAL_MAX_FACTS,
     RETRIEVAL_MAX_REFLECTIONS,
+    RETRIEVAL_TOKEN_BUDGET,
 )
+from companion.llm.token_budget import estimate_tokens
 from companion.memory.importance import retrieval_score
 from companion.models import ContextBundle, Fact, Reflection
+from companion.memory.reranker import CrossEncoderReranker
 
 
 def _is_explicit_search_query(query: str) -> bool:
@@ -66,14 +69,20 @@ class RetrievalBudgetManager:
     def __init__(
         self,
         char_budget: int = RETRIEVAL_CHAR_BUDGET,
+        token_budget: int = RETRIEVAL_TOKEN_BUDGET,
         max_facts: int = RETRIEVAL_MAX_FACTS,
         max_reflections: int = RETRIEVAL_MAX_REFLECTIONS,
         store: Any = None,
+        reranker: CrossEncoderReranker | None = None,
     ) -> None:
         self.char_budget = char_budget
+        self.token_budget = token_budget
         self.max_facts = max_facts
         self.max_reflections = max_reflections
         self.store = store
+        # Keep the local model/fallback state across retrieval calls.
+        self.reranker = reranker or CrossEncoderReranker()
+        self.last_debug: dict[str, Any] = {}
 
     def select(
         self,
@@ -155,6 +164,15 @@ class RetrievalBudgetManager:
             kind_boost = {"state": 0.15, "event": 0.1, "belief": 0.0}.get(f.memory_kind, 0.0)
             
             final_score = semantic + importance + recency_val + mood_boost + kind_boost
+
+            f.retrieval_debug = {
+                "similarity": round(semantic_score, 4),
+                "importance": round(importance, 4),
+                "recency": round(recency_val, 4),
+                "mood_boost": round(mood_boost, 4),
+                "kind_boost": round(kind_boost, 4),
+                "score": round(final_score, 4),
+            }
             
             import logging
             logger = logging.getLogger(__name__)
@@ -268,9 +286,7 @@ class RetrievalBudgetManager:
             except Exception:
                 pass
 
-        from companion.memory.reranker import CrossEncoderReranker
-        reranker = CrossEncoderReranker()
-        ranked_facts = reranker.rerank(
+        ranked_facts = self.reranker.rerank(
             query,
             ranked_facts,
             top_k=self.max_facts,
@@ -367,9 +383,31 @@ class RetrievalBudgetManager:
             life_transitions=life_transitions,
         )
 
+        self.last_debug = {
+            "query": query,
+            "candidate_facts": len(facts),
+            "active_facts": len(active_facts),
+            "selected_facts": len(bundle.facts),
+            "selected_reflections": len(bundle.reflections),
+            "selected_patterns": len(bundle.patterns),
+            "summaries": len(bundle.summaries),
+            "facts": [
+                {
+                    "id": f.id,
+                    "text": f.fact,
+                    "score": round(getattr(f, "retrieval_score", 0.0), 4),
+                    "details": getattr(f, "retrieval_debug", {}),
+                }
+                for f in bundle.facts
+            ],
+        }
+
         # Global Overflow Eviction: T5 -> T4 -> T3
         pinned_ids = {f.id for f in pinned_facts}
-        while len(bundle.to_prompt_block()) > self.char_budget:
+        while (
+            len(bundle.to_prompt_block()) > self.char_budget
+            or estimate_tokens(bundle.to_prompt_block()) > self.token_budget
+        ):
             if bundle.summaries:
                 bundle.summaries.pop()
             elif bundle.reflections or bundle.causal_links:

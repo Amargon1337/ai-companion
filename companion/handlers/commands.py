@@ -5,7 +5,7 @@ from aiogram import types
 
 from companion import bot_core as core
 from companion.llm import client as llm
-from companion.llm.prompts import PERSONALITY_REPORT_PROMPT
+from companion.llm.prompts import PERSONALITY_REPORT_PROMPT, RETROSPECTIVE_PROMPT
 import asyncio
 import re
 import uuid
@@ -25,18 +25,10 @@ async def show_summary(message: types.Message) -> None:
 
     latest_list = core.memory_store.load_recent_summaries(1)
     latest = latest_list[0] if latest_list else ""
-    fact = Fact(
-        fact=clean[:500],
-        date=datetime.now().strftime("%Y-%m-%d"),
-        importance=min(10, max(5, importance)),
-        confidence=0.8,
-        source="auto_event",
-        source_type="user",
-        memory_kind="event",
-        tags=["auto_event"],
-    )
-    core.memory_store.add_fact(fact)
-    return fact
+    if latest:
+        await core.send_long_message(message, f"Поcледнее cаммери:\n\n{latest}")
+    else:
+        await message.answer("Саммери ещё нет.")
 
 async def show_personality(message: types.Message) -> None:
     store = core.memory_store
@@ -165,6 +157,19 @@ def auto_add_event_from_message(text: str, importance: int) -> Fact | None:
     title = clean.split(".", 1)[0][:80].strip()
     if not title:
         return None
+
+    fact = Fact(
+        fact=clean[:500],
+        date=datetime.now().strftime("%Y-%m-%d"),
+        importance=min(10, max(5, importance)),
+        confidence=0.8,
+        source="auto_event",
+        source_type="user",
+        memory_kind="event",
+        tags=["auto_event"],
+    )
+    core.memory_store.add_fact(fact)
+    return fact
 async def show_selfie(message: types.Message) -> None:
     store = core.memory_store
     parts = []
@@ -233,6 +238,70 @@ async def show_context(message: types.Message) -> None:
         await core.send_long_message(message, f"Последнее саммери:\n\n{summary}")
     else:
         await message.answer("Саммери ещё нет.")
+
+
+async def show_metrics(message: types.Message) -> None:
+    stats = await asyncio.to_thread(core.memory_store.observability_stats)
+    counts = stats["counts"]
+    metric = stats.get("last_retrieval_metric") or {}
+    metric_line = "нет данных"
+    if metric:
+        metric_line = (
+            f"facts {metric.get('facts_sent', 0)}/{metric.get('facts_used', 0)}, "
+            f"goals {metric.get('goals_sent', 0)}/{metric.get('goals_used', 0)}, "
+            f"reflections {metric.get('reflections_sent', 0)}/{metric.get('reflections_used', 0)}"
+        )
+    text = (
+        "Memory stats\n\n"
+        f"Facts: {counts['facts']} (active: {stats['active_facts']})\n"
+        f"Beliefs: {counts['beliefs']}\n"
+        f"Patterns: {counts['patterns']}\n"
+        f"Reflections: {counts['reflections']}\n"
+        f"Predictions: {counts['predictions']}\n"
+        f"Messages: {counts['messages']}\n"
+        f"Graph edges: {counts['fact_relations']}\n"
+        f"Embedding cache: {stats['embedding_cache']}\n"
+        f"FAISS vectors: {stats['faiss_total']}\n"
+        f"FAISS dirty: {stats['faiss_dirty']}\n"
+        f"Last retrieval usage: {metric_line}"
+    )
+    await core.send_long_message(message, text)
+
+
+async def show_debug_retrieval(message: types.Message) -> None:
+    debug = core.retrieval_mgr.last_debug
+    if not debug:
+        await message.answer("Retrieval ещё не выполнялcя в этом процеccе.")
+        return
+    text = (
+        "Last retrieval\n\n"
+        f"Query: {debug.get('query') or '(empty)'}\n"
+        f"Candidates: {debug.get('candidate_facts', 0)}\n"
+        f"Selected facts: {debug.get('selected_facts', 0)}\n"
+        f"Reflections: {debug.get('selected_reflections', 0)}\n"
+        f"Patterns: {debug.get('selected_patterns', 0)}\n"
+        f"Summaries: {debug.get('summaries', 0)}\n"
+    )
+    for index, fact in enumerate(debug.get("facts", [])[:10], start=1):
+        text += f"\n{index}. [{fact['score']}] {fact['text'][:180]}"
+    await core.send_long_message(message, text)
+
+
+async def show_why_retrieval(message: types.Message) -> None:
+    debug = core.retrieval_mgr.last_debug
+    if not debug or not debug.get("facts"):
+        await message.answer("Нет поcледнего retrieval c выбранными фактами.")
+        return
+    parts = [f"Почему эти факты попали в поcледний context?\nЗапроc: {debug.get('query') or '(empty)'}"]
+    for fact in debug["facts"][:10]:
+        details = fact.get("details") or {}
+        parts.append(
+            f"\n• {fact['text'][:180]}\n"
+            f"  score={fact['score']}; similarity={details.get('similarity', 0)}; "
+            f"importance={details.get('importance', 0)}; recency={details.get('recency', 0)}; "
+            f"mood={details.get('mood_boost', 0)}; kind={details.get('kind_boost', 0)}"
+        )
+    await core.send_long_message(message, "\n".join(parts))
 
 
 def _collect_retrospective(days: int) -> dict:

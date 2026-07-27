@@ -94,6 +94,15 @@ def register(dp, bot) -> None:
 
     @dp.message(Command("metrics", "stats"))
     async def cmd_metrics(message: types.Message):
+        await commands.show_metrics(message)
+
+    @dp.message(Command("debug"))
+    async def cmd_debug(message: types.Message):
+        await commands.show_debug_retrieval(message)
+
+    @dp.message(Command("why"))
+    async def cmd_why(message: types.Message):
+        await commands.show_why_retrieval(message)
         await message.answer("🧠 <b>Метрики:</b>\nПамять активна и консолидируется в фоне.", parse_mode="HTML")
 
     @dp.message(Command("search"))
@@ -154,10 +163,6 @@ def register(dp, bot) -> None:
             )
             
         del core.PENDING_COMMANDS[cmd_id]
-
-    @dp.message(F.photo | F.voice | F.document)
-    async def multimodal_handler(message: types.Message):
-        await core.process_multimodal_request(message)
 
     @dp.message(F.text & ~F.text.startswith("/") & ~F.text.contains("tiktok.com"))
     async def text_handler(message: types.Message):

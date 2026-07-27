@@ -128,3 +128,23 @@ def test_faiss_correctness_after_add_and_delete(tmp_path):
     finally:
         cfg.DATA_DIR = original_data_dir
         cfg.SQLITE_PATH = original_sqlite
+
+
+def test_batch_embeddings_flush_index_once(tmp_path):
+    import companion.config as cfg
+
+    original_data_dir = cfg.DATA_DIR
+    original_sqlite = cfg.SQLITE_PATH
+    cfg.DATA_DIR = str(tmp_path)
+    cfg.SQLITE_PATH = str(tmp_path / "companion.db")
+    try:
+        store = MemoryStore()
+        store.vector._flush_every = 100
+        with patch("companion.memory.vector_index._embed_texts", return_value=[[0.1] * 768] * 3):
+            with patch.object(store.vector, "save_index_to_disk", wraps=store.vector.save_index_to_disk) as save:
+                store.vector.compute_and_cache_batch(["fact one", "fact two", "fact three"], "belief")
+        assert save.call_count == 1
+        assert store.vector._dirty_updates == 0
+    finally:
+        cfg.DATA_DIR = original_data_dir
+        cfg.SQLITE_PATH = original_sqlite

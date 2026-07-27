@@ -11,6 +11,8 @@ from companion.memory.store import MemoryStore
 from companion.reasoning import reasoning_engine
 from companion.user_model import user_model
 import hashlib
+from companion.config import LLM_HISTORY_TOKEN_BUDGET
+from companion.llm.token_budget import trim_history
 
 _PROMPT_CACHE = {}
 
@@ -35,15 +37,16 @@ def build_system_instruction(
     sensitivity_block = ""
     if effective_state in ("depressed", "anxious") or momentum_metrics.get("energy", 0.5) < 0.35 or momentum_metrics.get("sadness", 0.0) > 0.40:
         sensitivity_block = f"""
-# SENSITIVITY & TRIGGER GUARDS (EMOTIONAL MOMENTUM)
+# SENSITIVITY & TRIGGER GUARDS (EMOTIONAL MOMENTUM) - ZERO-ADVICE PROTOCOL (ТИХАЯ ГАВАНЬ & ЭСТЕТИЧЕСКИЙ ОТПЕЧАТОК)
 [ТЕКУЩИЙ ЭМОЦИОНАЛЬНЫЙ ТРЕНД ИВАНА]:
 - Эффективное состояние: {effective_state} (Энергия: {momentum_metrics.get('energy', 0.5):.2f}, Усталость/Грусть: {momentum_metrics.get('sadness', 0.0):.2f}, Тревога: {momentum_metrics.get('anxiety', 0.0):.2f})
 - У Ивана зафиксирован спад сил / усталость за последние взаимодействия.
 
-ЖЕСТКИЕ ГРАНИЦЫ ЧУВСТВИТЕЛЬНОСТИ (АБСОЛЮТНЫЙ ПРИОРИТЕТ):
+ЖЕСТКИЕ ГРАНИЦЫ ЧУВСТВИТЕЛЬНОСТИ И ПРОТОКОЛ «НОЛЬ СОВЕТОВ» (ZERO-ADVICE):
 1. НИКАКОЙ «пластиковой бодрости», фальшивого энтузиазма, восклицательных знаков и призывов «взбодриться», «держаться» или «не вешать нос».
-2. НИКАКИХ непрошеных советов, списков действий, нравоучений или попыток «решить проблему», если Иван прямо не просит совет.
-3. РЕЖИМ СПОКОЙНОГО ПРИСУТСТВИЯ: говори спокойно, тепло, лаконично и по делу. Признай тяжесть состояния как нормальный факт. Твой тон — тихий, надежный собеседник рядом, который понимает усталость.
+2. [CRITICAL: ZERO-ADVICE PROTOCOL] НИКАКИХ непрошеных советов, списков действий, планов, нравоучений или коучинговых вопросов («Что собираешься делать?», «Как планируешь решить?»). Если Иван просто делится усталостью или переживанием — отвечай спокойно и тепло («Я слышу тебя, отдыхай», «Тяжелый день, я рядом»). ЗАПРЕЩЕНО задавать вопросы в конце ответа в режиме Zero-Advice!
+3. [CRITICAL: ЭСТЕТИЧЕСКИЙ ОТПЕЧАТОК] Когда нужно оказать поддержку или дать мысль, ИСКЛЮЧИ банальные фразы («всё будет хорошо»). Опирайся на культурные и философские якоря Ивана (философия Шопенгауэра, честная меланхолия Дадзая, метафоры дарк-эмбиента и музыки в Reaper, экзистенциальные мотивы 'Ивангелия'). Для Ивана это в 100 раз важнее, чем советы.
+4. РЕЖИМ СПОКОЙНОГО ПРИСУТСТВИЯ: если сейчас ночь, держи тон 'Ночной кухни' — тихий, глубокий, вдумчивый разговор двух близких людей без суеты.
 """
 
     policy_shell = f"""# SYSTEM DIRECTIVES
@@ -117,7 +120,7 @@ def create_default_session(
     deduped = [m for m in reconstructed
                if (m.get("parts", [{}])[0].get("text", "")).strip() not in seen_texts]
     # summary-контекст первым, затем уникальные недавние реплики.
-    full_history = base + deduped
+    full_history = trim_history(base + deduped, LLM_HISTORY_TOKEN_BUDGET)
 
     return llm.client.chats.create(
         model=FINAL_RESPONSE_MODEL,

@@ -47,7 +47,11 @@ async def _async_run_memory_dreaming_cycle():
 
         mock_store.add_fact.assert_called_once()
         args, kwargs = mock_store.add_fact.call_args
-        assert "dream_insight" in kwargs["tags"]
+        assert not kwargs
+        assert len(args) == 1
+        assert isinstance(args[0], Fact)
+        assert "dream_insight" in args[0].tags
+        assert args[0].source == "memory_dreaming"
 
 
 def test_get_latest_unused_dream_and_mark_used():

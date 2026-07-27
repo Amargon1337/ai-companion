@@ -129,6 +129,27 @@ class MemoryStore:
         """Backward-compatible name for the canonical prompt profile."""
         return self.build_canonical_profile_text()
 
+    def observability_stats(self) -> dict[str, Any]:
+        """Return cheap runtime/storage counters for diagnostics commands."""
+        with self.db._conn() as conn:
+            counts: dict[str, int] = {}
+            for table in ("facts", "beliefs", "patterns", "reflections", "messages", "predictions", "fact_relations"):
+                row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                counts[table] = int(row[0])
+            active = conn.execute("SELECT COUNT(*) FROM facts WHERE status='active'").fetchone()
+            latest_metric = conn.execute(
+                "SELECT * FROM retrieval_metrics ORDER BY timestamp DESC LIMIT 1"
+            ).fetchone()
+
+        return {
+            "counts": counts,
+            "active_facts": int(active[0]),
+            "embedding_cache": self.vector.count(),
+            "faiss_total": int(getattr(getattr(self.vector, "index", None), "ntotal", 0)),
+            "faiss_dirty": bool(getattr(self.vector, "_dirty_updates", 0)),
+            "last_retrieval_metric": dict(latest_metric) if latest_metric else None,
+        }
+
     def load_master_summary(self) -> str:
         """Load master summary from SQLite DB (meta table)."""
         return self.db.get_meta("master_summary", "")

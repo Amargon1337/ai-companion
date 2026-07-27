@@ -100,8 +100,12 @@ EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "768"))
 SUMMARY_THRESHOLD = 50
 MAX_DOCUMENT_CHARS = 120_000
 RETRIEVAL_CHAR_BUDGET = 50_000
+RETRIEVAL_TOKEN_BUDGET = int(os.getenv("RETRIEVAL_TOKEN_BUDGET", "12000"))
 RETRIEVAL_MAX_FACTS = 25  # Увеличено с 15 до 25
 RETRIEVAL_MAX_REFLECTIONS = 5
+LLM_INPUT_TOKEN_BUDGET = int(os.getenv("LLM_INPUT_TOKEN_BUDGET", "24000"))
+LLM_HISTORY_TOKEN_BUDGET = int(os.getenv("LLM_HISTORY_TOKEN_BUDGET", "8000"))
+FAISS_FLUSH_EVERY = int(os.getenv("FAISS_FLUSH_EVERY", "25"))
 
 # LCE (Life Continuity Engine): извлечение переходов НЕ каждый compress,
 # а раз в N сжатий — это дорогой отдельный запрос к LLM (как ты и просил).

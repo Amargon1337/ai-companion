@@ -25,6 +25,8 @@ async def setup_bot_commands(bot) -> None:
         BotCommand(command="continuity", description="Синтез траектории личности"),
         BotCommand(command="timeline", description="Хронология изменений"),
         BotCommand(command="metrics", description="Когнитивная статистика"),
+        BotCommand(command="debug", description="Retrieval diagnostics"),
+        BotCommand(command="why", description="Explain selected memory"),
         BotCommand(command="remember", description="Запомнить важное"),
     ]
     await bot.set_my_commands(commands)

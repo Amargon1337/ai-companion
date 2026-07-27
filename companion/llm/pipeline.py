@@ -470,12 +470,15 @@ def extract_life_transitions(
             
             # Deduplication
             import difflib
-            prev = store.db.get_life_transitions()
+            prev = store.db.list_life_transitions()
             is_dup = False
             for existing in prev:
-                if existing.domain.lower() == t.domain.lower():
-                    from_sim = difflib.SequenceMatcher(None, existing.from_state.lower(), t.from_state.lower()).ratio()
-                    to_sim = difflib.SequenceMatcher(None, existing.to_state.lower(), t.to_state.lower()).ratio()
+                existing_domain = str(existing.get("domain", ""))
+                existing_from = str(existing.get("from_state", ""))
+                existing_to = str(existing.get("to_state", ""))
+                if existing_domain.lower() == t.domain.lower():
+                    from_sim = difflib.SequenceMatcher(None, existing_from.lower(), t.from_state.lower()).ratio()
+                    to_sim = difflib.SequenceMatcher(None, existing_to.lower(), t.to_state.lower()).ratio()
                     if from_sim > 0.6 and to_sim > 0.6:
                         logger.info(f"[DIAG] Skipping duplicate transition: {t.from_state} -> {t.to_state}")
                         is_dup = True

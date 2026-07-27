@@ -30,7 +30,7 @@ class AuthMiddleware(BaseMiddleware):
         if isinstance(event, types.Message):
             user = event.from_user
             if not user or user.id not in ADMIN_IDS:
-                await event.answer("Пошёл нахуй, ты не Иван. Доступ закрыт.")
+                await event.answer("Доступ ограничен, ты не Иван. Отказано в доступе.")
                 return
         elif isinstance(event, types.CallbackQuery):
             user = event.from_user
@@ -243,6 +243,10 @@ async def run() -> None:
         await dp.start_polling(bot, handle_as_tasks=True)
     finally:
         logger.info("Shutting down bot...")
+        try:
+            memory_store.vector.flush_index()
+        except Exception as exc:
+            logger.error("Failed to flush FAISS index during shutdown: %s", exc, exc_info=True)
         ping_task.cancel()
         try:
             await asyncio.gather(ping_task, return_exceptions=True)

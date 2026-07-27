@@ -8,6 +8,7 @@ from typing import Any
 
 from companion.config import MODEL_NAME
 from companion.llm.client import aio_oneshot
+from companion.models import Fact
 
 logger = logging.getLogger(__name__)
 
@@ -82,12 +83,16 @@ async def run_memory_dreaming_cycle(store: Any, user_model: Any) -> dict[str, An
 
         # Также сохраняем инсайт в граф как факт с тегом dream_insight
         store.add_fact(
-            fact=f"[Сон компаньона]: {insight}",
-            importance=5,
-            confidence=0.85,
-            tags=["dream_insight"],
-            source="memory_dreaming",
-            kind="event",
+            Fact(
+                fact=f"[Сон компаньона]: {insight}",
+                date=datetime.now().strftime("%Y-%m-%d"),
+                importance=5,
+                confidence=0.85,
+                source="memory_dreaming",
+                source_type="system",
+                memory_kind="event",
+                tags=["dream_insight"],
+            )
         )
 
         logger.info("Memory dreaming cycle generated insight %s", entry_id)

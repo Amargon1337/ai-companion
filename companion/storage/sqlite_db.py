@@ -313,6 +313,18 @@ class MemoryDatabase:
         );
         CREATE INDEX IF NOT EXISTS idx_causal_links_confidence ON causal_links(confidence);
 
+        CREATE TABLE IF NOT EXISTS predictions (
+          prediction_id TEXT PRIMARY KEY,
+          hypothesis TEXT NOT NULL,
+          confidence REAL DEFAULT 0.5,
+          timeframe TEXT DEFAULT '',
+          conditions TEXT DEFAULT '[]',
+          based_on TEXT DEFAULT '[]',
+          outcome TEXT DEFAULT 'pending',
+          created_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_predictions_outcome ON predictions(outcome);
+
 
         CREATE TABLE IF NOT EXISTS monthbooks (
           ym TEXT PRIMARY KEY,
@@ -542,6 +554,13 @@ class MemoryDatabase:
         _json(row.get("conditions", [])), _json(row.get("based_on", [])), row.get("outcome", "pending"), row.get("created_at"),
       ),
     )
+
+  def upsert_prediction(self, row: dict[str, Any]) -> None:
+    with self._conn() as conn:
+      self._upsert_prediction_conn(conn, row)
+
+  async def async_upsert_prediction(self, row: dict[str, Any]) -> None:
+    await asyncio.to_thread(self.upsert_prediction, row)
 
   def _upsert_belief_conn(self, conn: sqlite3.Connection, row: dict[str, Any]) -> None:
     belief_id = row.get("id") or f"belief_{hashlib.sha1(str(row.get('belief', '')).encode('utf-8')).hexdigest()[:10]}"
