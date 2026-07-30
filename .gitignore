@@ -1,41 +1,43 @@
-```
 # Database files
 *.db
-
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.py~
-*.py.class
-
-# SQLite
 *.sqlite
 *.sqlite3
 *.db-shm
 *.db-wal
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# IDEs & Editor folders
+.vscode/
+.claude/
+.idea/
+
+# Runtime data & Vector index
+data/*.json
+data/*.jsonl
+data/*.bin
+data/logs/
+data/companion.db*
+
 # Environment
 .env
 .env.local
 *.env.*
-
-# Dependencies
 .venv/
 venv/
 env/
-ENV/
 
 # Logs
 *.log
 
 # OS generated files
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
-```
