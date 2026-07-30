@@ -5,6 +5,7 @@ Event Sourcing подход: все изменения памяти записы
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from contextlib import contextmanager
 from typing import Any, Generator
@@ -23,6 +24,9 @@ class EventStore:
     
     @contextmanager
     def _conn(self) -> Generator[sqlite3.Connection, None, None]:
+        dir_name = os.path.dirname(os.path.abspath(self.db_path))
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         conn.execute("PRAGMA busy_timeout = 5000;")
         conn.execute("PRAGMA journal_mode = WAL;")

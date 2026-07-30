@@ -21,6 +21,9 @@ class MemoryDatabase:
 
   @contextmanager
   def _conn(self) -> Generator[sqlite3.Connection, None, None]:
+    dir_name = os.path.dirname(os.path.abspath(self.path))
+    if dir_name:
+      os.makedirs(dir_name, exist_ok=True)
     conn = sqlite3.connect(self.path)
     _configure_conn(conn)
     conn.row_factory = sqlite3.Row
