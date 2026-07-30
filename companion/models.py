@@ -4,12 +4,55 @@ from __future__ import annotations
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Any, Literal
 
 MemoryKind = Literal["permanent", "state", "event"]
 FactStatus = Literal["active", "superseded", "inactive", "archived", "dormant", "pending_review"]
 RelationType = Literal["supersedes", "contradicts", "confirms", "related_to"]
 QueryIntent = Literal["memory", "world", "mixed"]
+
+
+class MemoryOrigin(Enum):
+    """Происхождение факта памяти."""
+    USER_STATEMENT = "user_statement"           # Прямое утверждение пользователя
+    LLM_EXTRACTION = "llm_extraction"           # Извлечено моделью из контекста
+    LLM_INFERENCE = "llm_inference"             # Логический вывод модели
+    CONSOLIDATION = "consolidation"             # Результат консолидации (сон)
+    SYSTEM_MIGRATION = "system_migration"       # Миграция из legacy
+    EXTERNAL_SOURCE = "external_source"         # Внешний источник (файл, ссылка)
+
+
+class IdentityLayer(Enum):
+    """Слой идентичности для классификации важности факта."""
+    CORE_VALUE = "core_value"                   # Неизменные ценности
+    BIOGRAPHICAL = "biographical"               # Факты биографии
+    STABLE_HABIT = "stable_habit"               # Долгосрочные привычки
+    PREFERENCE = "preference"                   # Предпочтения (еда, музыка)
+    TEMPORARY_STATE = "temporary_state"         # Временное состояние (настроение)
+    HYPOTHESIS = "hypothesis"                   # Недоказанное предположение
+    LEGACY_UNKNOWN = "legacy_unknown"           # Для старых фактов без классификации
+
+
+@dataclass
+class MemoryConfidence:
+    """Составная уверенность факта.
+    
+    Атрибуты:
+        observed: Надёжность источника (1.0 для USER_STATEMENT, 0.7 для LLM_INFERENCE)
+        inferred: Уверенность экстракции/вывода (score от LLM)
+        stability: Временная стабильность (decay со временем)
+        verification: Уровень подтверждения (растёт при повторных упоминаниях)
+    """
+    observed: float = 1.0
+    inferred: float = 0.8
+    stability: float = 1.0
+    verification: float = 1.0
+    
+    @property
+    def total(self) -> float:
+        """Общая уверенность как взвешенное произведение."""
+        return self.observed * self.inferred * self.stability * self.verification
 
 
 def _new_id(prefix: str) -> str:
@@ -33,6 +76,17 @@ class Fact:
     evidence: list[str] = field(default_factory=list)
     facts_sent_count: int = 0
     facts_used_count: int = 0
+    
+    # Phase C1: Provenance
+    origin: MemoryOrigin = MemoryOrigin.LLM_EXTRACTION
+    source_message_id: int | None = None
+    identity_layer: IdentityLayer = IdentityLayer.LEGACY_UNKNOWN
+    
+    # Decomposed confidence (Phase C1)
+    conf_observed: float = 1.0
+    conf_inferred: float = 0.8
+    conf_stability: float = 1.0
+    conf_verification: float = 1.0
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -43,12 +97,33 @@ class Fact:
             self.valid_from = self.date
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        # Convert enums to string values for JSON serialization
+        if isinstance(self.origin, MemoryOrigin):
+            result["origin"] = self.origin.value
+        if isinstance(self.identity_layer, IdentityLayer):
+            result["identity_layer"] = self.identity_layer.value
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Fact:
         known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
-        return cls(**{k: v for k, v in data.items() if k in known})
+        filtered = {k: v for k, v in data.items() if k in known}
+        
+        # Convert string values back to enums
+        if "origin" in filtered and isinstance(filtered["origin"], str):
+            try:
+                filtered["origin"] = MemoryOrigin(filtered["origin"])
+            except ValueError:
+                filtered["origin"] = MemoryOrigin.LLM_EXTRACTION
+        
+        if "identity_layer" in filtered and isinstance(filtered["identity_layer"], str):
+            try:
+                filtered["identity_layer"] = IdentityLayer(filtered["identity_layer"])
+            except ValueError:
+                filtered["identity_layer"] = IdentityLayer.LEGACY_UNKNOWN
+        
+        return cls(**filtered)
 
 
 @dataclass
