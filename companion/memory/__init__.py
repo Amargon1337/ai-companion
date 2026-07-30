@@ -5,8 +5,16 @@ from companion.memory.verification import (
     VerificationResult,
     verify_projection_integrity,
 )
+from companion.memory.governance import (
+    GovernanceAction,
+    GovernanceDecision,
+    GovernanceRule,
+)
 
 __all__ = [
+    "GovernanceAction",
+    "GovernanceDecision",
+    "GovernanceRule",
     "MemoryStore",
     "ProjectionRebuilder",
     "REQUIRED_REPLAY_FIELDS",
