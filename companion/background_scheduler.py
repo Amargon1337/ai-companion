@@ -44,8 +44,8 @@ def safe_task(coro, task_name: str = "background") -> asyncio.Task:
                         expected="success",
                         actual=str(e),
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.error("Failed to persist background task error: %s", exc, exc_info=True)
     task = asyncio.create_task(_wrapped())
     _active_tasks.add(task)
     task.add_done_callback(_active_tasks.discard)

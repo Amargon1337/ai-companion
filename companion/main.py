@@ -250,8 +250,10 @@ async def run() -> None:
         ping_task.cancel()
         try:
             await asyncio.gather(ping_task, return_exceptions=True)
-        except Exception:
+        except asyncio.CancelledError:
             pass
+        except Exception as exc:
+            logger.debug("Background task cleanup failed: %s", exc, exc_info=True)
         from companion.background_scheduler import cancel_all_tasks
         await cancel_all_tasks()
         await bot.session.close()

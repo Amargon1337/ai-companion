@@ -19,7 +19,7 @@ from companion.background_scheduler import (
     run_background_tasks,
     safe_task,
 )
-from companion.config import BASE_DIR, SUMMARY_THRESHOLD
+from companion.config import BASE_DIR, FAISS_FLUSH_INTERVAL_SECONDS, SUMMARY_THRESHOLD
 from companion.config import LLM_HISTORY_TOKEN_BUDGET, LLM_INPUT_TOKEN_BUDGET
 from companion.context import ContextAggregator
 from companion.critique_manager import apply_critique_to_text, run_self_critique
@@ -31,6 +31,7 @@ from companion.memory.retrieval import RetrievalBudgetManager
 from companion.memory.store import MemoryStore
 from companion.models import Fact
 from companion.llm.token_budget import estimate_tokens, trim_history
+from companion import observability
 from companion.policy_layer import policy_layer
 from companion.policy_layer import UserState as PolicyUserState
 from companion.reasoning import reasoning_engine
@@ -64,15 +65,35 @@ async def proactive_ping_loop(bot):
     
     last_subconscious_run = 0.0
     last_dreaming_run = 0.0
+    last_health_check = 0.0
+    last_faiss_flush = 0.0
+    last_replay_learning_date = ""
     
     while True:
         try:
             await asyncio.sleep(60)
             now_dt = datetime.now()
+            if now_dt.timestamp() - last_faiss_flush >= FAISS_FLUSH_INTERVAL_SECONDS:
+                await asyncio.to_thread(memory_store.vector.flush_index)
+                last_faiss_flush = now_dt.timestamp()
             hour = now_dt.hour
+
+            if hour == 4 and last_replay_learning_date != now_dt.date().isoformat():
+                from evaluation.learning import learn_replays
+                learned = await learn_replays(memory_store, limit=10)
+                logger.info("Nightly replay learning annotated %d replay(s)", learned)
+                last_replay_learning_date = now_dt.date().isoformat()
             
             # Фоновое "Подсознание" (Background Consolidation) запускаем ночью (3:00 - 4:59)
             if 3 <= hour < 5:
+                if (now_dt.timestamp() - last_health_check) > 12 * 3600:
+                    from companion.memory.health import memory_health
+                    from companion.memory.consolidation import consolidate_if_due, decay_fact_confidence
+                    health = await asyncio.to_thread(memory_health, memory_store)
+                    await asyncio.to_thread(consolidate_if_due, memory_store, 7)
+                    await asyncio.to_thread(decay_fact_confidence, memory_store)
+                    logger.info("Nightly memory health: %s", health)
+                    last_health_check = now_dt.timestamp()
                 if (now_dt.timestamp() - last_subconscious_run) > 12 * 3600:
                     from companion.proactive.subconscious import run_subconscious_consolidation
                     await run_subconscious_consolidation(bot, memory_store)
@@ -102,8 +123,8 @@ async def send_typing(message: types.Message):
     """Send typing indicator once."""
     try:
         await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Unable to send typing indicator: %s", exc, exc_info=True)
 
 
 async def send_long_message(message: types.Message, text: str, **kwargs) -> None:
@@ -379,8 +400,15 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
     if query.strip():
         state.user_message = query
 
+        from evaluation.learning import annotate_previous_satisfaction
+        await asyncio.to_thread(annotate_previous_satisfaction, memory_store, uid, query)
+
         # LLM-based analysis replaces mood_lite, importance heuristics, and intent regex
+        started = time.perf_counter()
         analysis = await asyncio.to_thread(analyze_message, query)
+        trace = observability.active_trace(uid)
+        if trace:
+            trace.timings_ms["analyzer"] = (time.perf_counter() - started) * 1000
         state.message_importance = analysis["estimated_importance"]
         state.mood_state = analysis["user_mood"]
         state.intent = analysis["intent"]
@@ -412,7 +440,11 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
     policy_decision = _get_policy_decision(state, query)
     state.policy_constraints = policy_decision.constraints if policy_decision else None
     logger.info(f"[MEMORY] Запуск RAG. Важность: {state.message_importance}. Сборка когнитивного контекста...")
-    ctx_data = await _load_retrieval_context(query, state.reasoning_context, state.message_importance)
+    retrieval_started = time.perf_counter()
+    ctx_data = await _load_retrieval_context(query, state.reasoning_context, state.message_importance, state.intent)
+    trace = observability.active_trace(uid)
+    if trace:
+        trace.timings_ms["retrieval"] = (time.perf_counter() - retrieval_started) * 1000
 
     # Блокируем web search для технических/кодовых запросов — ответ только из памяти
     _coding_keywords = {"питон", "python", "код", "скрипт", "бот"}
@@ -557,6 +589,11 @@ async def _route_command(message: types.Message, command: str, text: str) -> boo
         "show_reasoning": show_reasoning_state,
         "self_description": show_self_description,
         "knowledge_map": show_selfmap,
+        "debug_retrieval": commands.show_debug_retrieval,
+        "why": commands.show_why,
+        "memory_stats": commands.show_memory_stats,
+        "memory_health": commands.show_memory_health,
+        "replay": commands.show_replay,
     }
 
     handler = routing.get(command)
@@ -586,6 +623,22 @@ async def _route_command(message: types.Message, command: str, text: str) -> boo
             await commands.show_year(message, year_match.group())
             return True
 
+    if command == "inspect_fact":
+        fact_id = text.strip().split()[-1] if text.strip() else ""
+        if fact_id:
+            await commands.inspect_fact(message, fact_id)
+            return True
+
+    if command == "memory_gc":
+        await commands.run_memory_gc(message, apply=text.strip().lower() == "apply")
+        return True
+
+    if command == "replay":
+        replay_id = text.strip().split()[-1] if text.strip() else ""
+        if replay_id:
+            await commands.show_replay(message, replay_id)
+            return True
+
     return False
 
 
@@ -603,7 +656,9 @@ from companion.llm.telemetry import observe
 @observe(name="process_llm_request")
 async def process_llm_request(message: types.Message, content_payload: Any) -> None:
     cleanup_pending_commands()
-    last_activity[message.from_user.id] = time.time()
+    uid = message.from_user.id
+    last_activity[uid] = time.time()
+    observability.begin_trace(uid, _query_text(content_payload))
     
     from companion.user_model import user_model
     from companion.proactive.engagement import record_user_replied
@@ -611,6 +666,7 @@ async def process_llm_request(message: types.Message, content_payload: Any) -> N
 
     ctx = await build_context(message, content_payload)
     if ctx is None:
+        observability.finish_trace(uid)
         return
 
     state = ctx["state"]
@@ -641,6 +697,7 @@ async def process_llm_request(message: types.Message, content_payload: Any) -> N
                     reply_markup=kb
                 ), "destructive_confirm")
                 state.command = None
+                observability.finish_trace(uid)
                 return
 
         try:
@@ -651,6 +708,7 @@ async def process_llm_request(message: types.Message, content_payload: Any) -> N
                     f"[Выполнена команда: {command}]",
                     4, "command", [], ctx["uid"]
                 )
+                observability.finish_trace(uid)
                 return
         finally:
             state.command = None
@@ -662,6 +720,9 @@ async def process_llm_request(message: types.Message, content_payload: Any) -> N
         ctx["ctx_data"], ctx["policy_decision"], ctx["uid"],
         force_flash=ctx.get("force_flash", False)
     )
+    trace = observability.finish_trace(uid)
+    if trace:
+        await asyncio.to_thread(observability.save_replay, trace, memory_store)
 
 
 async def _extract_prospective_memory(text: str) -> None:
@@ -719,16 +780,13 @@ def _get_policy_decision(state: RuntimeState, query: str) -> Any | None:
     return None
 
 
-async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, Any] | None = None, importance: int = 5):
+async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, Any] | None = None, importance: int = 5, intent: str = ""):
     """All operations here are blocking I/O (SQLite, file reads, embedding API).
     Must run via to_thread to avoid freezing the event loop."""
     def _load_sync() -> dict[str, Any]:
         all_facts = memory_store.list_facts("active")
         if query:
-            # Dynamic retrieval budget:
-            # 0 importance -> ~5 facts. 10 importance -> ~70 facts.
             dynamic_limit = max(5, int(5 + (importance * 6.5)))
-            
             search_results = memory_store.search_facts(query, limit=dynamic_limit)
             searched = [f for f, _ in search_results]
             faiss_scores = {f.id: score for f, score in search_results}
@@ -745,6 +803,13 @@ async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, 
 
         raw_goals = memory_store.db.list_goals(status="active")[:2]
         formatted_goals = [f"{g.get('title', '')}: {g.get('description', '')}" for g in raw_goals]
+
+        # Timeline block: последние 10 событий
+        events = memory_store.db.load_events()
+        timeline_lines = []
+        for e in events[-10:]:
+            timeline_lines.append(f"{e['date']} — {e['event']}")
+        timeline_block = "\n".join(timeline_lines)
 
         return {
             "facts": facts_list,
@@ -765,6 +830,8 @@ async def _load_retrieval_context(query: str = "", reasoning_context: dict[str, 
             "world_model_context": reasoning_context.get("world_model_context", "") if reasoning_context else "",
             "faiss_scores": faiss_scores,
             "runtime_context_block": context_aggregator.build_prompt_block(),
+            "timeline_block": timeline_block,
+            "intent": intent or "",
         }
 
     return await asyncio.to_thread(_load_sync)
@@ -815,6 +882,7 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
     bundle = None
     ctx_block = None
     if isinstance(content_payload, str) and query:
+        rerank_started = time.perf_counter()
         bundle = retrieval_mgr.select(
             query=query, facts=ctx_data["facts"], reflections=ctx_data["reflections"],
             patterns=ctx_data.get("patterns", []),
@@ -834,7 +902,19 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             human_model=ctx_data.get("human_model"),
             life_transitions=ctx_data.get("life_transitions"),
             store=memory_store,
+            timeline_block=ctx_data.get("timeline_block", ""),
+            intent=ctx_data.get("intent", ""),
         )
+        trace = observability.active_trace(uid)
+        if trace:
+            trace.timings_ms["rerank_and_bundle"] = (time.perf_counter() - rerank_started) * 1000
+            await asyncio.to_thread(
+                observability.capture_bundle,
+                trace,
+                bundle,
+                ctx_data.get("faiss_scores", {}),
+                memory_store,
+            )
         logger.info(f"[RAG] Собран бандл памяти. Фактов: {len(bundle.facts) if bundle.facts else 0}, Рефлексий: {len(bundle.reflections) if bundle.reflections else 0}.")
         if bundle.facts:
             logger.info("[RAG DEBUG] Top 5 (Dynamic) Facts:")
@@ -953,6 +1033,15 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
                 max(0, LLM_INPUT_TOKEN_BUDGET - reserved_tokens),
             )
             bounded_history = trim_history(base_chat_config["history"], history_budget)
+            trace = observability.active_trace(uid)
+            if trace:
+                trace.history_tokens = sum(
+                    estimate_tokens(part.get("text", "")) + 4
+                    for item in bounded_history
+                    for part in item.get("parts", [])
+                    if isinstance(part, dict)
+                )
+                trace.input_tokens = reserved_tokens + trace.history_tokens
 
             chat = llm.client.chats.create(
                 model=base_chat_config["model"],
@@ -971,7 +1060,11 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
                 return await llm.run_llm(c.send_message, payload, timeout=250)
             
             try:
+                llm_started = time.perf_counter()
                 response = await execute_final_response(chat, content_payload)
+                trace = observability.active_trace(uid)
+                if trace:
+                    trace.timings_ms["gemini"] = (time.perf_counter() - llm_started) * 1000
             except Exception as e:
                 # Если мы уже на flash-lite или нас принудительно переключили, не пытаемся фоллбэчиться
                 if not force_flash and desired_model != MODEL_NAME:
@@ -1017,6 +1110,9 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
                 "assistant", text, 5, "default", [], uid
             )
         state.llm_response = text
+        trace = observability.active_trace(uid)
+        if trace:
+            trace.response_text = text
 
         if bundle and ctx_block and msg_rec and text:
             try:
@@ -1056,7 +1152,7 @@ def _analyze_context_utilization(response_text: str, bundle: Any) -> tuple[int, 
         for f in bundle.facts:
             sent_ids.append(f.id)
             f_text = f.fact.lower()
-            words = [w for w in _re.findall(r'[а-яёa-z0-9]+', f_text) if len(w) > 3]
+            words = [w for w in _re.findall(r'[а-яёа-z0-9]+', f_text) if len(w) > 3]
             used = False
             if words:
                 matches = sum(1 for w in words if w in resp_lower)
@@ -1073,7 +1169,7 @@ def _analyze_context_utilization(response_text: str, bundle: Any) -> tuple[int, 
     if bundle.reflections:
         for r in bundle.reflections:
             r_text = r.insight.lower()
-            words = [w for w in _re.findall(r'[а-яёa-z0-9]+', r_text) if len(w) > 3]
+            words = [w for w in _re.findall(r'[а-яёа-z0-9]+', r_text) if len(w) > 3]
             if not words:
                 continue
             matches = sum(1 for w in words if w in resp_lower)
@@ -1083,7 +1179,7 @@ def _analyze_context_utilization(response_text: str, bundle: Any) -> tuple[int, 
     if bundle.active_goals:
         for g in bundle.active_goals:
             g_clean = _re.sub(r'^•\s*\[\d+/\d+\]\s*', '', g).lower()
-            words = [w for w in _re.findall(r'[а-яёa-z0-9]+', g_clean) if len(w) > 3]
+            words = [w for w in _re.findall(r'[а-яёа-z0-9]+', g_clean) if len(w) > 3]
             if not words:
                 continue
             matches = sum(1 for w in words if w in resp_lower)

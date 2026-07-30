@@ -1,0 +1,8 @@
+{
+  "name": "entity_chain",
+  "description": "Tests whether retrieval correctly follows entity relationships (e.g., Morzik -> Ivan -> projects).",
+  "query": "Что связывает Ивана и его собаку?",
+  "expected_entities": ["Иван", "Морзик"],
+  "expected_relation_type": "owner",
+  "expected_min_hops": 1
+}

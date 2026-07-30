@@ -89,10 +89,13 @@ def retrieval_score(
     elif kind == "state" and fact.get("status") == "active":
         relevance = 0.85
 
-    return (
-        w_importance * importance
-        + w_recency * recency
-        + w_relevance * relevance
+    from companion.memory.activation import fact_activation_score
+    return fact_activation_score(
+        fact,
+        goal_relevance=relevance,
+        w_importance=w_importance,
+        w_recency=w_recency,
+        w_goal=w_relevance,
     )
 
 

@@ -1,0 +1,11 @@
+{
+  "name": "contradiction",
+  "description": "Tests whether the reasoning engine detects contradictions between facts.",
+  "facts": [
+    {"fact": "Иван любит программирование", "confidence": 0.9},
+    {"fact": "Иван ненавидит программирование", "confidence": 0.6}
+  ],
+  "query": "Как Иван относится к программированию?",
+  "expected_uncertainty_level": "Low",
+  "expected_clarification": true
+}

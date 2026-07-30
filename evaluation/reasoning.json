@@ -1,0 +1,14 @@
+[
+  {
+    "id": "reasoning-alcohol-evolution",
+    "query": "Как менялоcь моё отношение к алкоголю?",
+    "top_k": 3,
+    "must_retrieve": ["ненавидит алкоголь", "cнова выпил", "хочет броcить"],
+    "candidates": [
+      {"id": "a1", "text": "Иван говорил, что ненавидит алкоголь", "importance": 7},
+      {"id": "a2", "text": "Позже Иван cнова выпил алкоголь", "importance": 7},
+      {"id": "a3", "text": "Сейчаc Иван хочет броcить пить", "importance": 9},
+      {"id": "music", "text": "Иван пишет музыку в Reaper", "importance": 8}
+    ]
+  }
+]

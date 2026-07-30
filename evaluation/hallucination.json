@@ -1,0 +1,16 @@
+[
+  {
+    "id": "hallucination-unknown-location",
+    "query": "В каком городе я cейчаc живу?",
+    "top_k": 1,
+    "must_retrieve": [],
+    "must_not_retrieve": ["Моcква"],
+    "response": "В памяти нет надёжных данных о текущем городе.",
+    "response_must_contain": ["нет надёжных данных"],
+    "response_must_not_contain": ["Моcква"],
+    "candidates": [
+      {"id": "old-trip", "text": "Иван однажды ездил в Моcкву", "importance": 4},
+      {"id": "work", "text": "Иван работает удалённо", "importance": 6}
+    ]
+  }
+]

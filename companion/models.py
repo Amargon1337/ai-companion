@@ -46,6 +46,15 @@ class Fact:
     facts_used_count: int = 0
     version: int = 1
     superseded_by: str = ""
+    # Слой знания: user (память о пользователе) | world (знания о мире) |
+    # system (знания о самом компаньоне/его архитектуре).
+    domain: str = "user"
+    last_retrieved_at: str | None = None
+    last_used_at: str | None = None
+    # Meta Memory: аналитика полезности самого факта
+    # {"uses": int, "intents": {intent: n}, "reactions": {"pos": n, "neg": n}, "last_used_at": iso}
+    meta: dict[str, Any] = field(default_factory=dict)
+    entity_ids: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -55,13 +64,88 @@ class Fact:
         if not self.valid_from:
             self.valid_from = self.date
 
+    @property
+    def retrieved_count(self) -> int:
+        return self.facts_sent_count
+
+    @retrieved_count.setter
+    def retrieved_count(self, value: int) -> None:
+        self.facts_sent_count = value
+
+    @property
+    def used_count(self) -> int:
+        return self.facts_used_count
+
+    @used_count.setter
+    def used_count(self, value: int) -> None:
+        self.facts_used_count = value
+
+    @property
+    def precision(self) -> float:
+        if self.retrieved_count <= 0:
+            return 0.0
+        return min(1.0, float(self.used_count) / float(self.retrieved_count))
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["retrieved_count"] = self.retrieved_count
+        d["used_count"] = self.used_count
+        d["precision"] = self.precision
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Fact:
+        d = dict(data)
+        if "retrieved_count" in d and "facts_sent_count" not in d:
+            d["facts_sent_count"] = d.pop("retrieved_count")
+        if "used_count" in d and "facts_used_count" not in d:
+            d["facts_used_count"] = d.pop("used_count")
+        known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+
+@dataclass
+class Episode:
+    """Эпизодическая память: связная история, а не набор фактов.
+
+    Episode = дата + что произошло + кто участвовал + какие эмоции +
+    чему это научило + связанные факты. Структурированная запись живёт в
+    таблице episodes; для retrieval дополнительно создаётся факт c тегом
+    "episode" (fact_id), связанный c исходными фактами через fact_relations.
+    """
+
+    title: str                       # короткий заголовок: что произошло
+    narrative: str                   # 2-4 предложения — история
+    date: str                        # дата или период (YYYY-MM-DD / YYYY-MM)
+    participants: list[str] = field(default_factory=list)
+    emotions: dict[str, float] = field(default_factory=dict)  # joy|sadness|anger|fear|hope -> 0..1
+    lesson: str = ""                 # чему это научило
+    fact_ids: list[str] = field(default_factory=list)  # исходные факты
+    fact_id: str = ""                # retrieval-факт, представляющий эпизод
+    importance: int = 7
+    confidence: float = 0.8
+    id: str = ""
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            self.id = _new_id("episode")
+        if not self.created_at:
+            self.created_at = datetime.now().isoformat()
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Fact:
+    def from_dict(cls, data: dict[str, Any]) -> "Episode":
         known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
-        return cls(**{k: v for k, v in data.items() if k in known})
+        d = {k: v for k, v in data.items() if k in known}
+        for fld in ("participants", "fact_ids"):
+            if fld in d and not isinstance(d[fld], list):
+                d[fld] = []
+        if "emotions" in d and not isinstance(d["emotions"], dict):
+            d["emotions"] = {}
+        return cls(**d)
 
 
 @dataclass
@@ -86,6 +170,124 @@ class FactRelation:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> FactRelation:
         known = {f.name for f in FactRelation.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+@dataclass
+class Entity:
+    name: str
+    type: str
+    importance: float = 0.5
+    entity_id: str = ""
+    version: int = 1
+    created_at: str = ""
+    updated_at: str = ""
+    last_mentioned_at: str = ""
+    aliases: list[str] = field(default_factory=list)
+    summary: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.entity_id:
+            self.entity_id = _new_id("ent")
+        if not self.created_at:
+            self.created_at = datetime.now().isoformat()
+        if not self.updated_at:
+            self.updated_at = self.created_at
+        if not self.last_mentioned_at:
+            self.last_mentioned_at = self.created_at
+        if isinstance(self.aliases, str):
+            try:
+                self.aliases = json.loads(self.aliases)
+            except Exception:
+                self.aliases = []
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Entity:
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        parsed = {}
+        for k, v in data.items():
+            if k in known:
+                if k == "aliases" and isinstance(v, str):
+                    try:
+                        v = json.loads(v)
+                    except Exception:
+                        v = []
+                parsed[k] = v
+        return cls(**parsed)
+
+
+@dataclass
+class EntityAttribute:
+    entity_id: str
+    attribute_key: str
+    attribute_value: str
+    confidence: float = 0.8
+    source_fact_id: str = ""
+    id: int = 0
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.created_at:
+            self.created_at = datetime.now().isoformat()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> EntityAttribute:
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+@dataclass
+class EntityRelation:
+    from_entity_id: str
+    to_entity_id: str
+    relation_type: str
+    trust: float = 0.5
+    interaction_frequency: float = 0.0
+    sentiment: float = 0.0
+    relationship_strength: float = 0.5
+    relation_id: str = ""
+    version: int = 1
+    last_seen_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.relation_id:
+            self.relation_id = _new_id("erel")
+        if not self.last_seen_at:
+            self.last_seen_at = datetime.now().isoformat()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> EntityRelation:
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+@dataclass
+class EntityMention:
+    entity_id: str
+    fact_id: str
+    context_snippet: str = ""
+    id: int = 0
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.created_at:
+            self.created_at = datetime.now().isoformat()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> EntityMention:
+        known = {f.name for f in cls.__dataclass_fields__.values()}
         return cls(**{k: v for k, v in data.items() if k in known})
 
 
@@ -454,6 +656,7 @@ class ContextBundle:
     comm_prefs: "CommPref | None" = None
     human_model: "HumanModel | None" = None
     life_transitions: "list[Any]" = field(default_factory=list)  # LCE: траектория изменений
+    timeline_block: str = ""  # Memory Timeline: хронология ключевых событий
 
     def to_prompt_block(self) -> str:
         from companion.security.sanitizer import sanitize_markup
@@ -580,6 +783,9 @@ class ContextBundle:
         if self.active_goals:
             sanitized_goals = [sanitize_markup(g) or "" for g in self.active_goals]
             memory_parts.append("[Активные цели]\n" + "\n".join(sanitized_goals))
+        if self.timeline_block:
+            sanitized_tl = sanitize_markup(self.timeline_block) or ""
+            memory_parts.append(f"[Хронология ключевых событий]\n{sanitized_tl}")
         if self.causal_links:
             sanitized_links = [sanitize_markup(c) or "" for c in self.causal_links]
             memory_parts.append("[Причинно-следственный контекст]\n" + "\n".join(sanitized_links))
@@ -612,13 +818,24 @@ class ContextBundle:
 
         if self.facts:
             from companion.temporal import format_relative_time
-            lines = []
-            for f in self.facts:
+
+            def _fact_line(f) -> str:
                 date_str = getattr(f, "date", None) or getattr(f, "created_at", "")
                 rel_time = format_relative_time(date_str) if date_str else ""
                 time_label = rel_time or (date_str[:10] if isinstance(date_str, str) and len(date_str) >= 10 else "недавно")
-                lines.append(f"• [{f.memory_kind}|{time_label}] {sanitize_markup(f.fact) or ''}")
-            memory_parts.append("[Релевантные факты]\n" + "\n".join(lines))
+                return f"• [{f.memory_kind}|{time_label}] {sanitize_markup(f.fact) or ''}"
+
+            # World Model: знания разделены на три слоя, чтобы модель не путала
+            # воспоминания о пользователе c объективными знаниями о мире и системе.
+            domain_labels = [
+                ("user", "[Факты о пользователе]"),
+                ("world", "[Знания о мире — не про пользователя]"),
+                ("system", "[Системные знания — об устройстве компаньона]"),
+            ]
+            for domain, label in domain_labels:
+                lines = [_fact_line(f) for f in self.facts if getattr(f, "domain", "user") == domain]
+                if lines:
+                    memory_parts.append(label + "\n" + "\n".join(lines))
         if self.summaries:
             sanitized_sum = [sanitize_markup(s) or "" for s in self.summaries]
             memory_parts.append("[Контекст саммари]\n" + "\n".join(sanitized_sum))

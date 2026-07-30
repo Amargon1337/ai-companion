@@ -22,6 +22,11 @@ from companion.memory.semantic_ranker import SemanticImportanceRanker
 from companion.memory.vector_index import VectorIndex
 from companion.memory.identity_vault import IdentityVault
 from companion.models import Fact, FactRelation, MessageRecord, Reflection, Pattern
+from companion.memory.events import IndexSyncService, MemoryEventBus
+from companion.memory.governor import MemoryGovernor
+from companion.memory.persistence import MemoryPersistenceLayer
+from companion.memory.feedback import MemoryFeedbackLoop
+from companion.memory.hygiene import MemoryHygieneService
 from companion.storage.sqlite_db import MemoryDatabase
 
 logger = logging.getLogger(__name__)
@@ -31,10 +36,40 @@ class MemoryStore:
     def __init__(self) -> None:
         self.db = MemoryDatabase()
         self.vector = VectorIndex()
+        self.event_bus = MemoryEventBus()
+        self.index_sync = IndexSyncService(self.event_bus, self.vector, self.db)
         self.semantic_ranker = SemanticImportanceRanker(self.db)
         self.identity = IdentityVault(self.db.path)
+        self.governor = MemoryGovernor(self.db)
+        self.persistence = MemoryPersistenceLayer(self.db, self.governor, event_bus=self.event_bus)
+        self.feedback_loop = MemoryFeedbackLoop(self.db, self.governor)
+        self.hygiene_service = MemoryHygieneService(self.db, self.governor, vector_index=self.vector)
+        from companion.memory.world_model import WorldModelService
+        self.world_model = WorldModelService(self.db, vector=self.vector)
+        from companion.memory.cognitive_loop import CognitiveLoopService
+        self._cognitive = CognitiveLoopService(self.db, store=self, world_model=self.world_model, vector=self.vector)
+        from companion.reasoning_engine import ReasoningEngineService
+        self._reasoning_engine = ReasoningEngineService(db=self.db, store=self)
+        from companion.learning_engine import LearningEngineService
+        self._learning_engine = LearningEngineService(db=self.db, store=self)
         import threading
         self._cache_lock = threading.Lock()
+
+    @property
+    def world(self) -> Any:
+        return self.world_model
+
+    @property
+    def cognitive(self) -> Any:
+        return self._cognitive
+
+    @property
+    def reasoner(self) -> Any:
+        return self._reasoning_engine
+
+    @property
+    def learning(self) -> Any:
+        return self._learning_engine
 
     @property
     def lock(self) -> asyncio.Lock:
@@ -83,6 +118,10 @@ class MemoryStore:
         add non-identity enrichment so prompt sections do not fight each other.
         """
         parts: list[str] = []
+        from companion.memory.consolidation import SNAPSHOT_MODEL, snapshot_text
+        snapshot = self.db.get_state_model(SNAPSHOT_MODEL)
+        if snapshot:
+            parts.append(snapshot_text(snapshot))
         vault_block = self.identity.to_prompt_block()
         if vault_block:
             parts.append(vault_block)
@@ -128,27 +167,6 @@ class MemoryStore:
     def build_personality_snapshot_text(self) -> str:
         """Backward-compatible name for the canonical prompt profile."""
         return self.build_canonical_profile_text()
-
-    def observability_stats(self) -> dict[str, Any]:
-        """Return cheap runtime/storage counters for diagnostics commands."""
-        with self.db._conn() as conn:
-            counts: dict[str, int] = {}
-            for table in ("facts", "beliefs", "patterns", "reflections", "messages", "predictions", "fact_relations"):
-                row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
-                counts[table] = int(row[0])
-            active = conn.execute("SELECT COUNT(*) FROM facts WHERE status='active'").fetchone()
-            latest_metric = conn.execute(
-                "SELECT * FROM retrieval_metrics ORDER BY timestamp DESC LIMIT 1"
-            ).fetchone()
-
-        return {
-            "counts": counts,
-            "active_facts": int(active[0]),
-            "embedding_cache": self.vector.count(),
-            "faiss_total": int(getattr(getattr(self.vector, "index", None), "ntotal", 0)),
-            "faiss_dirty": bool(getattr(self.vector, "_dirty_updates", 0)),
-            "last_retrieval_metric": dict(latest_metric) if latest_metric else None,
-        }
 
     def load_master_summary(self) -> str:
         """Load master summary from SQLite DB (meta table)."""
@@ -206,10 +224,30 @@ class MemoryStore:
             logger.debug("Dedup: skipping fact similar to %s", existing.id)
             return existing
 
+        if fact.status == "active" and hasattr(self, "governor") and self.governor:
+            decision = self.governor.validate_ingestion(fact)
+            if decision.action == "quarantine":
+                fact.status = "quarantine"
+                logger.info("ingestion_quarantine: Fact %s placed in quarantine (%s)", fact.id, decision.reason)
+
+        if hasattr(self, "world_model") and self.world_model and fact.status in ("active", "dormant"):
+            try:
+                self.world_model.process_fact(fact)
+            except Exception as e:
+                logger.debug("world_model processing error: %s", e)
+
         d = fact.to_dict()
         self.db._insert_fact(d)
-        self.vector.compute_and_cache(fact.fact, content_type="fact", fact_id=fact.id)
+        if fact.status in ("active", "dormant"):
+            self.vector.compute_and_cache(fact.fact, content_type="fact", fact_id=fact.id)
+        if self.event_bus:
+            from companion.memory.events.base import FactCreatedEvent
+            self.event_bus.publish(FactCreatedEvent(fact_id=fact.id, fact_text=fact.fact, importance=fact.importance, source=fact.source))
         return fact
+
+    def recover_index_consistency(self) -> dict[str, int]:
+        from companion.memory.events.sync import recover_index_consistency
+        return recover_index_consistency(self)
 
     def get_fact(self, fact_id: str) -> Fact | None:
         row = self.db.get_fact(fact_id)
@@ -256,6 +294,9 @@ class MemoryStore:
             if old_text.strip():
                 self.vector.delete_for_content(old_text)
             self.vector.compute_and_cache(fact, content_type="fact", fact_id=fact_id)
+        if self.event_bus:
+            from companion.memory.events.base import FactUpdatedEvent
+            self.event_bus.publish(FactUpdatedEvent(fact_id=fact_id, old_state={"fact": old_text}, new_state=fields, reason="update_fact"))
         return True
 
     def delete_fact(self, fact_id: str) -> bool:
@@ -301,8 +342,15 @@ class MemoryStore:
         if not fact or fact.status != "dormant":
             logger.warning("Attempted to revive non-dormant fact %s (status: %s)", fact_id, fact.status if fact else "None")
             return
-        with self.db._conn() as conn:
-            conn.execute("UPDATE facts SET status='active', facts_sent_count=0 WHERE id=?", (fact_id,))
+        from companion.memory.policies.base import PolicyDecision
+        decision = PolicyDecision(
+            approved=True,
+            action="revive",
+            updates={"status": "active", "facts_sent_count": 0},
+            reason="dormant_auto_revival",
+            policy_name="DormantRevivalPolicy",
+        )
+        self.persistence.apply_decision(fact_id, decision, reason="dormant_auto_revival", initiator="governor")
         logger.info("dormant_auto_revival: Fact %s promoted to active", fact_id)
 
     def search_facts(self, query: str, limit: int = 20) -> list[tuple[Fact, float]]:
@@ -328,7 +376,7 @@ class MemoryStore:
                         seen.add(f.id)
                         hits.append((f, r["score"]))
                         
-                # Then check dormant facts via FAISS
+                # Then check dormant facts via FAISS (pure read-only search)
                 for r in results:
                     if len(hits) >= limit:
                         break
@@ -336,8 +384,6 @@ class MemoryStore:
                     if f and f.id not in seen:
                         from companion.config import DORMANT_REVIVAL_THRESHOLD
                         if r["score"] >= DORMANT_REVIVAL_THRESHOLD:
-                            self.revive_dormant_fact(f.id)
-                            f.status = "active"
                             seen.add(f.id)
                             hits.append((f, r["score"]))
                                 
@@ -881,9 +927,16 @@ class MemoryStore:
             if age > 90 and f.importance <= 4 and f.status == "active":
                 to_dormant.append(f.id)
 
-        with self.db._conn() as conn:
-            for fid in to_dormant:
-                conn.execute("UPDATE facts SET status='dormant', facts_sent_count=0 WHERE id=?", (fid,))
+        for fid in to_dormant:
+            from companion.memory.policies.base import PolicyDecision
+            decision = PolicyDecision(
+                approved=True,
+                action="dormant",
+                updates={"status": "dormant", "facts_sent_count": 0},
+                reason="dormant_aging_policy",
+                policy_name="DormantAgingPolicy",
+            )
+            self.persistence.apply_decision(fid, decision, reason="dormant_aging_policy", initiator="hygiene_service")
 
         return len(to_dormant)
 
@@ -958,11 +1011,19 @@ class MemoryStore:
                         continue
                         
                     if sent > 20 and used == 0:
-                        conn.execute("UPDATE facts SET facts_sent_count=0 WHERE id=?", (fid,))
+                        pass  # Preserve cumulative retrieved_count
                     elif sent > 5 and used > 3:
                         new_imp = min(8, imp + 1)
                         if new_imp != imp:
-                            conn.execute("UPDATE facts SET importance=? WHERE id=?", (new_imp, fid))
+                            from companion.memory.policies.base import PolicyDecision
+                            decision = PolicyDecision(
+                                approved=True,
+                                action="boost",
+                                updates={"importance": new_imp},
+                                reason="retrieval_effectiveness_analysis",
+                                policy_name="RetrievalEffectivenessPolicy",
+                            )
+                            self.persistence.apply_decision(fid, decision, reason="retrieval_effectiveness_analysis", initiator="feedback_loop")
                             logger.info("memory_feedback_loop_applied: %s boosted from %d to %d", fid, imp, new_imp)
                             adjusted["boosted"] += 1
         except Exception as e:

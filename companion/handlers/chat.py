@@ -78,6 +78,24 @@ def register(dp, bot) -> None:
     async def cmd_personality(message: types.Message):
         await commands.show_personality(message)
 
+    @dp.message(Command("evolution"))
+    async def cmd_evolution(message: types.Message):
+        args = (message.text or "").split(maxsplit=1)
+        try:
+            months = max(1, min(36, int(args[1]))) if len(args) > 1 else 8
+        except ValueError:
+            months = 8
+        await commands.show_evolution(message, months)
+
+    @dp.message(Command("episodes"))
+    async def cmd_episodes(message: types.Message):
+        args = (message.text or "").split(maxsplit=1)
+        try:
+            limit = max(1, min(50, int(args[1]))) if len(args) > 1 else 10
+        except ValueError:
+            limit = 10
+        await commands.show_episodes(message, limit)
+
     @dp.message(Command("remember"))
     async def cmd_remember(message: types.Message):
         args = (message.text or "").split(maxsplit=1)
@@ -94,20 +112,57 @@ def register(dp, bot) -> None:
 
     @dp.message(Command("metrics", "stats"))
     async def cmd_metrics(message: types.Message):
-        await commands.show_metrics(message)
-
-    @dp.message(Command("debug"))
-    async def cmd_debug(message: types.Message):
-        await commands.show_debug_retrieval(message)
-
-    @dp.message(Command("why"))
-    async def cmd_why(message: types.Message):
-        await commands.show_why_retrieval(message)
         await message.answer("🧠 <b>Метрики:</b>\nПамять активна и консолидируется в фоне.", parse_mode="HTML")
 
     @dp.message(Command("search"))
     async def cmd_search(message: types.Message):
         await message.answer("Поиск в интернете отключён.")
+
+    @dp.message(Command("debug"))
+    async def cmd_debug(message: types.Message):
+        args = (message.text or "").split(maxsplit=1)
+        if len(args) == 1 or args[1].strip().lower() == "retrieval":
+            await commands.show_debug_retrieval(message)
+        else:
+            await message.answer("Использование: /debug retrieval")
+
+    @dp.message(Command("why"))
+    async def cmd_why(message: types.Message):
+        args = (message.text or "").split(maxsplit=1)
+        await commands.show_why(message, args[1].strip() if len(args) > 1 else "")
+
+    @dp.message(Command("memory_stats"))
+    async def cmd_memory_stats(message: types.Message):
+        await commands.show_memory_stats(message)
+
+    @dp.message(Command("inspect"))
+    async def cmd_inspect(message: types.Message):
+        args = (message.text or "").split(maxsplit=1)
+        if len(args) == 1 or not args[1].strip():
+            await message.answer("Использование: /inspect <fact_id>")
+            return
+        await commands.inspect_fact(message, args[1].strip())
+
+    @dp.message(Command("memory_health"))
+    async def cmd_memory_health(message: types.Message):
+        await commands.show_memory_health(message)
+
+    @dp.message(Command("memory_index_health"))
+    async def cmd_memory_index_health(message: types.Message):
+        await commands.show_memory_index_health(message)
+
+    @dp.message(Command("memory_gc"))
+    async def cmd_memory_gc(message: types.Message):
+        args = (message.text or "").split(maxsplit=1)
+        await commands.run_memory_gc(message, apply=len(args) > 1 and args[1].strip().lower() == "apply")
+
+    @dp.message(Command("replay"))
+    async def cmd_replay(message: types.Message):
+        args = (message.text or "").split(maxsplit=1)
+        if len(args) == 1 or not args[1].strip():
+            await message.answer("Использование: /replay <replay_id>")
+            return
+        await commands.show_replay(message, args[1].strip())
 
     @dp.callback_query(F.data.startswith("action:"))
     async def inline_actions(callback: types.CallbackQuery):
@@ -215,8 +270,8 @@ def register(dp, bot) -> None:
             if vf:
                 try:
                     await llm.run_llm(llm.delete_file, vf.name)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Failed to delete temporary Gemini file: %s", exc, exc_info=True)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 

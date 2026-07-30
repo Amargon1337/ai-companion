@@ -6,6 +6,7 @@ import logging
 
 import os
 import asyncio
+from collections import Counter
 from datetime import datetime
 from typing import Any
 
@@ -106,6 +107,7 @@ class UserModel:
                 "self_perception_confidence": 0.5,
             },
             "beliefs": {},
+            "interests": {},
             "patterns": {
                 "actions": [],
                 "mistakes": [],
@@ -551,6 +553,53 @@ class UserModel:
 
         return baseline, metrics
 
+    def evolution_report(self, months: int = 8) -> dict[str, Any]:
+        """Build a compact, deterministic view of recent model evolution."""
+        cutoff = datetime.now().timestamp() - max(1, months) * 30 * 24 * 3600
+        with self._lock:
+            data = json.loads(json.dumps(self.data, ensure_ascii=False))
+
+        timeline = data.get("emotional_timeline", {})
+        states = [
+            entry.get("state", "neutral")
+            for entry in timeline.get("state_history", [])
+            if _timestamp(entry.get("timestamp")) >= cutoff
+        ]
+        state_counts = Counter(states)
+        current_state, metrics = self.get_effective_emotional_state()
+        changes = [str(item) for item in data.get("changes", []) if isinstance(item, str)]
+        history = data.get("emotional_timeline", {}).get("state_history", [])
+        previous_state = "neutral"
+        if len(history) >= 2:
+            previous_state = str(history[-2].get("state", "neutral"))
+
+        return {
+            "months": max(1, months),
+            "since": datetime.fromtimestamp(cutoff).isoformat(),
+            "interactions": int(data.get("total_interactions", 0)),
+            "new_beliefs": len(data.get("beliefs", {})),
+            "changes": changes[-20:],
+            "interests": dict(sorted(data.get("interests", {}).items(), key=lambda item: item[1], reverse=True)),
+            "baseline_state": timeline.get("baseline_state", "neutral"),
+            "previous_state": previous_state,
+            "dominant_state": state_counts.most_common(1)[0][0] if state_counts else current_state,
+            "current_state": current_state,
+            "state_counts": dict(state_counts),
+            "emotional_metrics": metrics,
+            "patterns": data.get("patterns", {}),
+            "triggers": {
+                "improve": timeline.get("improvement_triggers", []),
+                "deteriorate": timeline.get("deterioration_triggers", []),
+            },
+        }
+
 
 # Global singleton
 user_model = UserModel()
+
+
+def _timestamp(value: Any) -> float:
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return 0.0

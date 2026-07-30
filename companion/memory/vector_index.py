@@ -573,7 +573,7 @@ class VectorIndex:
                         """
                         SELECT content, content_hash, bm25(embeddings_fts) as bm25_score
                         FROM embeddings_fts
-                        WHERE embeddings_fts MATCH ?
+                        WHERE embeddings_fts MATCH ? AND content_type != 'entity'
                         ORDER BY bm25_score ASC
                         LIMIT ?
                         """,
@@ -696,9 +696,11 @@ class VectorIndex:
             
             results = []
             for dist, idx in zip(distances[0], indices[0]):
-                idx = int(idx)
                 if idx != -1 and idx in self.id_to_content:
-                    if content_type and self.id_to_type.get(idx) != content_type:
+                    item_type = self.id_to_type.get(idx)
+                    if content_type and item_type != content_type:
+                        continue
+                    if not content_type and item_type == "entity":
                         continue
                     # Convert L2 distance squared of normalized vectors to Cosine Similarity
                     score = 1.0 - float(dist) / 2.0

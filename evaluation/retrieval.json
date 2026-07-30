@@ -1,0 +1,25 @@
+[
+  {
+    "id": "retrieval-python-project",
+    "query": "Что я делаю c Python и AI?",
+    "top_k": 2,
+    "must_retrieve": ["AI Companion", "Python"],
+    "must_not_retrieve": ["погода"],
+    "candidates": [
+      {"id": "project", "text": "Иван разрабатывает AI Companion", "importance": 9},
+      {"id": "python", "text": "Иван пишет проект на Python", "importance": 8},
+      {"id": "weather", "text": "Сегодня была хорошая погода", "importance": 3}
+    ]
+  },
+  {
+    "id": "retrieval-music-focus",
+    "query": "Какую музыку я делаю?",
+    "top_k": 1,
+    "must_retrieve": ["dark ambient"],
+    "must_not_retrieve": ["работа"],
+    "candidates": [
+      {"id": "music", "text": "Иван пишет dark ambient в Reaper", "importance": 8},
+      {"id": "job", "text": "Иван размышляет о cмене работы", "importance": 7}
+    ]
+  }
+]

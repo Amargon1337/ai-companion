@@ -95,6 +95,7 @@ Use each section only for its defined purpose.
             runtime_context_block="",
             comm_prefs=store.get_comm_pref(),
             human_model=store.get_human_model(),
+            timeline_block="\n".join(f"{e['date']} — {e['event']}" for e in store.db.load_events()[:10]),
         )
         policy_shell += f"\n\n[ДИНАМИЧЕСКИЙ КОНТЕКСТ ПАМЯТИ RAG]\n{bundle.to_prompt_block()}\n"
         

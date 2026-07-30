@@ -24,9 +24,16 @@ async def setup_bot_commands(bot) -> None:
         BotCommand(command="personality", description="Профиль личности"),
         BotCommand(command="continuity", description="Синтез траектории личности"),
         BotCommand(command="timeline", description="Хронология изменений"),
+        BotCommand(command="episodes", description="Эпизодическая память"),
         BotCommand(command="metrics", description="Когнитивная статистика"),
-        BotCommand(command="debug", description="Retrieval diagnostics"),
-        BotCommand(command="why", description="Explain selected memory"),
+        BotCommand(command="evolution", description="Эволюция личности"),
         BotCommand(command="remember", description="Запомнить важное"),
+        BotCommand(command="debug", description="Диагностика retrieval"),
+        BotCommand(command="why", description="Почему выбран контекст"),
+        BotCommand(command="memory_stats", description="Статистика памяти"),
+        BotCommand(command="inspect", description="Инспектор факта"),
+        BotCommand(command="memory_health", description="Здоровье памяти"),
+        BotCommand(command="memory_gc", description="Очистка памяти dry-run"),
+        BotCommand(command="replay", description="Воспроизвести retrieval"),
     ]
     await bot.set_my_commands(commands)

@@ -62,13 +62,17 @@ class SemanticImportanceRanker:
         decay_exempt = bool((metadata or {}).get("decay_exempt") or 0)
         access_count = int((metadata or {}).get("access_count") or 0)
         created_at = str((metadata or {}).get("created_at") or fact.created_at or fact.date)
+        sent_count = int((metadata or {}).get("facts_sent_count", getattr(fact, "facts_sent_count", 0)) or 0)
+
+        novelty_bonus = config.NOVELTY_EXPLORATION_BETA / math.sqrt(1 + max(0, sent_count))
+
         score = (
             vector_score
             * self._importance_weight(importance)
             * self._recency_factor(created_at, anchor=anchor, manual_lock=manual_lock, decay_exempt=decay_exempt)
             * self._access_factor(access_count)
             * (self.anchor_boost_value if anchor else 1.0)
-        )
+        ) + novelty_bonus
         return min(score, self.max_final_score)
 
     def update_access(self, scores: Iterable[tuple[str, float, float]], query_text: str) -> None:

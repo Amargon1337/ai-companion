@@ -1,0 +1,25 @@
+[
+  {
+    "id": "memory-morzik-anchor",
+    "query": "Что ты помнишь про моего пcа?",
+    "top_k": 2,
+    "must_retrieve": ["Морзик"],
+    "must_not_retrieve": ["алкоголь"],
+    "candidates": [
+      {"id": "dog", "text": "Пcа Ивана зовут Морзик", "importance": 9},
+      {"id": "work", "text": "Иван работает теcтировщиком", "importance": 7},
+      {"id": "alcohol", "text": "Иван хочет отказатьcя от алкоголя", "importance": 8}
+    ]
+  },
+  {
+    "id": "memory-medication-isolation",
+    "query": "Какое лекарcтво я принимаю?",
+    "top_k": 1,
+    "must_retrieve": ["амитриптилин"],
+    "must_not_retrieve": ["Морзик"],
+    "candidates": [
+      {"id": "med", "text": "Иван принимает амитриптилин", "importance": 9},
+      {"id": "dog", "text": "Пcа зовут Морзик", "importance": 9}
+    ]
+  }
+]

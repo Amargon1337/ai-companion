@@ -82,6 +82,11 @@ def extract_facts(
         evidence_list = [str(e) for e in item.get("evidence_messages", [])]
         status = "pending_review" if _looks_like_injection(text) else "active"
 
+        # World Model: слой знания (user|world|system), по умолчанию — user.
+        domain = str(item.get("domain", "user") or "user").lower()
+        if domain not in ("user", "world", "system"):
+            domain = "user"
+
         fact = Fact(
             fact=text,
             date=datetime.now().strftime("%Y-%m-%d"),
@@ -93,6 +98,7 @@ def extract_facts(
             tags=tags,
             evidence=evidence_list,
             status=status,
+            domain=domain,
         )
         store.add_fact(fact)
         created.append(fact)
@@ -694,7 +700,7 @@ async def run_compress_pipeline(
     защищена store.lock.
     """
     def _sync_stages() -> tuple[list[Fact], int, str]:
-        """Синхронные этапы, не требующие локa, — в одном потоке."""
+        """Синхронные этапы, не требующие лока, — в одном потоке."""
         # compress_n отсчитывается из счётчика в БД (ранее был несвязанной
         # переменной → NameError и падение всего пайплайна на каждом compress).
         compress_n = store.get_compress_count()
@@ -756,8 +762,18 @@ async def run_compress_pipeline(
             await asyncio.to_thread(generate_reflections, store, summary)
 
         await generate_personality_snapshot(store, summary)
+        from companion.memory.consolidation import consolidate_if_due, decay_fact_confidence
+        await asyncio.to_thread(consolidate_if_due, store, 7)
+        await asyncio.to_thread(decay_fact_confidence, store)
         await asyncio.to_thread(store.apply_importance_decay)
         await asyncio.to_thread(store.compress_dormant_episodes)
+        # Episodic Memory: извлечь эпизоды из недавних важных фактов
+        try:
+            from companion.memory.episodes import EpisodeEngine
+            ep_engine = EpisodeEngine(store)
+            await ep_engine.extract_recent()
+        except Exception as e:
+            logger.error("Episode extraction failed: %s", e)
         await asyncio.to_thread(store.analyze_retrieval_effectiveness)
 
         # Обновить knowledge_domains на основе новых фактов

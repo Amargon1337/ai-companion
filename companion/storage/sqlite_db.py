@@ -6,10 +6,13 @@ import hashlib
 import json
 import os
 import sqlite3
+import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
+
+from companion.exceptions import ConcurrentModificationError
 
 
 def _json(value: Any) -> str:
@@ -30,11 +33,28 @@ def _configure_conn(conn: sqlite3.Connection) -> None:
   conn.execute("PRAGMA foreign_keys = ON;")
 class MemoryDatabase:
   def __init__(self, path: str | None = None) -> None:
-    from companion.config import SQLITE_PATH as _SQLITE_PATH
-    self.path = path if path is not None else _SQLITE_PATH
     import threading
     self._lock = threading.RLock()
-    self.conn = sqlite3.connect(self.path, check_same_thread=False)
+    self._path: str = ""
+    self.conn: sqlite3.Connection | None = None
+    from companion.config import SQLITE_PATH as _SQLITE_PATH
+    self.path = path if path is not None else _SQLITE_PATH
+
+  @property
+  def path(self) -> str:
+    return self._path
+
+  @path.setter
+  def path(self, value: str) -> None:
+    if self._path == value and self.conn is not None:
+      return
+    if self.conn is not None:
+      try:
+        self.conn.close()
+      except Exception:
+        pass
+    self._path = value
+    self.conn = sqlite3.connect(value, check_same_thread=False)
     _configure_conn(self.conn)
     self.conn.row_factory = sqlite3.Row
     self._init_schema()
@@ -81,10 +101,32 @@ class MemoryDatabase:
     with self._lock:
       try:
         yield self.conn
-        self.conn.commit()
+        if not getattr(self, "_in_atomic_tx", False):
+          self.conn.commit()
       except Exception:
-        self.conn.rollback()
+        if not getattr(self, "_in_atomic_tx", False):
+          self.conn.rollback()
         raise
+
+  @contextmanager
+  def atomic_memory_transaction(self) -> Generator[sqlite3.Connection, None, None]:
+    """Execute a block of memory operations inside a BEGIN IMMEDIATE transaction."""
+    with self._lock:
+      already_in_tx = getattr(self, "_in_atomic_tx", False)
+      if not already_in_tx:
+        self.conn.execute("BEGIN IMMEDIATE TRANSACTION;")
+        self._in_atomic_tx = True
+      try:
+        yield self.conn
+        if not already_in_tx:
+          self.conn.commit()
+      except Exception:
+        if not already_in_tx:
+          self.conn.rollback()
+        raise
+      finally:
+        if not already_in_tx:
+          self._in_atomic_tx = False
 
   def _init_schema(self) -> None:
     with self._conn() as conn:
@@ -114,9 +156,10 @@ class MemoryDatabase:
           manual_lock INTEGER DEFAULT 0,
           archived INTEGER DEFAULT 0,
           updated_at TEXT,
-          last_accessed TEXT,
           access_count INTEGER DEFAULT 0,
-          decay_exempt INTEGER DEFAULT 0
+          decay_exempt INTEGER DEFAULT 0,
+          last_retrieved_at TEXT,
+          last_used_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_facts_status ON facts(status);
         CREATE INDEX IF NOT EXISTS idx_facts_importance ON facts(importance);
@@ -157,6 +200,7 @@ class MemoryDatabase:
           importance INTEGER DEFAULT 7,
           confidence REAL DEFAULT 0.8,
           status TEXT DEFAULT 'active',
+          version INTEGER DEFAULT 1,
           created_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_reflections_status_composite ON reflections(status, created_at DESC);
@@ -167,6 +211,7 @@ class MemoryDatabase:
           based_on TEXT DEFAULT '[]',
           importance INTEGER DEFAULT 6,
           status TEXT DEFAULT 'active',
+          version INTEGER DEFAULT 1,
           created_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_beliefs_status_composite ON beliefs(status, importance DESC);
@@ -236,6 +281,22 @@ class MemoryDatabase:
         );
         CREATE INDEX IF NOT EXISTS idx_timeline_date ON timeline(date);
 
+        CREATE TABLE IF NOT EXISTS episodes (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          narrative TEXT NOT NULL,
+          date TEXT,
+          participants TEXT DEFAULT '[]',
+          emotions TEXT DEFAULT '{}',
+          lesson TEXT DEFAULT '',
+          fact_ids TEXT DEFAULT '[]',
+          fact_id TEXT DEFAULT '',
+          importance INTEGER DEFAULT 7,
+          confidence REAL DEFAULT 0.8,
+          created_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_episodes_date ON episodes(date);
+
         CREATE TABLE IF NOT EXISTS meta (
           key TEXT PRIMARY KEY,
           value TEXT
@@ -258,6 +319,13 @@ class MemoryDatabase:
           reflections_sent INTEGER,
           reflections_used INTEGER
         );
+        CREATE TABLE IF NOT EXISTS retrieval_replays (
+          replay_id TEXT PRIMARY KEY,
+          user_id INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          payload TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_retrieval_replays_user ON retrieval_replays(user_id, created_at DESC);
         CREATE TABLE IF NOT EXISTS summaries (
           id TEXT PRIMARY KEY,
           content TEXT NOT NULL,
@@ -296,6 +364,7 @@ class MemoryDatabase:
           resources TEXT DEFAULT '[]',
           obstacles TEXT DEFAULT '[]',
           progress_markers TEXT DEFAULT '[]',
+          version INTEGER DEFAULT 1,
           created_at TEXT,
           updated_at TEXT
         );
@@ -325,6 +394,55 @@ class MemoryDatabase:
         );
         CREATE INDEX IF NOT EXISTS idx_predictions_outcome ON predictions(outcome);
 
+        CREATE TABLE IF NOT EXISTS entities (
+          entity_id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          type TEXT NOT NULL,
+          importance REAL DEFAULT 0.5,
+          version INTEGER DEFAULT 1,
+          created_at TEXT,
+          updated_at TEXT,
+          last_mentioned_at TEXT,
+          aliases TEXT DEFAULT '[]',
+          summary TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
+        CREATE INDEX IF NOT EXISTS idx_entities_importance ON entities(importance);
+
+        CREATE TABLE IF NOT EXISTS entity_attributes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          entity_id TEXT NOT NULL,
+          attribute_key TEXT NOT NULL,
+          attribute_value TEXT NOT NULL,
+          confidence REAL DEFAULT 0.8,
+          source_fact_id TEXT,
+          created_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_entity_attributes_entity_id ON entity_attributes(entity_id);
+
+        CREATE TABLE IF NOT EXISTS entity_relations (
+          relation_id TEXT PRIMARY KEY,
+          from_entity_id TEXT NOT NULL,
+          to_entity_id TEXT NOT NULL,
+          relation_type TEXT NOT NULL,
+          trust REAL DEFAULT 0.5,
+          interaction_frequency REAL DEFAULT 0.0,
+          sentiment REAL DEFAULT 0.0,
+          relationship_strength REAL DEFAULT 0.5,
+          version INTEGER DEFAULT 1,
+          last_seen_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_entity_relations_from_to ON entity_relations(from_entity_id, to_entity_id);
+
+        CREATE TABLE IF NOT EXISTS entity_mentions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          entity_id TEXT NOT NULL,
+          fact_id TEXT NOT NULL,
+          context_snippet TEXT DEFAULT '',
+          created_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_entity_mentions_fact ON entity_mentions(fact_id);
+        CREATE INDEX IF NOT EXISTS idx_entity_mentions_entity ON entity_mentions(entity_id);
 
         CREATE TABLE IF NOT EXISTS monthbooks (
           ym TEXT PRIMARY KEY,
@@ -382,9 +500,24 @@ class MemoryDatabase:
           vector_score REAL,
           final_score REAL,
           source TEXT NOT NULL DEFAULT 'rag',
+          retrieval_reason TEXT DEFAULT 'semantic',
           FOREIGN KEY (fact_id) REFERENCES facts(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_memory_access_log_fact_time ON memory_access_log(fact_id, accessed_at DESC);
+
+        CREATE TABLE IF NOT EXISTS memory_mutation_log (
+          id TEXT PRIMARY KEY,
+          timestamp TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          entity_type TEXT DEFAULT 'fact',
+          action TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          state_before TEXT NOT NULL,
+          state_after TEXT NOT NULL,
+          initiator TEXT DEFAULT 'governor'
+        );
+        CREATE INDEX IF NOT EXISTS idx_mutation_log_entity ON memory_mutation_log(entity_id);
+        CREATE INDEX IF NOT EXISTS idx_mutation_log_timestamp ON memory_mutation_log(timestamp DESC);
 
         CREATE TABLE IF NOT EXISTS state_models (
           model_type TEXT PRIMARY KEY,
@@ -435,8 +568,59 @@ class MemoryDatabase:
                   VALUES ('facts', OLD.id, 'DELETE', json_object('fact', OLD.fact, 'status', OLD.status, 'importance', OLD.importance, 'memory_kind', OLD.memory_kind));
               END;
           ''')
+          conn.execute('''
+              CREATE TRIGGER IF NOT EXISTS audit_entities_insert
+              AFTER INSERT ON entities
+              BEGIN
+                  INSERT INTO audit_log (table_name, record_id, action, new_state)
+                  VALUES ('entities', NEW.entity_id, 'INSERT', json_object('name', NEW.name, 'type', NEW.type, 'importance', NEW.importance));
+              END;
+          ''')
+          conn.execute('''
+              CREATE TRIGGER IF NOT EXISTS audit_entities_update
+              AFTER UPDATE ON entities
+              BEGIN
+                  INSERT INTO audit_log (table_name, record_id, action, old_state, new_state)
+                  VALUES ('entities', NEW.entity_id, 'UPDATE',
+                          json_object('name', OLD.name, 'type', OLD.type, 'importance', OLD.importance),
+                          json_object('name', NEW.name, 'type', NEW.type, 'importance', NEW.importance));
+              END;
+          ''')
+          conn.execute('''
+              CREATE TRIGGER IF NOT EXISTS audit_entity_attributes_insert
+              AFTER INSERT ON entity_attributes
+              BEGIN
+                  INSERT INTO audit_log (table_name, record_id, action, new_state)
+                  VALUES ('entity_attributes', NEW.entity_id || ':' || NEW.attribute_key, 'INSERT', json_object('val', NEW.attribute_value));
+              END;
+          ''')
+          conn.execute('''
+              CREATE TRIGGER IF NOT EXISTS audit_entity_relations_insert
+              AFTER INSERT ON entity_relations
+              BEGIN
+                  INSERT INTO audit_log (table_name, record_id, action, new_state)
+                  VALUES ('entity_relations', NEW.from_entity_id || ':' || NEW.to_entity_id || ':' || NEW.relation_type, 'INSERT', json_object('trust', NEW.trust));
+              END;
+          ''')
+          conn.execute('''
+              CREATE TRIGGER IF NOT EXISTS audit_entity_mentions_insert
+              AFTER INSERT ON entity_mentions
+              BEGIN
+                  INSERT INTO audit_log (table_name, record_id, action, new_state)
+                  VALUES ('entity_mentions', NEW.fact_id || ':' || NEW.entity_id, 'INSERT', json_object('snippet', NEW.context_snippet));
+              END;
+          ''')
       except sqlite3.OperationalError:
           pass
+      try:
+        cursor = conn.execute("PRAGMA table_info(entities)")
+        e_cols = [row[1] for row in cursor.fetchall()]
+        if "aliases" not in e_cols:
+          conn.execute("ALTER TABLE entities ADD COLUMN aliases TEXT DEFAULT '[]'")
+        if "summary" not in e_cols:
+          conn.execute("ALTER TABLE entities ADD COLUMN summary TEXT DEFAULT ''")
+      except sqlite3.OperationalError:
+        pass
       try:
         cursor = conn.execute("PRAGMA table_info(facts)")
         cols = [row[1] for row in cursor.fetchall()]
@@ -459,6 +643,10 @@ class MemoryDatabase:
           "decay_exempt": "ALTER TABLE facts ADD COLUMN decay_exempt INTEGER DEFAULT 0",
           "version": "ALTER TABLE facts ADD COLUMN version INTEGER DEFAULT 1",
           "superseded_by": "ALTER TABLE facts ADD COLUMN superseded_by TEXT DEFAULT ''",
+          "domain": "ALTER TABLE facts ADD COLUMN domain TEXT DEFAULT 'user'",
+          "meta": "ALTER TABLE facts ADD COLUMN meta TEXT DEFAULT '{}'",
+          "last_retrieved_at": "ALTER TABLE facts ADD COLUMN last_retrieved_at TEXT",
+          "last_used_at": "ALTER TABLE facts ADD COLUMN last_used_at TEXT",
         }.items():
           if col not in cols:
             conn.execute(ddl)
@@ -471,6 +659,25 @@ class MemoryDatabase:
             conn.execute("UPDATE patterns SET last_confirmed_at = created_at WHERE created_at IS NOT NULL")
         except sqlite3.OperationalError:
           pass
+        try:
+          mut_cols = [r[1] for r in conn.execute("PRAGMA table_info(memory_mutation_log)").fetchall()]
+          if "initiator" not in mut_cols:
+            conn.execute("ALTER TABLE memory_mutation_log ADD COLUMN initiator TEXT DEFAULT 'governor'")
+        except sqlite3.OperationalError:
+          pass
+        try:
+          acc_cols = [r[1] for r in conn.execute("PRAGMA table_info(memory_access_log)").fetchall()]
+          if "retrieval_reason" not in acc_cols:
+            conn.execute("ALTER TABLE memory_access_log ADD COLUMN retrieval_reason TEXT DEFAULT 'semantic'")
+        except sqlite3.OperationalError:
+          pass
+        for table_name in ("beliefs", "goals", "reflections"):
+          try:
+            t_cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table_name})").fetchall()]
+            if "version" not in t_cols:
+              conn.execute(f"ALTER TABLE {table_name} ADD COLUMN version INTEGER DEFAULT 1")
+          except sqlite3.OperationalError:
+            pass
         conn.execute("UPDATE facts SET anchor_flag=1 WHERE anchor_flag=0 AND (tags LIKE '%anchor%' OR tags LIKE '%core_identity%' OR tags LIKE '%pinned%' OR memory_kind='permanent')")
         conn.execute("UPDATE facts SET archived=1 WHERE archived=0 AND status='archived'")
       except sqlite3.OperationalError:
@@ -509,19 +716,22 @@ class MemoryDatabase:
   def _upsert_goal_conn(self, conn: sqlite3.Connection, row: dict[str, Any]) -> None:
     conn.execute(
       """
-      INSERT INTO goals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      INSERT INTO goals (goal_id, title, priority, status, description, blockers,
+                         next_actions, resources, obstacles, progress_markers,
+                         created_at, updated_at, version)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(goal_id) DO UPDATE SET
         title=excluded.title, priority=excluded.priority, status=excluded.status,
         description=excluded.description, blockers=excluded.blockers,
         next_actions=excluded.next_actions, resources=excluded.resources,
         obstacles=excluded.obstacles, progress_markers=excluded.progress_markers,
-        updated_at=excluded.updated_at
+        updated_at=excluded.updated_at, version=excluded.version
       """,
       (
         row["goal_id"], row["title"], row.get("priority", 5), row.get("status", "active"),
         row.get("description", ""), _json(row.get("blockers", [])), _json(row.get("next_actions", [])),
         _json(row.get("resources", [])), _json(row.get("obstacles", [])), _json(row.get("progress_markers", [])),
-        row.get("created_at"), row.get("updated_at"),
+        row.get("created_at"), row.get("updated_at"), row.get("version", 1),
       ),
     )
 
@@ -562,6 +772,19 @@ class MemoryDatabase:
   async def async_upsert_prediction(self, row: dict[str, Any]) -> None:
     await asyncio.to_thread(self.upsert_prediction, row)
 
+  def list_predictions(self, outcome: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      if outcome:
+        rows = conn.execute("SELECT * FROM predictions WHERE outcome=? ORDER BY created_at DESC LIMIT ?", (outcome, limit)).fetchall()
+      else:
+        rows = conn.execute("SELECT * FROM predictions ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+      return [self._row_prediction(r) for r in rows]
+
+  def get_prediction(self, prediction_id: str) -> dict[str, Any] | None:
+    with self._conn() as conn:
+      row = conn.execute("SELECT * FROM predictions WHERE prediction_id=?", (prediction_id,)).fetchone()
+      return self._row_prediction(row) if row else None
+
   def _upsert_belief_conn(self, conn: sqlite3.Connection, row: dict[str, Any]) -> None:
     belief_id = row.get("id") or f"belief_{hashlib.sha1(str(row.get('belief', '')).encode('utf-8')).hexdigest()[:10]}"
     conn.execute(
@@ -590,6 +813,9 @@ class MemoryDatabase:
         json.dumps(row.get("evidence", []), ensure_ascii=False),
         row.get("facts_sent_count", 0), row.get("facts_used_count", 0),
         row.get("embedding"),
+        row.get("domain") or "user",
+        json.dumps(row.get("meta") or {}, ensure_ascii=False),
+        row.get("last_retrieved_at"), row.get("last_used_at"),
       )
       for row in rows
     ]
@@ -599,9 +825,10 @@ class MemoryDatabase:
         INSERT OR IGNORE INTO facts (
           id, fact, date, created_at, memory_kind, importance, confidence,
           source, source_type, tags, status, valid_from, valid_until,
-          schema_version, evidence, facts_sent_count, facts_used_count, embedding
+          schema_version, evidence, facts_sent_count, facts_used_count, embedding,
+          domain, meta, last_retrieved_at, last_used_at
         ) VALUES
-        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         tuples,
       )
@@ -655,7 +882,7 @@ class MemoryDatabase:
     ]
     with self._conn() as conn:
       conn.executemany(
-        "INSERT OR IGNORE INTO reflections VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT OR IGNORE INTO reflections (id, insight, based_on, period, importance, confidence, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
         tuples,
       )
 
@@ -673,7 +900,7 @@ class MemoryDatabase:
     ]
     with self._conn() as conn:
       conn.executemany(
-        "INSERT OR IGNORE INTO beliefs VALUES (?,?,?,?,?,?)",
+        "INSERT OR IGNORE INTO beliefs (id, belief, based_on, importance, status, created_at) VALUES (?,?,?,?,?,?)",
         tuples,
       )
 
@@ -688,9 +915,10 @@ class MemoryDatabase:
           source, source_type, tags, status, valid_from, valid_until,
           schema_version, evidence, facts_sent_count, facts_used_count, embedding,
           category, anchor_flag, manual_lock, archived, updated_at,
-          last_accessed, access_count, decay_exempt
+          last_accessed, access_count, decay_exempt, domain, meta,
+          last_retrieved_at, last_used_at
         ) VALUES
-        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
           fact=excluded.fact,
           date=excluded.date,
@@ -714,7 +942,11 @@ class MemoryDatabase:
           updated_at=excluded.updated_at,
           last_accessed=COALESCE(excluded.last_accessed, facts.last_accessed),
           access_count=excluded.access_count,
-          decay_exempt=excluded.decay_exempt
+          decay_exempt=excluded.decay_exempt,
+          domain=excluded.domain,
+          meta=excluded.meta,
+          last_retrieved_at=COALESCE(excluded.last_retrieved_at, facts.last_retrieved_at),
+          last_used_at=COALESCE(excluded.last_used_at, facts.last_used_at)
         """,
         (
           row["id"], row["fact"], row.get("date"), row.get("created_at"),
@@ -729,6 +961,9 @@ class MemoryDatabase:
           row.get("category", "life"), row.get("anchor_flag", 1 if any(str(t).lower() in {"anchor", "core_identity", "pinned"} for t in row.get("tags", [])) or row.get("memory_kind") == "permanent" else 0),
           row.get("manual_lock", 0), row.get("archived", 1 if row.get("status") == "archived" else 0),
           row.get("updated_at") or row.get("created_at"), row.get("last_accessed"), row.get("access_count", 0), row.get("decay_exempt", 0),
+          row.get("domain") or "user",
+          json.dumps(row.get("meta") or {}, ensure_ascii=False),
+          row.get("last_retrieved_at"), row.get("last_used_at"),
         ),
       )
 
@@ -757,7 +992,7 @@ class MemoryDatabase:
   def _insert_reflection(self, row: dict[str, Any]) -> None:
     with self._conn() as conn:
       conn.execute(
-        "INSERT OR IGNORE INTO reflections VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT OR IGNORE INTO reflections (id, insight, based_on, period, importance, confidence, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
         (
           row["id"], row["insight"],
           json.dumps(row.get("based_on", []), ensure_ascii=False),
@@ -795,10 +1030,10 @@ class MemoryDatabase:
   async def async_list_goals(self, status: str | None = None) -> list[dict[str, Any]]:
     return await asyncio.to_thread(self.list_goals, status)
 
-  def update_goal(self, goal_id: str, updates: dict[str, Any]) -> bool:
+  def update_goal(self, goal_id: str, updates: dict[str, Any], expected_version: int | None = None) -> bool:
     allowed = {
       "title", "priority", "status", "description", "blockers", "next_actions",
-      "resources", "obstacles", "progress_markers", "updated_at",
+      "resources", "obstacles", "progress_markers", "updated_at", "version",
     }
     values = {k: v for k, v in updates.items() if k in allowed}
     if not values:
@@ -807,12 +1042,27 @@ class MemoryDatabase:
       from datetime import datetime
       values["updated_at"] = datetime.now().isoformat()
     json_cols = {"blockers", "next_actions", "resources", "obstacles", "progress_markers"}
-    assignments = ", ".join(f"{k}=?" for k in values)
+    values.pop("version", None)
+    assignments = ", ".join(f"{k}=?" for k in values) + ", version=version+1"
     params = [_json(v) if k in json_cols else v for k, v in values.items()]
     params.append(goal_id)
     with self._conn() as conn:
-      cur = conn.execute(f"UPDATE goals SET {assignments} WHERE goal_id=?", params)
-      return cur.rowcount > 0
+      if expected_version is not None:
+        params.append(expected_version)
+        cur = conn.execute(f"UPDATE goals SET {assignments} WHERE goal_id=? AND version=?", params)
+        if cur.rowcount == 0:
+          row = conn.execute("SELECT version FROM goals WHERE goal_id=?", (goal_id,)).fetchone()
+          actual_ver = row[0] if row else None
+          raise ConcurrentModificationError(
+            f"Concurrent modification on goal {goal_id}: expected version {expected_version}, actual {actual_ver}",
+            record_id=goal_id,
+            expected_version=expected_version,
+            actual_version=actual_ver,
+          )
+        return True
+      else:
+        cur = conn.execute(f"UPDATE goals SET {assignments} WHERE goal_id=?", params)
+        return cur.rowcount > 0
 
   async def async_update_goal(self, goal_id: str, updates: dict[str, Any]) -> bool:
     return await asyncio.to_thread(self.update_goal, goal_id, updates)
@@ -861,6 +1111,12 @@ class MemoryDatabase:
   def _row_causal_link(self, row: sqlite3.Row) -> dict[str, Any]:
     d = dict(row)
     d["evidence"] = _loads(d.get("evidence"))
+    return d
+
+  def _row_prediction(self, row: sqlite3.Row) -> dict[str, Any]:
+    d = dict(row)
+    for key in ("conditions", "based_on"):
+      d[key] = _loads(d.get(key))
     return d
 
 
@@ -912,29 +1168,179 @@ class MemoryDatabase:
       row = conn.execute("SELECT * FROM facts WHERE id=?", (fact_id,)).fetchone()
       return self._row_fact(row) if row else None
 
-  def update_fact_status(self, fact_id: str, status: str) -> None:
+  def update_fact_status(self, fact_id: str, status: str, expected_version: int | None = None) -> None:
     with self._conn() as conn:
-      conn.execute("UPDATE facts SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (status, fact_id))
+      if expected_version is not None:
+        cursor = conn.execute(
+          "UPDATE facts SET status=?, updated_at=CURRENT_TIMESTAMP, version=version+1 WHERE id=? AND version=?",
+          (status, fact_id, expected_version),
+        )
+        if cursor.rowcount == 0:
+          row = conn.execute("SELECT version FROM facts WHERE id=?", (fact_id,)).fetchone()
+          actual_ver = row[0] if row else None
+          raise ConcurrentModificationError(
+            f"Concurrent modification on fact {fact_id}: expected version {expected_version}, actual {actual_ver}",
+            record_id=fact_id,
+            expected_version=expected_version,
+            actual_version=actual_ver,
+          )
+      else:
+        conn.execute("UPDATE facts SET status=?, updated_at=CURRENT_TIMESTAMP, version=version+1 WHERE id=?", (status, fact_id))
 
-  def update_fact_fields(self, fact_id: str, fields: dict[str, Any]) -> None:
+  def update_fact_fields(self, fact_id: str, fields: dict[str, Any], expected_version: int | None = None) -> None:
     """Update a subset of mutable fact columns atomically."""
+    fields = dict(fields)
+    if "retrieved_count" in fields and "facts_sent_count" not in fields:
+      fields["facts_sent_count"] = fields.pop("retrieved_count")
+    if "used_count" in fields and "facts_used_count" not in fields:
+      fields["facts_used_count"] = fields.pop("used_count")
     allowed = {
       "fact", "date", "importance", "confidence", "tags", "status",
       "valid_from", "valid_until", "evidence", "version", "superseded_by",
       "memory_kind", "source", "source_type", "anchor_flag", "manual_lock",
+      "domain", "meta", "archived", "facts_sent_count", "facts_used_count",
     }
     sets = {k: v for k, v in fields.items() if k in allowed}
     if not sets:
       return
-    if "tags" in sets:
+    if "tags" in sets and not isinstance(sets["tags"], str):
       sets["tags"] = json.dumps(sets["tags"], ensure_ascii=False)
-    if "evidence" in sets:
+    if "evidence" in sets and not isinstance(sets["evidence"], str):
       sets["evidence"] = json.dumps(sets["evidence"], ensure_ascii=False)
+    if "meta" in sets and not isinstance(sets["meta"], str):
+      sets["meta"] = json.dumps(sets["meta"] or {}, ensure_ascii=False)
     sets["updated_at"] = fields.get("updated_at") or datetime.now().isoformat()
-    assignments = ", ".join(f"{k}=?" for k in sets)
+    if "version" not in sets:
+      assignments = ", ".join(f"{k}=?" for k in sets) + ", version=version+1"
+    else:
+      assignments = ", ".join(f"{k}=?" for k in sets)
     params = list(sets.values()) + [fact_id]
     with self._conn() as conn:
-      conn.execute(f"UPDATE facts SET {assignments} WHERE id=?", params)
+      if expected_version is not None:
+        params.append(expected_version)
+        cursor = conn.execute(f"UPDATE facts SET {assignments} WHERE id=? AND version=?", params)
+        if cursor.rowcount == 0:
+          row = conn.execute("SELECT version FROM facts WHERE id=?", (fact_id,)).fetchone()
+          actual_ver = row[0] if row else None
+          raise ConcurrentModificationError(
+            f"Concurrent modification on fact {fact_id}: expected version {expected_version}, actual {actual_ver}",
+            record_id=fact_id,
+            expected_version=expected_version,
+            actual_version=actual_ver,
+          )
+      else:
+        conn.execute(f"UPDATE facts SET {assignments} WHERE id=?", params)
+
+  def get_belief(self, belief_id: str) -> dict[str, Any] | None:
+    with self._conn() as conn:
+      row = conn.execute("SELECT * FROM beliefs WHERE id=?", (belief_id,)).fetchone()
+      if not row:
+        return None
+      d = dict(row)
+      d["based_on"] = json.loads(d.get("based_on") or "[]")
+      return d
+
+  def get_goal(self, goal_id: str) -> dict[str, Any] | None:
+    with self._conn() as conn:
+      row = conn.execute("SELECT * FROM goals WHERE goal_id=?", (goal_id,)).fetchone()
+      return self._row_goal(row) if row else None
+
+  def get_reflection(self, reflection_id: str) -> dict[str, Any] | None:
+    with self._conn() as conn:
+      row = conn.execute("SELECT * FROM reflections WHERE id=?", (reflection_id,)).fetchone()
+      if not row:
+        return None
+      d = dict(row)
+      d["based_on"] = json.loads(d.get("based_on") or "[]")
+      return d
+
+  def get_entity(self, entity_type: str, entity_id: str) -> dict[str, Any] | None:
+    et = entity_type.lower()
+    if et in ("fact", "facts"):
+      return self.get_fact(entity_id)
+    elif et in ("belief", "beliefs"):
+      return self.get_belief(entity_id)
+    elif et in ("goal", "goals"):
+      return self.get_goal(entity_id)
+    elif et in ("reflection", "reflections"):
+      return self.get_reflection(entity_id)
+    elif et in ("episode", "episodes"):
+      return self.get_episode(entity_id)
+    elif et in ("entity", "entities", "world_entity"):
+      return self.get_world_entity(entity_id)
+    else:
+      return self.get_fact(entity_id)
+
+  def _update_generic_entity(
+      self,
+      table: str,
+      id_col: str,
+      entity_id: str,
+      updates: dict[str, Any],
+      allowed: set[str],
+      json_cols: set[str],
+      expected_version: int | None = None,
+  ) -> bool:
+    values = {k: v for k, v in updates.items() if k in allowed}
+    if not values:
+      return False
+    values.pop("version", None)
+    assignments = ", ".join(f"{k}=?" for k in values) + ", version=version+1"
+    params = [json.dumps(v, ensure_ascii=False) if k in json_cols and not isinstance(v, str) else v for k, v in values.items()]
+    params.append(entity_id)
+    with self._conn() as conn:
+      if expected_version is not None:
+        params.append(expected_version)
+        cur = conn.execute(f"UPDATE {table} SET {assignments} WHERE {id_col}=? AND version=?", params)
+        if cur.rowcount == 0:
+          row = conn.execute(f"SELECT version FROM {table} WHERE {id_col}=?", (entity_id,)).fetchone()
+          actual_ver = row[0] if row else None
+          raise ConcurrentModificationError(
+            f"Concurrent modification on {table} {entity_id}: expected version {expected_version}, actual {actual_ver}",
+            record_id=entity_id,
+            expected_version=expected_version,
+            actual_version=actual_ver,
+          )
+        return True
+      else:
+        cur = conn.execute(f"UPDATE {table} SET {assignments} WHERE {id_col}=?", params)
+        return cur.rowcount > 0
+
+  def update_belief(self, belief_id: str, updates: dict[str, Any], expected_version: int | None = None) -> bool:
+    allowed = {"belief", "based_on", "importance", "status", "created_at"}
+    json_cols = {"based_on"}
+    return self._update_generic_entity("beliefs", "id", belief_id, updates, allowed, json_cols, expected_version)
+
+  def update_reflection(self, reflection_id: str, updates: dict[str, Any], expected_version: int | None = None) -> bool:
+    allowed = {"insight", "based_on", "period", "importance", "confidence", "status", "created_at"}
+    json_cols = {"based_on"}
+    return self._update_generic_entity("reflections", "id", reflection_id, updates, allowed, json_cols, expected_version)
+
+  def update_episode(self, episode_id: str, updates: dict[str, Any], expected_version: int | None = None) -> bool:
+    allowed = {"title", "narrative", "date", "participants", "emotions", "lesson", "fact_ids", "fact_id", "importance", "confidence"}
+    json_cols = {"participants", "emotions", "fact_ids"}
+    return self._update_generic_entity("episodes", "id", episode_id, updates, allowed, json_cols, expected_version)
+
+  def update_entity_fields(
+      self,
+      entity_type: str,
+      entity_id: str,
+      fields: dict[str, Any],
+      expected_version: int | None = None,
+  ) -> None:
+    et = entity_type.lower()
+    if et in ("fact", "facts"):
+      self.update_fact_fields(entity_id, fields, expected_version=expected_version)
+    elif et in ("goal", "goals"):
+      self.update_goal(entity_id, fields, expected_version=expected_version)
+    elif et in ("belief", "beliefs"):
+      self.update_belief(entity_id, fields, expected_version=expected_version)
+    elif et in ("reflection", "reflections"):
+      self.update_reflection(entity_id, fields, expected_version=expected_version)
+    elif et in ("episode", "episodes"):
+      self.update_episode(entity_id, fields, expected_version=expected_version)
+    else:
+      self.update_fact_fields(entity_id, fields, expected_version=expected_version)
 
   def get_fact_relations(self, fact_id: str) -> list[dict[str, Any]]:
     with self._conn() as conn:
@@ -954,6 +1360,11 @@ class MemoryDatabase:
     d = dict(row)
     d["tags"] = json.loads(d.get("tags") or "[]")
     d["evidence"] = json.loads(d.get("evidence") or "[]")
+    d["meta"] = _loads(d.get("meta"), default={})
+    if not isinstance(d["meta"], dict):
+      d["meta"] = {}
+    if not d.get("domain"):
+      d["domain"] = "user"
     return d
 
   def list_messages(
@@ -1279,6 +1690,46 @@ class MemoryDatabase:
         ),
       )
 
+  def save_retrieval_replay(self, replay_id: str, user_id: int, payload: str) -> None:
+    with self._conn() as conn:
+      conn.execute(
+        "INSERT OR REPLACE INTO retrieval_replays(replay_id, user_id, created_at, payload) "
+        "VALUES (?, ?, datetime('now'), ?)",
+        (replay_id, user_id, payload),
+      )
+
+  def get_retrieval_replay(self, replay_id: str) -> dict[str, Any] | None:
+    with self._conn() as conn:
+      row = conn.execute(
+        "SELECT replay_id, user_id, created_at, payload FROM retrieval_replays WHERE replay_id=?",
+        (replay_id,),
+      ).fetchone()
+    return dict(row) if row else None
+
+  def list_retrieval_replays(self, user_id: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      if user_id is None:
+        rows = conn.execute(
+          "SELECT replay_id, user_id, created_at, payload FROM retrieval_replays "
+          "ORDER BY created_at DESC LIMIT ?",
+          (max(1, int(limit)),),
+        ).fetchall()
+      else:
+        rows = conn.execute(
+          "SELECT replay_id, user_id, created_at, payload FROM retrieval_replays "
+          "WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+          (user_id, max(1, int(limit))),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+  def update_retrieval_replay_payload(self, replay_id: str, payload: str) -> bool:
+    with self._conn() as conn:
+      cursor = conn.execute(
+        "UPDATE retrieval_replays SET payload=? WHERE replay_id=?",
+        (payload, replay_id),
+      )
+    return cursor.rowcount > 0
+
   def save_event(self, id_: str, date: str, event: str, importance: int, description: str) -> None:
     with self._conn() as conn:
       conn.execute(
@@ -1299,23 +1750,83 @@ class MemoryDatabase:
         ).fetchall()
     return [dict(r) for r in rows]
 
+  # ── Episodes (эпизодическая память) ───────────────────────────────
+
+  def upsert_episode(self, row: dict[str, Any]) -> None:
+    with self._conn() as conn:
+      conn.execute(
+        """
+        INSERT INTO episodes (id, title, narrative, date, participants, emotions,
+                              lesson, fact_ids, fact_id, importance, confidence, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+          title=excluded.title, narrative=excluded.narrative, date=excluded.date,
+          participants=excluded.participants, emotions=excluded.emotions,
+          lesson=excluded.lesson, fact_ids=excluded.fact_ids, fact_id=excluded.fact_id,
+          importance=excluded.importance, confidence=excluded.confidence
+        """,
+        (
+          row["id"], row["title"], row["narrative"], row.get("date"),
+          _json(row.get("participants", [])), _json(row.get("emotions", {})),
+          row.get("lesson", ""), _json(row.get("fact_ids", [])),
+          row.get("fact_id", ""), row.get("importance", 7),
+          row.get("confidence", 0.8), row.get("created_at"),
+        ),
+      )
+
+  def _row_episode(self, row: sqlite3.Row) -> dict[str, Any]:
+    d = dict(row)
+    d["participants"] = _loads(d.get("participants"))
+    d["emotions"] = _loads(d.get("emotions"), default={})
+    d["fact_ids"] = _loads(d.get("fact_ids"))
+    return d
+
+  def list_episodes(self, limit: int | None = None) -> list[dict[str, Any]]:
+    q = "SELECT * FROM episodes ORDER BY date DESC, created_at DESC"
+    params: tuple = ()
+    if limit is not None:
+      q += " LIMIT ?"
+      params = (max(0, int(limit)),)
+    with self._conn() as conn:
+      rows = conn.execute(q, params).fetchall()
+    return [self._row_episode(r) for r in rows]
+
+  def get_episode(self, episode_id: str) -> dict[str, Any] | None:
+    with self._conn() as conn:
+      row = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    return self._row_episode(row) if row else None
+
   def increment_fact_usage(self, fact_id: str, used: bool = False) -> None:
+    now_iso = datetime.now().isoformat()
     with self._conn() as conn:
       if used:
-        conn.execute("UPDATE facts SET facts_sent_count = facts_sent_count + 1, facts_used_count = facts_used_count + 1 WHERE id=?", (fact_id,))
+        conn.execute(
+          "UPDATE facts SET facts_sent_count = facts_sent_count + 1, facts_used_count = facts_used_count + 1, last_retrieved_at = ?, last_used_at = ? WHERE id=?",
+          (now_iso, now_iso, fact_id),
+        )
       else:
-        conn.execute("UPDATE facts SET facts_sent_count = facts_sent_count + 1 WHERE id=?", (fact_id,))
+        conn.execute(
+          "UPDATE facts SET facts_sent_count = facts_sent_count + 1, last_retrieved_at = ? WHERE id=?",
+          (now_iso, fact_id),
+        )
 
   def increment_fact_usage_batch(self, sent_ids: list[str], used_ids: list[str]) -> None:
     if not sent_ids and not used_ids:
       return
+    now_iso = datetime.now().isoformat()
     with self._conn() as conn:
       if sent_ids:
         sent_only = [i for i in sent_ids if i not in used_ids]
         if sent_only:
-          conn.executemany("UPDATE facts SET facts_sent_count = facts_sent_count + 1 WHERE id=?", [(i,) for i in sent_only])
+          conn.executemany(
+            "UPDATE facts SET facts_sent_count = facts_sent_count + 1, last_retrieved_at = ? WHERE id=?",
+            [(now_iso, i) for i in sent_only],
+          )
       if used_ids:
-        conn.executemany("UPDATE facts SET facts_sent_count = facts_sent_count + 1, facts_used_count = facts_used_count + 1 WHERE id=?", [(i,) for i in used_ids])
+        conn.executemany(
+          "UPDATE facts SET facts_sent_count = facts_sent_count + 1, facts_used_count = facts_used_count + 1, last_retrieved_at = ?, last_used_at = ? WHERE id=?",
+          [(now_iso, now_iso, i) for i in used_ids],
+        )
 
   def hydrate_fact_metadata(self, fact_ids: list[str]) -> dict[str, dict[str, Any]]:
     if not fact_ids:
@@ -1327,7 +1838,7 @@ class MemoryDatabase:
         f"""
         SELECT id, importance, category, anchor_flag, manual_lock, archived,
                created_at, date, updated_at, last_accessed, access_count, decay_exempt,
-               memory_kind, tags, status
+               memory_kind, tags, status, facts_sent_count
         FROM facts
         WHERE id IN ({placeholders})
         """,
@@ -1335,7 +1846,7 @@ class MemoryDatabase:
       ).fetchall()
     return {r["id"]: self._row_fact(r) for r in rows}
 
-  def record_fact_access_batch(self, fact_scores: list[tuple[str, float, float]], query_hash: str | None = None) -> None:
+  def record_fact_access_batch(self, fact_scores: list[tuple[str, float, float]], query_hash: str | None = None, retrieval_reason: str = "semantic") -> None:
     if not fact_scores:
       return
     with self._conn() as conn:
@@ -1351,10 +1862,10 @@ class MemoryDatabase:
       )
       conn.executemany(
         """
-        INSERT INTO memory_access_log(fact_id, query_hash, vector_score, final_score, source)
-        VALUES(?,?,?,?, 'rag')
+        INSERT INTO memory_access_log(fact_id, query_hash, vector_score, final_score, source, retrieval_reason)
+        VALUES(?,?,?,?, 'rag', ?)
         """,
-        [(fact_id, query_hash, vector_score, final_score) for fact_id, vector_score, final_score in fact_scores],
+        [(fact_id, query_hash, vector_score, final_score, retrieval_reason) for fact_id, vector_score, final_score in fact_scores],
       )
 
   def create_temporal_counter(self, counter_name: str, description: str, start_date: str, timezone: str) -> int:
@@ -1638,3 +2149,354 @@ class MemoryDatabase:
 
   async def async_save_faiss_mapping(self, mapping: dict[str, str]) -> None:
     await asyncio.to_thread(self.save_faiss_mapping, mapping)
+
+  def log_mutation(
+    self,
+    entity_id: str,
+    action: str,
+    reason: str,
+    state_before: dict[str, Any] | str,
+    state_after: dict[str, Any] | str,
+    entity_type: str = "fact",
+    initiator: str = "governor",
+  ) -> str:
+    """Record a structural mutation in memory_mutation_log."""
+    mut_id = f"mut_{uuid.uuid4().hex[:12]}"
+    now_iso = datetime.now().isoformat()
+    before_str = json.dumps(state_before, ensure_ascii=False) if isinstance(state_before, dict) else str(state_before)
+    after_str = json.dumps(state_after, ensure_ascii=False) if isinstance(state_after, dict) else str(state_after)
+    with self._conn() as conn:
+      conn.execute(
+        """
+        INSERT INTO memory_mutation_log (
+          id, timestamp, entity_id, entity_type, action, reason, state_before, state_after, initiator
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (mut_id, now_iso, entity_id, entity_type, action, reason, before_str, after_str, initiator),
+      )
+    return mut_id
+
+  def list_mutations(
+    self,
+    entity_id: str | None = None,
+    limit: int = 100,
+  ) -> list[dict[str, Any]]:
+    """List memory mutations ordered by timestamp DESC."""
+    query = "SELECT * FROM memory_mutation_log"
+    params: list[Any] = []
+    if entity_id:
+      query += " WHERE entity_id = ?"
+      params.append(entity_id)
+    query += " ORDER BY timestamp DESC LIMIT ?"
+    params.append(limit)
+    with self._conn() as conn:
+      rows = conn.execute(query, params).fetchall()
+      res = []
+      for r in rows:
+        d = dict(r)
+        d["state_before"] = _loads(d.get("state_before"), default=d.get("state_before"))
+        d["state_after"] = _loads(d.get("state_after"), default=d.get("state_after"))
+        res.append(d)
+      return res
+
+  # --- World Model (Entity Graph & Relationship Layer) CRUD ---
+
+  def upsert_world_entity(self, entity: dict[str, Any], expected_version: int | None = None) -> str:
+    entity_id = str(entity.get("entity_id") or "")
+    if not entity_id:
+      raise ValueError("entity_id is required for upsert_world_entity")
+    now_iso = datetime.now().isoformat()
+    _js = lambda v: json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else str(v)
+    existing = self.get_world_entity(entity_id)
+    if existing is None:
+      version = int(entity.get("version", 1))
+      with self._conn() as conn:
+        conn.execute(
+          """
+          INSERT INTO entities (
+            entity_id, name, type, importance, version, created_at, updated_at, last_mentioned_at, aliases, summary
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          """,
+          (
+            entity_id,
+            str(entity.get("name", "")),
+            str(entity.get("type", "concept")),
+            float(entity.get("importance", 0.5)),
+            version,
+            str(entity.get("created_at") or now_iso),
+            now_iso,
+            str(entity.get("last_mentioned_at") or now_iso),
+            _js(entity.get("aliases", [])),
+            str(entity.get("summary", "")),
+          ),
+        )
+      self.log_mutation(
+        entity_id=entity_id,
+        action="CREATE",
+        reason="Entity creation in World Model",
+        state_before={},
+        state_after=entity,
+        entity_type="entity",
+        initiator="world_model",
+      )
+      return entity_id
+    else:
+      ver_to_check = expected_version if expected_version is not None else entity.get("version")
+      if ver_to_check is not None and int(existing["version"]) != int(ver_to_check):
+        raise ConcurrentModificationError(
+          f"Concurrent modification on entity {entity_id}: expected version {ver_to_check}, actual {existing['version']}",
+          record_id=entity_id,
+          expected_version=int(ver_to_check),
+          actual_version=int(existing["version"]),
+        )
+      new_ver = int(existing["version"]) + 1
+      name = str(entity.get("name", existing["name"]))
+      type_val = str(entity.get("type", existing["type"]))
+      importance = float(entity.get("importance", existing["importance"]))
+      last_mentioned = str(entity.get("last_mentioned_at", existing.get("last_mentioned_at") or now_iso))
+      aliases_val = _js(entity.get("aliases", existing.get("aliases", [])))
+      summary_val = str(entity.get("summary", existing.get("summary", "")))
+      with self._conn() as conn:
+        conn.execute(
+          """
+          UPDATE entities
+          SET name=?, type=?, importance=?, version=?, updated_at=?, last_mentioned_at=?, aliases=?, summary=?
+          WHERE entity_id=?
+          """,
+          (name, type_val, importance, new_ver, now_iso, last_mentioned, aliases_val, summary_val, entity_id),
+        )
+      updated_state = dict(existing)
+      updated_state.update({"name": name, "type": type_val, "importance": importance, "version": new_ver, "updated_at": now_iso, "last_mentioned_at": last_mentioned, "aliases": aliases_val, "summary": summary_val})
+      self.log_mutation(
+        entity_id=entity_id,
+        action="UPDATE",
+        reason="Entity update in World Model",
+        state_before=existing,
+        state_after=updated_state,
+        entity_type="entity",
+        initiator="world_model",
+      )
+      return entity_id
+
+  def get_world_entity(self, entity_id: str) -> dict[str, Any] | None:
+    with self._conn() as conn:
+      row = conn.execute("SELECT * FROM entities WHERE entity_id=?", (entity_id,)).fetchone()
+    if not row:
+      return None
+    d = dict(row)
+    if isinstance(d.get("aliases"), str):
+      try:
+        d["aliases"] = json.loads(d["aliases"])
+      except Exception:
+        d["aliases"] = []
+    return d
+
+  def list_world_entities(self, entity_type: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    query = "SELECT * FROM entities"
+    params: list[Any] = []
+    if entity_type:
+      query += " WHERE type=?"
+      params.append(entity_type)
+    query += " ORDER BY importance DESC, last_mentioned_at DESC LIMIT ?"
+    params.append(limit)
+    with self._conn() as conn:
+      rows = conn.execute(query, params).fetchall()
+    res = []
+    for r in rows:
+      d = dict(r)
+      if isinstance(d.get("aliases"), str):
+        try:
+          d["aliases"] = json.loads(d["aliases"])
+        except Exception:
+          d["aliases"] = []
+      res.append(d)
+    return res
+
+  def search_world_entities_by_name(self, name_query: str) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      rows = conn.execute(
+        "SELECT * FROM entities WHERE name LIKE ? OR aliases LIKE ? ORDER BY importance DESC",
+        (f"%{name_query}%", f"%{name_query}%"),
+      ).fetchall()
+    res = []
+    for r in rows:
+      d = dict(r)
+      if isinstance(d.get("aliases"), str):
+        try:
+          d["aliases"] = json.loads(d["aliases"])
+        except Exception:
+          d["aliases"] = []
+      res.append(d)
+    return res
+
+  def add_entity_attribute(self, attr: dict[str, Any]) -> int:
+    entity_id = str(attr.get("entity_id") or "")
+    key = str(attr.get("attribute_key") or "")
+    val = str(attr.get("attribute_value") or "")
+    conf = float(attr.get("confidence", 0.8))
+    fact_id = str(attr.get("source_fact_id") or "")
+    now_iso = str(attr.get("created_at") or datetime.now().isoformat())
+    with self._conn() as conn:
+      cur = conn.execute(
+        """
+        INSERT INTO entity_attributes (
+          entity_id, attribute_key, attribute_value, confidence, source_fact_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (entity_id, key, val, conf, fact_id, now_iso),
+      )
+      return int(cur.lastrowid or 0)
+
+  def get_entity_attributes(self, entity_id: str) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      rows = conn.execute(
+        "SELECT * FROM entity_attributes WHERE entity_id=? ORDER BY confidence DESC, id DESC",
+        (entity_id,),
+      ).fetchall()
+    return [dict(r) for r in rows]
+
+  def upsert_entity_relation(self, rel: dict[str, Any], expected_version: int | None = None) -> str:
+    relation_id = str(rel.get("relation_id") or "")
+    from_id = str(rel.get("from_entity_id") or "")
+    to_id = str(rel.get("to_entity_id") or "")
+    rel_type = str(rel.get("relation_type") or "")
+    if not (from_id and to_id and rel_type):
+      raise ValueError("from_entity_id, to_entity_id, and relation_type are required")
+    now_iso = datetime.now().isoformat()
+    existing: dict[str, Any] | None = None
+    if relation_id:
+      existing = self.get_entity_relation(relation_id)
+    else:
+      with self._conn() as conn:
+        row = conn.execute(
+          "SELECT * FROM entity_relations WHERE from_entity_id=? AND to_entity_id=? AND relation_type=?",
+          (from_id, to_id, rel_type),
+        ).fetchone()
+        if row:
+          existing = dict(row)
+          relation_id = str(existing["relation_id"])
+        else:
+          relation_id = f"erel_{uuid.uuid4().hex[:12]}"
+
+    if existing is None:
+      version = int(rel.get("version", 1))
+      with self._conn() as conn:
+        conn.execute(
+          """
+          INSERT INTO entity_relations (
+            relation_id, from_entity_id, to_entity_id, relation_type, trust,
+            interaction_frequency, sentiment, relationship_strength, version, last_seen_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          """,
+          (
+            relation_id,
+            from_id,
+            to_id,
+            rel_type,
+            float(rel.get("trust", 0.5)),
+            float(rel.get("interaction_frequency", 0.0)),
+            float(rel.get("sentiment", 0.0)),
+            float(rel.get("relationship_strength", 0.5)),
+            version,
+            str(rel.get("last_seen_at") or now_iso),
+          ),
+        )
+      self.log_mutation(
+        entity_id=relation_id,
+        action="CREATE",
+        reason="Relationship creation in World Model",
+        state_before={},
+        state_after=rel,
+        entity_type="entity_relation",
+        initiator="world_model",
+      )
+      return relation_id
+    else:
+      if expected_version is not None and int(existing["version"]) != int(expected_version):
+        raise ConcurrentModificationError(
+          f"Concurrent modification on entity_relation {relation_id}: expected version {expected_version}, actual {existing['version']}",
+          record_id=relation_id,
+          expected_version=expected_version,
+          actual_version=existing["version"],
+        )
+      new_ver = int(existing["version"]) + 1
+      trust = float(rel.get("trust", existing["trust"]))
+      freq = float(rel.get("interaction_frequency", existing["interaction_frequency"]))
+      sent = float(rel.get("sentiment", existing["sentiment"]))
+      strength = float(rel.get("relationship_strength", existing["relationship_strength"]))
+      last_seen = str(rel.get("last_seen_at", existing.get("last_seen_at") or now_iso))
+      with self._conn() as conn:
+        conn.execute(
+          """
+          UPDATE entity_relations
+          SET trust=?, interaction_frequency=?, sentiment=?, relationship_strength=?, version=?, last_seen_at=?
+          WHERE relation_id=?
+          """,
+          (trust, freq, sent, strength, new_ver, last_seen, relation_id),
+        )
+      updated_state = dict(existing)
+      updated_state.update({"trust": trust, "interaction_frequency": freq, "sentiment": sent, "relationship_strength": strength, "version": new_ver, "last_seen_at": last_seen})
+      self.log_mutation(
+        entity_id=relation_id,
+        action="UPDATE",
+        reason="Relationship update in World Model",
+        state_before=existing,
+        state_after=updated_state,
+        entity_type="entity_relation",
+        initiator="world_model",
+      )
+      return relation_id
+
+  def get_entity_relation(self, relation_id: str) -> dict[str, Any] | None:
+    with self._conn() as conn:
+      row = conn.execute("SELECT * FROM entity_relations WHERE relation_id=?", (relation_id,)).fetchone()
+    return dict(row) if row else None
+
+  def list_entity_relations(
+    self,
+    from_entity_id: str | None = None,
+    to_entity_id: str | None = None,
+    entity_id: str | None = None,
+    min_trust: float = 0.0,
+  ) -> list[dict[str, Any]]:
+    query = "SELECT * FROM entity_relations WHERE trust >= ?"
+    params: list[Any] = [min_trust]
+    if entity_id:
+      query += " AND (from_entity_id = ? OR to_entity_id = ?)"
+      params.append(entity_id)
+      params.append(entity_id)
+    if from_entity_id:
+      query += " AND from_entity_id = ?"
+      params.append(from_entity_id)
+    if to_entity_id:
+      query += " AND to_entity_id = ?"
+      params.append(to_entity_id)
+    query += " ORDER BY trust DESC, relationship_strength DESC"
+    with self._conn() as conn:
+      rows = conn.execute(query, params).fetchall()
+    return [dict(r) for r in rows]
+
+  def add_entity_mention(self, mention: dict[str, Any]) -> int:
+    entity_id = str(mention.get("entity_id") or "")
+    fact_id = str(mention.get("fact_id") or "")
+    snippet = str(mention.get("context_snippet") or "")
+    now_iso = str(mention.get("created_at") or datetime.now().isoformat())
+    with self._conn() as conn:
+      cur = conn.execute(
+        "INSERT INTO entity_mentions (entity_id, fact_id, context_snippet, created_at) VALUES (?, ?, ?, ?)",
+        (entity_id, fact_id, snippet, now_iso),
+      )
+      return int(cur.lastrowid or 0)
+
+  def get_mentions_for_fact(self, fact_id: str) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      rows = conn.execute("SELECT * FROM entity_mentions WHERE fact_id=?", (fact_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+  def get_mentions_for_entity(self, entity_id: str) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      rows = conn.execute("SELECT * FROM entity_mentions WHERE entity_id=? ORDER BY id DESC", (entity_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+

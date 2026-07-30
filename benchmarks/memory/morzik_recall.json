@@ -1,0 +1,9 @@
+{
+  "name": "morzik_recall",
+  "description": "Tests whether the system correctly recalls facts about Morzik (the dog) when asked.",
+  "query": "Расскажи про Морзика",
+  "expected_entities": ["Морзик"],
+  "expected_entity_type": "dog",
+  "expected_min_facts": 1,
+  "expected_keywords": ["собака", "пёс"]
+}

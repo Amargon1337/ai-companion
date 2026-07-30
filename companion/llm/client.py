@@ -308,10 +308,21 @@ class FactItem(BaseModel):
     importance: int = Field(default=5, ge=1, le=10)
     confidence: float = Field(default=0.75, ge=0.0, le=1.0)
     tags: List[str] = Field(default_factory=list)
+    domain: Literal["user", "world", "system"] = Field(default="user")
 
 
 class FactExtractionResult(BaseModel):
     facts: List[FactItem]
+
+
+class EpisodeExtractionResult(BaseModel):
+    """Эпизод: cвязная иcтория из группы фактов за период."""
+    title: str = Field(default="")
+    narrative: str = Field(default="")
+    participants: List[str] = Field(default_factory=list)
+    emotions: Dict[str, float] = Field(default_factory=dict)  # joy|sadness|anger|fear|hope -> 0..1
+    lesson: str = Field(default="")
+    importance: int = Field(default=7, ge=1, le=10)
 
 
 class ConsolidationItem(BaseModel):

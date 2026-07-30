@@ -1,5 +1,9 @@
 """Retrieval Budget Manager — ranked context within token budget."""
 from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
 from typing import Any
 
 from companion.config import (
@@ -80,9 +84,28 @@ class RetrievalBudgetManager:
         self.max_facts = max_facts
         self.max_reflections = max_reflections
         self.store = store
+        self.weights = self._load_weights()
         # Keep the local model/fallback state across retrieval calls.
         self.reranker = reranker or CrossEncoderReranker()
-        self.last_debug: dict[str, Any] = {}
+
+    @staticmethod
+    def _load_weights() -> dict[str, float]:
+        from companion.config import RETRIEVAL_WEIGHTS_PATH
+
+        defaults = {"semantic": 0.50, "importance": 0.30, "recency": 0.20}
+        try:
+            path = Path(RETRIEVAL_WEIGHTS_PATH)
+            if not path.exists():
+                return defaults
+            data = json.loads(path.read_text(encoding="utf-8"))
+            weights = {key: float(data[key]) for key in defaults}
+            total = sum(weights.values())
+            if total <= 0 or any(value < 0 for value in weights.values()):
+                raise ValueError("retrieval weights must be non-negative and non-zero")
+            return {key: value / total for key, value in weights.items()}
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            logging.getLogger(__name__).warning("Invalid retrieval weights, using defaults: %s", exc)
+            return defaults
 
     def select(
         self,
@@ -109,6 +132,8 @@ class RetrievalBudgetManager:
         human_model: "Any" = None,
         life_transitions: "Any" = None,
         store: "Any" = None,
+        timeline_block: str = "",
+        intent: str = "",
     ) -> ContextBundle:
         summaries = summaries or []
         active_goals = active_goals or []
@@ -157,22 +182,14 @@ class RetrievalBudgetManager:
                     tag_hit = any(q in tag or tag in q for tag in tags)
                     semantic_score = min(1.0, overlap * 0.8 + (0.3 if tag_hit else 0))
 
-            semantic = semantic_score * 0.50
-            importance = (f.importance / 10) * 0.30
-            recency_val = recency * 0.20
+            semantic = semantic_score * self.weights["semantic"]
+            importance = (f.importance / 10) * self.weights["importance"]
+            recency_val = recency * self.weights["recency"]
             mood_boost = mood_to_retrieval_boost(mood, f.fact) if mood else 0.0
             kind_boost = {"state": 0.15, "event": 0.1, "belief": 0.0}.get(f.memory_kind, 0.0)
             
-            final_score = semantic + importance + recency_val + mood_boost + kind_boost
-
-            f.retrieval_debug = {
-                "similarity": round(semantic_score, 4),
-                "importance": round(importance, 4),
-                "recency": round(recency_val, 4),
-                "mood_boost": round(mood_boost, 4),
-                "kind_boost": round(kind_boost, 4),
-                "score": round(final_score, 4),
-            }
+            confidence = max(0.2, min(1.0, float(f.confidence)))
+            final_score = (semantic + importance + recency_val) * confidence + mood_boost + kind_boost
             
             import logging
             logger = logging.getLogger(__name__)
@@ -381,26 +398,8 @@ class RetrievalBudgetManager:
             comm_prefs=comm_prefs,
             human_model=human_model,
             life_transitions=life_transitions,
+            timeline_block=timeline_block[:800],
         )
-
-        self.last_debug = {
-            "query": query,
-            "candidate_facts": len(facts),
-            "active_facts": len(active_facts),
-            "selected_facts": len(bundle.facts),
-            "selected_reflections": len(bundle.reflections),
-            "selected_patterns": len(bundle.patterns),
-            "summaries": len(bundle.summaries),
-            "facts": [
-                {
-                    "id": f.id,
-                    "text": f.fact,
-                    "score": round(getattr(f, "retrieval_score", 0.0), 4),
-                    "details": getattr(f, "retrieval_debug", {}),
-                }
-                for f in bundle.facts
-            ],
-        }
 
         # Global Overflow Eviction: T5 -> T4 -> T3
         pinned_ids = {f.id for f in pinned_facts}

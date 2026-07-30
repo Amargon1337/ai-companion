@@ -1,0 +1,262 @@
+{
+  "metrics": {
+    "recall": 1.0,
+    "precision": 0.7857142857142857,
+    "mrr": 0.8571428571428571,
+    "diversity": 0.9138392343238665,
+    "response_recall": 1.0,
+    "latency_ms": 0.22803157220810785,
+    "tokens": 0.0,
+    "average_similarity": 0.1754104063733292,
+    "average_score": 0.3303673285895207,
+    "forbidden_retrievals": 0,
+    "response_violations": 0,
+    "scenarios": 7,
+    "memory_recall": 1.0,
+    "retrieval_precision": 0.7857142857142857,
+    "average_latency_ms": 0.22803157220810785,
+    "average_tokens": 0.0
+  },
+  "suite_metrics": {
+    "hallucination": {
+      "recall": 1.0,
+      "precision": 0.0,
+      "mrr": 0.0,
+      "diversity": 1.0,
+      "response_recall": 1.0,
+      "latency_ms": 0.3353770007379353,
+      "tokens": 0.0,
+      "average_similarity": 0.12307692307692308,
+      "average_score": 0.19230769230769232,
+      "forbidden_retrievals": 0,
+      "response_violations": 0,
+      "scenarios": 1,
+      "memory_recall": 1.0,
+      "retrieval_precision": 0.0,
+      "average_latency_ms": 0.3353770007379353,
+      "average_tokens": 0.0
+    },
+    "memory": {
+      "recall": 1.0,
+      "precision": 0.75,
+      "mrr": 1.0,
+      "diversity": 0.9264705882352942,
+      "response_recall": 1.0,
+      "latency_ms": 0.19066650202148594,
+      "tokens": 0.0,
+      "average_similarity": 0.19282854282854284,
+      "average_score": 0.36337140712140714,
+      "forbidden_retrievals": 0,
+      "response_violations": 0,
+      "scenarios": 2,
+      "memory_recall": 1.0,
+      "retrieval_precision": 0.75,
+      "average_latency_ms": 0.19066650202148594,
+      "average_tokens": 0.0
+    },
+    "personality": {
+      "recall": 1.0,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "diversity": 1.0,
+      "response_recall": 1.0,
+      "latency_ms": 0.17795600069803186,
+      "tokens": 0.0,
+      "average_similarity": 0.3333333333333333,
+      "average_score": 0.5,
+      "forbidden_retrievals": 0,
+      "response_violations": 0,
+      "scenarios": 1,
+      "memory_recall": 1.0,
+      "retrieval_precision": 1.0,
+      "average_latency_ms": 0.17795600069803186,
+      "average_tokens": 0.0
+    },
+    "reasoning": {
+      "recall": 1.0,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "diversity": 0.7357142857142858,
+      "response_recall": 1.0,
+      "latency_ms": 0.33880000046337955,
+      "tokens": 0.0,
+      "average_similarity": 0.18836960511006473,
+      "average_score": 0.3329438704992152,
+      "forbidden_retrievals": 0,
+      "response_violations": 0,
+      "scenarios": 1,
+      "memory_recall": 1.0,
+      "retrieval_precision": 1.0,
+      "average_latency_ms": 0.33880000046337955,
+      "average_tokens": 0.0
+    },
+    "retrieval": {
+      "recall": 1.0,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "diversity": 0.904109589041096,
+      "response_recall": 1.0,
+      "latency_ms": 0.18137749975721817,
+      "tokens": 0.0,
+      "average_similarity": 0.09871794871794871,
+      "average_score": 0.28028846153846154,
+      "forbidden_retrievals": 0,
+      "response_violations": 0,
+      "scenarios": 2,
+      "memory_recall": 1.0,
+      "retrieval_precision": 1.0,
+      "average_latency_ms": 0.18137749975721817,
+      "average_tokens": 0.0
+    }
+  },
+  "comparison": {
+    "regressions": 0,
+    "changes": {}
+  },
+  "suites": [
+    "hallucination",
+    "memory",
+    "personality",
+    "reasoning",
+    "retrieval"
+  ],
+  "results": [
+    {
+      "id": "hallucination-unknown-location",
+      "suite": "hallucination",
+      "mode": "offline",
+      "recall": 1.0,
+      "precision": 0.0,
+      "mrr": 0.0,
+      "diversity": 1.0,
+      "forbidden_retrievals": 0,
+      "response_recall": 1.0,
+      "response_violations": 0,
+      "latency_ms": 0.3353770007379353,
+      "tokens": 0,
+      "average_similarity": 0.12307692307692308,
+      "average_score": 0.19230769230769232,
+      "selected_ids": [
+        "old-trip"
+      ]
+    },
+    {
+      "id": "memory-morzik-anchor",
+      "suite": "memory",
+      "mode": "offline",
+      "recall": 1.0,
+      "precision": 0.5,
+      "mrr": 1.0,
+      "diversity": 0.8529411764705882,
+      "forbidden_retrievals": 0,
+      "response_recall": 1.0,
+      "response_violations": 0,
+      "latency_ms": 0.2327110014448408,
+      "tokens": 0,
+      "average_similarity": 0.08835978835978836,
+      "average_score": 0.2787698412698413,
+      "selected_ids": [
+        "dog",
+        "alcohol"
+      ]
+    },
+    {
+      "id": "memory-medication-isolation",
+      "suite": "memory",
+      "mode": "offline",
+      "recall": 1.0,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "diversity": 1.0,
+      "forbidden_retrievals": 0,
+      "response_recall": 1.0,
+      "response_violations": 0,
+      "latency_ms": 0.14862200259813108,
+      "tokens": 0,
+      "average_similarity": 0.2972972972972973,
+      "average_score": 0.447972972972973,
+      "selected_ids": [
+        "med"
+      ]
+    },
+    {
+      "id": "personality-zero-advice",
+      "suite": "personality",
+      "mode": "offline",
+      "recall": 1.0,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "diversity": 1.0,
+      "forbidden_retrievals": 0,
+      "response_recall": 1.0,
+      "response_violations": 0,
+      "latency_ms": 0.17795600069803186,
+      "tokens": 0,
+      "average_similarity": 0.3333333333333333,
+      "average_score": 0.5,
+      "selected_ids": [
+        "style"
+      ]
+    },
+    {
+      "id": "reasoning-alcohol-evolution",
+      "suite": "reasoning",
+      "mode": "offline",
+      "recall": 1.0,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "diversity": 0.7357142857142858,
+      "forbidden_retrievals": 0,
+      "response_recall": 1.0,
+      "response_violations": 0,
+      "latency_ms": 0.33880000046337955,
+      "tokens": 0,
+      "average_similarity": 0.18836960511006473,
+      "average_score": 0.3329438704992152,
+      "selected_ids": [
+        "a2",
+        "a1",
+        "a3"
+      ]
+    },
+    {
+      "id": "retrieval-python-project",
+      "suite": "retrieval",
+      "mode": "offline",
+      "recall": 1.0,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "diversity": 0.8082191780821918,
+      "forbidden_retrievals": 0,
+      "response_recall": 1.0,
+      "response_violations": 0,
+      "latency_ms": 0.21755499983555637,
+      "tokens": 0,
+      "average_similarity": 0.19743589743589743,
+      "average_score": 0.36057692307692313,
+      "selected_ids": [
+        "python",
+        "project"
+      ]
+    },
+    {
+      "id": "retrieval-music-focus",
+      "suite": "retrieval",
+      "mode": "offline",
+      "recall": 1.0,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "diversity": 1.0,
+      "forbidden_retrievals": 0,
+      "response_recall": 1.0,
+      "response_violations": 0,
+      "latency_ms": 0.14519999967887998,
+      "tokens": 0,
+      "average_similarity": 0.0,
+      "average_score": 0.2,
+      "selected_ids": [
+        "music"
+      ]
+    }
+  ]
+}

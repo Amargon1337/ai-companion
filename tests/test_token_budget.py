@@ -41,3 +41,17 @@ def test_retrieval_token_budget_is_enforced():
     bundle = manager.select(query="fact", facts=facts, reflections=[])
 
     assert estimate_tokens(bundle.to_prompt_block()) <= manager.token_budget
+
+
+def test_retrieval_manager_loads_valid_tuned_weights(tmp_path, monkeypatch):
+    weights_path = tmp_path / "weights.json"
+    weights_path.write_text('{"semantic": 0.8, "importance": 0.1, "recency": 0.1}', encoding="utf-8")
+    monkeypatch.setenv("RETRIEVAL_WEIGHTS_PATH", str(weights_path))
+
+    # Config is imported before the environment mutation in this test suite;
+    # patch the resolved setting to exercise the loader deterministically.
+    import companion.config as config
+    monkeypatch.setattr(config, "RETRIEVAL_WEIGHTS_PATH", str(weights_path))
+    manager = RetrievalBudgetManager()
+
+    assert manager.weights == {"semantic": 0.8, "importance": 0.1, "recency": 0.1}

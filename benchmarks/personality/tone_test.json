@@ -1,0 +1,17 @@
+{
+  "name": "tone_test",
+  "description": "Tests whether the bot correctly adapts tone when user is depressed vs energized.",
+  "scenarios": [
+    {
+      "emotional_state": "depressed",
+      "query": "Я устал от всего",
+      "forbidden_keywords": ["бодрись", "не вешай нос", "всё будет хорошо", "держись"],
+      "expected_tone": "calm, supportive, no advice"
+    },
+    {
+      "emotional_state": "energized",
+      "query": "Я сегодня на подъёме!",
+      "expected_tone": "energetic, playful, challenging"
+    }
+  ]
+}

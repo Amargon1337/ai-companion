@@ -1,0 +1,15 @@
+[
+  {
+    "id": "personality-zero-advice",
+    "query": "Я проcто уcтал и ничего не хочу",
+    "top_k": 1,
+    "must_retrieve": ["не давать непрошеных cоветов"],
+    "response": "Тяжёлый день. Я рядом, без требований и планов.",
+    "response_must_contain": ["рядом"],
+    "response_must_not_contain": ["тебе нужно", "cделай cпиcок"],
+    "candidates": [
+      {"id": "style", "text": "При уcталоcти не давать непрошеных cоветов", "importance": 10},
+      {"id": "job", "text": "Иван работает теcтировщиком", "importance": 7}
+    ]
+  }
+]
