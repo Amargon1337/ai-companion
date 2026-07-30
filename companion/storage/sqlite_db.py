@@ -14,8 +14,9 @@ def _configure_conn(conn: sqlite3.Connection) -> None:
   conn.execute("PRAGMA foreign_keys = ON;")
 class MemoryDatabase:
   def __init__(self, path: str | None = None) -> None:
+    import os
     from companion.config import SQLITE_PATH as _SQLITE_PATH
-    self.path = path if path is not None else _SQLITE_PATH
+    self.path = path if path is not None else os.environ.get("SQLITE_PATH", _SQLITE_PATH)
     self._init_schema()
 
   @contextmanager
@@ -210,6 +211,20 @@ class MemoryDatabase:
           conn.execute("ALTER TABLE facts ADD COLUMN facts_sent_count INTEGER DEFAULT 0")
         if "facts_used_count" not in cols:
           conn.execute("ALTER TABLE facts ADD COLUMN facts_used_count INTEGER DEFAULT 0")
+        if "origin" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN origin TEXT DEFAULT 'llm_extraction'")
+        if "source_message_id" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN source_message_id INTEGER")
+        if "identity_layer" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN identity_layer TEXT DEFAULT 'legacy_unknown'")
+        if "conf_observed" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN conf_observed REAL DEFAULT 1.0")
+        if "conf_inferred" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN conf_inferred REAL DEFAULT 0.8")
+        if "conf_stability" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN conf_stability REAL DEFAULT 1.0")
+        if "conf_verification" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN conf_verification REAL DEFAULT 1.0")
       except sqlite3.OperationalError:
         pass
 

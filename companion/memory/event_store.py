@@ -172,14 +172,33 @@ class EventStore:
         """Применить событие к состоянию (простая проекция)."""
         if event.event_type == MemoryEventType.FACT_CREATED:
             state.update(event.payload)
-            state["status"] = "active"
+            state.setdefault("status", "active")
+            state.setdefault("importance", 5)
+            state.setdefault("origin", "llm_extraction")
+            state.setdefault("identity_layer", "legacy_unknown")
+            state.setdefault("conf_observed", 1.0)
+            state.setdefault("conf_inferred", 0.8)
+            state.setdefault("conf_stability", 1.0)
+            state.setdefault("conf_verification", 1.0)
         elif event.event_type == MemoryEventType.FACT_UPDATED:
-            state.update(event.payload.get("updates", {}))
+            if "new_state" in event.payload and isinstance(event.payload["new_state"], dict):
+                state.update(event.payload["new_state"])
+            elif "updates" in event.payload and isinstance(event.payload["updates"], dict):
+                state.update(event.payload["updates"])
+            else:
+                for k, v in event.payload.items():
+                    if k not in {"aggregate_id", "old_state", "new_state", "changed_fields", "timestamp"}:
+                        state[k] = v
         elif event.event_type == MemoryEventType.FACT_STATUS_CHANGED:
-            state["status"] = event.payload.get("new_status")
+            if "new_state" in event.payload and isinstance(event.payload["new_state"], dict):
+                state.update(event.payload["new_state"])
+            elif "new_status" in event.payload:
+                state["status"] = event.payload["new_status"]
+            elif "status" in event.payload:
+                state["status"] = event.payload["status"]
         elif event.event_type == MemoryEventType.FACT_SUPERSEDED:
             state["status"] = "superseded"
-            state["superseded_by"] = event.payload.get("superseded_by")
+            state["superseded_by"] = event.payload.get("superseded_by") or event.metadata.get("superseded_by")
         elif event.event_type == MemoryEventType.FACT_ARCHIVED:
             state["is_archived"] = True
         elif event.event_type == MemoryEventType.FACT_QUARANTINED:

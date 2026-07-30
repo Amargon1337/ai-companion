@@ -9,7 +9,7 @@ import logging
 import os
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from companion.config import (
@@ -197,7 +197,7 @@ class MemoryStore:
                 actor=actor,
                 payload=d,
                 metadata={
-                    "origin": getattr(fact, 'origin', 'LLM_EXTRACTION'),
+                    "origin": str(getattr(fact, 'origin', 'llm_extraction')),
                     "source_message_id": getattr(fact, 'source_message_id', None),
                 },
             )
@@ -223,6 +223,19 @@ class MemoryStore:
         if not fact or fact.status != "dormant":
             logger.warning("Attempted to revive non-dormant fact %s (status: %s)", fact_id, fact.status if fact else "None")
             return
+        event = MemoryEvent(
+            aggregate_id=fact_id,
+            event_type=MemoryEventType.FACT_STATUS_CHANGED,
+            actor="SYSTEM",
+            payload={
+                "aggregate_id": fact_id,
+                "old_state": {"status": "dormant", "facts_sent_count": getattr(fact, "facts_sent_count", 0)},
+                "new_state": {"status": "active", "facts_sent_count": 0},
+                "changed_fields": ["status", "facts_sent_count"],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        self.events.append(event)
         with self.db._conn() as conn:
             conn.execute("UPDATE facts SET status='active', facts_sent_count=0 WHERE id=?", (fact_id,))
         logger.info("dormant_auto_revival: Fact %s promoted to active", fact_id)
@@ -320,7 +333,15 @@ class MemoryStore:
                     aggregate_id=rel.to_id,
                     event_type=MemoryEventType.FACT_STATUS_CHANGED,
                     actor=actor,
-                    payload={"old_status": "active", "new_status": "superseded"},
+                    payload={
+                        "aggregate_id": rel.to_id,
+                        "old_state": {"status": "active"},
+                        "new_state": {"status": "superseded"},
+                        "changed_fields": ["status"],
+                        "old_status": "active",
+                        "new_status": "superseded",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
                     metadata={"superseded_by": rel.from_id},
                 )
                 self.events.append(status_event)
@@ -474,6 +495,19 @@ class MemoryStore:
 
         with self.db._conn() as conn:
             for fid in to_dormant:
+                event = MemoryEvent(
+                    aggregate_id=fid,
+                    event_type=MemoryEventType.FACT_STATUS_CHANGED,
+                    actor="GOVERNANCE",
+                    payload={
+                        "aggregate_id": fid,
+                        "old_state": {"status": "active"},
+                        "new_state": {"status": "dormant", "facts_sent_count": 0},
+                        "changed_fields": ["status", "facts_sent_count"],
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                self.events.append(event)
                 conn.execute("UPDATE facts SET status='dormant', facts_sent_count=0 WHERE id=?", (fid,))
 
         return len(to_dormant)
@@ -545,12 +579,38 @@ class MemoryStore:
                     if sent > 10 and used == 0:
                         new_imp = max(3, imp - 1)
                         if new_imp != imp:
+                            event = MemoryEvent(
+                                aggregate_id=fid,
+                                event_type=MemoryEventType.FACT_UPDATED,
+                                actor="RETRIEVAL_FEEDBACK",
+                                payload={
+                                    "aggregate_id": fid,
+                                    "old_state": {"importance": imp, "facts_sent_count": sent},
+                                    "new_state": {"importance": new_imp, "facts_sent_count": 0},
+                                    "changed_fields": ["importance", "facts_sent_count"],
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                },
+                            )
+                            self.events.append(event)
                             conn.execute("UPDATE facts SET importance=?, facts_sent_count=0 WHERE id=?", (new_imp, fid))
                             logger.info("memory_feedback_loop_applied: %s lowered from %d to %d", fid, imp, new_imp)
                             adjusted["lowered"] += 1
                     elif sent > 5 and used > 3:
                         new_imp = min(8, imp + 1)
                         if new_imp != imp:
+                            event = MemoryEvent(
+                                aggregate_id=fid,
+                                event_type=MemoryEventType.FACT_UPDATED,
+                                actor="RETRIEVAL_FEEDBACK",
+                                payload={
+                                    "aggregate_id": fid,
+                                    "old_state": {"importance": imp},
+                                    "new_state": {"importance": new_imp},
+                                    "changed_fields": ["importance"],
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                },
+                            )
+                            self.events.append(event)
                             conn.execute("UPDATE facts SET importance=? WHERE id=?", (new_imp, fid))
                             logger.info("memory_feedback_loop_applied: %s boosted from %d to %d", fid, imp, new_imp)
                             adjusted["boosted"] += 1

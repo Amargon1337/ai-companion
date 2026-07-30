@@ -13,7 +13,7 @@ RelationType = Literal["supersedes", "contradicts", "confirms", "related_to"]
 QueryIntent = Literal["memory", "world", "mixed"]
 
 
-class MemoryOrigin(Enum):
+class MemoryOrigin(str, Enum):
     """Происхождение факта памяти."""
     USER_STATEMENT = "user_statement"           # Прямое утверждение пользователя
     LLM_EXTRACTION = "llm_extraction"           # Извлечено моделью из контекста
@@ -23,7 +23,7 @@ class MemoryOrigin(Enum):
     EXTERNAL_SOURCE = "external_source"         # Внешний источник (файл, ссылка)
 
 
-class IdentityLayer(Enum):
+class IdentityLayer(str, Enum):
     """Слой идентичности для классификации важности факта."""
     CORE_VALUE = "core_value"                   # Неизменные ценности
     BIOGRAPHICAL = "biographical"               # Факты биографии
