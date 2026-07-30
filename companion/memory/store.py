@@ -32,7 +32,7 @@ class MemoryStore:
         self.db = MemoryDatabase()
         self.vector = VectorIndex()
         self.identity = IdentityVault(self.db.path)
-        self.events = EventStore()
+        self.events = EventStore(self.db.path)
         import threading
         self._cache_lock = threading.Lock()
 
@@ -317,7 +317,7 @@ class MemoryStore:
                 event_type=MemoryEventType.FACT_SUPERSEDED if rel.relation == "supersedes" else MemoryEventType.FACT_UPDATED,
                 actor=actor,
                 payload=d,
-                metadata={"relation_type": rel.relation},
+                metadata={"relation_type": rel.relation, "superseded_by": rel.from_id},
             )
             self.events.append(event)
         
@@ -336,10 +336,11 @@ class MemoryStore:
                     payload={
                         "aggregate_id": rel.to_id,
                         "old_state": {"status": "active"},
-                        "new_state": {"status": "superseded"},
-                        "changed_fields": ["status"],
+                        "new_state": {"status": "superseded", "superseded_by": rel.from_id},
+                        "changed_fields": ["status", "superseded_by"],
                         "old_status": "active",
                         "new_status": "superseded",
+                        "superseded_by": rel.from_id,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     },
                     metadata={"superseded_by": rel.from_id},

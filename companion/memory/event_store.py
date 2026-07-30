@@ -16,8 +16,9 @@ class EventStore:
     """Хранилище событий памяти с поддержкой event sourcing."""
     
     def __init__(self, db_path: str | None = None) -> None:
+        import os
         from companion.config import SQLITE_PATH as _SQLITE_PATH
-        self.db_path = db_path if db_path is not None else _SQLITE_PATH
+        self.db_path = db_path if db_path is not None else os.environ.get("SQLITE_PATH", _SQLITE_PATH)
         self._init_schema()
     
     @contextmanager
@@ -144,6 +145,20 @@ class EventStore:
         
         return [MemoryEvent.from_row(dict(row)) for row in rows]
     
+    def get_all_events(
+        self,
+        limit: int | None = None,
+    ) -> list[MemoryEvent]:
+        """Получить все события в хронологическом порядке."""
+        query = "SELECT * FROM memory_events ORDER BY timestamp ASC, id ASC"
+        params: list[Any] = []
+        if limit:
+            query += " LIMIT ?"
+            params.append(limit)
+        with self._conn() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [MemoryEvent.from_row(dict(row)) for row in rows]
+    
     def get_history(
         self,
         aggregate_id: str,
@@ -196,6 +211,8 @@ class EventStore:
                 state["status"] = event.payload["new_status"]
             elif "status" in event.payload:
                 state["status"] = event.payload["status"]
+            if event.metadata and event.metadata.get("superseded_by"):
+                state["superseded_by"] = event.metadata["superseded_by"]
         elif event.event_type == MemoryEventType.FACT_SUPERSEDED:
             state["status"] = "superseded"
             state["superseded_by"] = event.payload.get("superseded_by") or event.metadata.get("superseded_by")
