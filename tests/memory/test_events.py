@@ -149,6 +149,9 @@ class TestMemoryStoreWithEvents:
             fact="User lives in Berlin",
             date=datetime.utcnow().isoformat(),
             created_at=datetime.utcnow().isoformat(),
+            importance=8,
+            confidence=0.9,
+            source="TEST_USER",
         )
         
         result = memory_store.add_fact(fact, actor="TEST_USER", log_event=True)
@@ -167,6 +170,9 @@ class TestMemoryStoreWithEvents:
             fact="Temporary fact",
             date=datetime.utcnow().isoformat(),
             created_at=datetime.utcnow().isoformat(),
+            importance=5,
+            confidence=0.7,
+            source="TEST",
         )
         
         memory_store.add_fact(fact, log_event=False)
@@ -182,12 +188,18 @@ class TestMemoryStoreWithEvents:
             fact="Old preference",
             date=datetime.utcnow().isoformat(),
             created_at=datetime.utcnow().isoformat(),
+            importance=7,
+            confidence=0.8,
+            source="TEST",
         )
         fact2 = Fact(
             id=str(uuid.uuid4()),
             fact="New preference",
             date=datetime.utcnow().isoformat(),
             created_at=datetime.utcnow().isoformat(),
+            importance=8,
+            confidence=0.9,
+            source="TEST",
         )
         
         memory_store.add_fact(fact1, log_event=True)
@@ -218,6 +230,10 @@ class TestMemoryStoreWithEvents:
         reflection = Reflection(
             id=str(uuid.uuid4()),
             insight="User tends to be more productive in mornings",
+            based_on=[],
+            period="week",
+            importance=7,
+            confidence=0.85,
             created_at=datetime.utcnow().isoformat(),
         )
         
@@ -245,6 +261,9 @@ class TestEventSourcingAudit:
             fact="User started learning Python",
             date=datetime.utcnow().isoformat(),
             created_at=datetime.utcnow().isoformat(),
+            importance=8,
+            confidence=0.9,
+            source="USER_DIRECT",
         )
         store.add_fact(fact, actor="USER_DIRECT", log_event=True)
         
@@ -255,6 +274,9 @@ class TestEventSourcingAudit:
             fact="User completed Python course",
             date=datetime.utcnow().isoformat(),
             created_at=datetime.utcnow().isoformat(),
+            importance=9,
+            confidence=0.95,
+            source="USER_DIRECT",
         )
         store.add_fact(new_fact, actor="USER_DIRECT", log_event=True)
         
