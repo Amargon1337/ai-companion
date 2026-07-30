@@ -1,25 +1,38 @@
-api.env
-api.env.txt
+```
+# Environment files
+.env
+.env.local
+*.env.*
+
+# Database files
+*.db
+
+# Python
 __pycache__/
 *.pyc
-.env
-.vscode/
-.claude/
-monthbook/
-data/
-bot.log
-*.mp4
-*.webp
-*.ogg
-*.wav
-diary.txt
-summaries.txt
-personality.json
-todo.json
-timeline.jsonl
-crisis.jsonl
-mood.jsonl
-anya_memory.json
-permanent_notes.txt
-master_summary.txt
-yearbook_*.txt
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.ENV
+.python-version
+
+# Logs
+*.log
+
+# Coverage reports
+.coverage
+coverage/
+htmlcov/
+
+# Testing
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+```

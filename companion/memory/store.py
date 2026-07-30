@@ -1,4 +1,7 @@
-"""Unified memory store — facts, messages, relations, reflections, beliefs."""
+"""Unified memory store — facts, messages, relations, reflections, beliefs.
+
+Phase C0: Integrated with Event Sourcing for full audit trail.
+"""
 from __future__ import annotations
 
 import json
@@ -16,6 +19,8 @@ from companion.memory.importance import days_since
 from companion.memory.text_sim import text_overlap
 from companion.memory.vector_index import VectorIndex
 from companion.memory.identity_vault import IdentityVault
+from companion.memory.events import MemoryEvent, MemoryEventType
+from companion.memory.event_store import EventStore
 from companion.models import Fact, FactRelation, MessageRecord, Reflection
 from companion.storage.sqlite_db import MemoryDatabase
 
@@ -27,6 +32,7 @@ class MemoryStore:
         self.db = MemoryDatabase()
         self.vector = VectorIndex()
         self.identity = IdentityVault(self.db.path)
+        self.events = EventStore()
         import threading
         self._cache_lock = threading.Lock()
 
@@ -172,10 +178,31 @@ class MemoryStore:
 
     # ── Facts ─────────────────────────────────────────────────────────
 
-    def add_fact(self, fact: Fact) -> Fact:
+    def add_fact(self, fact: Fact, actor: str = "SYSTEM", log_event: bool = True) -> Fact:
+        """Add a fact with event logging (Phase C0).
+        
+        Args:
+            fact: The fact to add.
+            actor: Who initiated this (USER_DIRECT, LLM_EXTRACTOR, etc).
+            log_event: Whether to log to event store (default True for Phase C0).
+        """
         d = fact.to_dict()
         self.db._insert_fact(d)
         self.vector.compute_and_cache(fact.fact, content_type="fact")
+        
+        if log_event:
+            event = MemoryEvent(
+                aggregate_id=fact.id,
+                event_type=MemoryEventType.FACT_CREATED,
+                actor=actor,
+                payload=d,
+                metadata={
+                    "origin": getattr(fact, 'origin', 'LLM_EXTRACTION'),
+                    "source_message_id": getattr(fact, 'source_message_id', None),
+                },
+            )
+            self.events.append(event)
+        
         return fact
 
     def get_fact(self, fact_id: str) -> Fact | None:
@@ -256,7 +283,7 @@ class MemoryStore:
         
         return [(f, 0.0) for f in hits_fallback[:limit]]
 
-    def add_relation(self, rel: FactRelation) -> None:
+    def add_relation(self, rel: FactRelation, actor: str = "SYSTEM", log_event: bool = True) -> None:
         from_fact = self.get_fact(rel.from_id)
         to_fact = self.get_fact(rel.to_id)
         if not from_fact or not to_fact:
@@ -270,11 +297,33 @@ class MemoryStore:
 
         d = rel.to_dict()
         self.db._insert_relation(d)
+        
+        if log_event:
+            event = MemoryEvent(
+                aggregate_id=rel.id,
+                event_type=MemoryEventType.FACT_SUPERSEDED if rel.relation == "supersedes" else MemoryEventType.FACT_UPDATED,
+                actor=actor,
+                payload=d,
+                metadata={"relation_type": rel.relation},
+            )
+            self.events.append(event)
+        
         if rel.relation == "supersedes":
             self.db.update_fact_status(rel.to_id, "superseded")
             old_fact = self.get_fact(rel.to_id)
             if old_fact and old_fact.fact:
                 self.vector.delete_for_content(old_fact.fact)
+            
+            # Log status change event
+            if log_event:
+                status_event = MemoryEvent(
+                    aggregate_id=rel.to_id,
+                    event_type=MemoryEventType.FACT_STATUS_CHANGED,
+                    actor=actor,
+                    payload={"old_status": "active", "new_status": "superseded"},
+                    metadata={"superseded_by": rel.from_id},
+                )
+                self.events.append(status_event)
 
     def get_active_fact_texts(self) -> list[str]:
         return [f.fact for f in self.list_facts("active")]
@@ -298,9 +347,20 @@ class MemoryStore:
 
     # ── Reflections ─────────────────────────────────────────────────
 
-    def add_reflection(self, reflection: Reflection) -> Reflection:
+    def add_reflection(self, reflection: Reflection, actor: str = "SYSTEM", log_event: bool = True) -> Reflection:
         d = reflection.to_dict()
         self.db._insert_reflection(d)
+        
+        if log_event:
+            event = MemoryEvent(
+                aggregate_id=reflection.id,
+                event_type=MemoryEventType.PATTERN_FORMED,
+                actor=actor,
+                payload=d,
+                metadata={"reflection_type": "insight"},
+            )
+            self.events.append(event)
+        
         return reflection
 
     def list_reflections(self, status: str = "active") -> list[Reflection]:
