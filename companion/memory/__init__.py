@@ -5,16 +5,22 @@ from companion.memory.verification import (
     VerificationResult,
     verify_projection_integrity,
 )
+from companion.memory.controller import MemoryGovernanceController
 from companion.memory.governance import (
     GovernanceAction,
+    GovernanceContext,
     GovernanceDecision,
     GovernanceRule,
+    MemoryCapability,
 )
 
 __all__ = [
     "GovernanceAction",
+    "GovernanceContext",
     "GovernanceDecision",
     "GovernanceRule",
+    "MemoryCapability",
+    "MemoryGovernanceController",
     "MemoryStore",
     "ProjectionRebuilder",
     "REQUIRED_REPLAY_FIELDS",

@@ -13,6 +13,16 @@ from typing import Any
 from companion.models import MemoryActor
 
 
+class MemoryCapability(str, Enum):
+    """Возможности (capabilities), необходимые для выполнения операций над памятью."""
+    CREATE_FACT = "create_fact"
+    MODIFY_FACT = "modify_fact"
+    CHANGE_STATUS = "change_status"
+    RUN_DECAY = "run_decay"
+    VERIFY_MEMORY = "verify_memory"
+    DELETE_FACT = "delete_fact"
+
+
 class GovernanceAction(str, Enum):
     """Типы действий над памятью, регулируемые контроллером Governance."""
     MUTATE_STATUS = "mutate_status"         # Изменение статуса (active -> archived и др.)
@@ -29,9 +39,50 @@ class GovernanceRule(str, Enum):
     CORE_MEMORY_PROTECTION_001 = "CORE_MEMORY_PROTECTION_001" # Защита CORE_VALUE / CORE_BELIEF / CORE_IDENTITY
     LLM_RESTRICTION_001 = "LLM_RESTRICTION_001"               # Запрет для LLM архивировать/удалять/гасить
     PRIVILEGED_DELETE_001 = "PRIVILEGED_DELETE_001"           # Запрет на удаление непривилегированным субъектам
+    CAPABILITY_RESTRICTION_001 = "CAPABILITY_RESTRICTION_001" # У субъекта отсутствует требуемая способность (capability)
     LIFECYCLE_GRAPH_001 = "LIFECYCLE_GRAPH_001"               # Нарушение графа переходов MemoryLifecycle
     UNKNOWN_STATUS_001 = "UNKNOWN_STATUS_001"                 # Неизвестный статус памяти
     CUSTOM_POLICY_001 = "CUSTOM_POLICY_001"                   # Пользовательское ограничение
+
+
+@dataclass(frozen=True)
+class GovernanceContext:
+    """Контекст выполнения операции Governance.
+
+    Не содержит всю базу или служебные тяжёлые объекты — только лёгкие метаданные
+    запроса для принятия решения арбитром безопасности.
+    """
+    actor: MemoryActor
+    capability: MemoryCapability = MemoryCapability.CHANGE_STATUS
+    reason: str = ""
+    source: str | None = None
+    identity_layer: str | None = None
+    confidence: float | None = None
+
+    @classmethod
+    def create(
+        cls,
+        actor: Any = "system",
+        capability: MemoryCapability | str = MemoryCapability.CHANGE_STATUS,
+        reason: str = "",
+        source: str | None = None,
+        identity_layer: str | None = None,
+        confidence: float | None = None,
+    ) -> GovernanceContext:
+        act = MemoryActor.from_string(actor)
+        cap = (
+            capability
+            if isinstance(capability, MemoryCapability)
+            else MemoryCapability(str(capability))
+        )
+        return cls(
+            actor=act,
+            capability=cap,
+            reason=reason,
+            source=source,
+            identity_layer=identity_layer,
+            confidence=confidence,
+        )
 
 
 @dataclass(frozen=True)
