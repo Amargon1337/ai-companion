@@ -34,6 +34,46 @@ class IdentityLayer(str, Enum):
     LEGACY_UNKNOWN = "legacy_unknown"           # Для старых фактов без классификации
 
 
+class MemoryActor(str, Enum):
+    """Субъект (автор/инициатор) изменений в системе памяти."""
+    USER = "user"
+    LLM = "llm"
+    SYSTEM = "system"
+    ADMIN = "admin"
+
+    def is_privileged(self) -> bool:
+        """Возвращает True, если субъект имеет привилегированные права (USER, ADMIN)."""
+        return self in {MemoryActor.USER, MemoryActor.ADMIN}
+
+    def is_llm(self) -> bool:
+        """Возвращает True, если субъект является языковой моделью (LLM)."""
+        return self == MemoryActor.LLM
+
+    def is_system(self) -> bool:
+        """Возвращает True, если субъект является фоновым/системным процессом."""
+        return self == MemoryActor.SYSTEM
+
+    @classmethod
+    def from_string(cls, value: Any) -> MemoryActor:
+        """Приводит строковое или Enum значение к MemoryActor."""
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, Enum):
+            val = str(value.value).strip().lower()
+        elif value is None:
+            return cls.SYSTEM
+        else:
+            val = str(value).strip().lower()
+
+        if val in {"user", "user_statement", "user_explicit"}:
+            return cls.USER
+        if val in {"admin", "administrator"}:
+            return cls.ADMIN
+        if val in {"llm", "llm_extraction", "llm_inference", "assistant"}:
+            return cls.LLM
+        return cls.SYSTEM
+
+
 @dataclass
 class MemoryConfidence:
     """Составная уверенность факта.
