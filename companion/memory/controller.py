@@ -51,7 +51,7 @@ class MemoryGovernanceController:
             MemoryCapability.DELETE_FACT,
             MemoryCapability.MODIFY_FACT,
         }
-        if context.capability not in allowed_caps:
+        if not any(cap in allowed_caps for cap in context.permissions):
             return GovernanceDecision.deny(
                 actor=context.actor,
                 rule=GovernanceRule.CAPABILITY_RESTRICTION_001,
@@ -106,7 +106,10 @@ class MemoryGovernanceController:
         context: GovernanceContext,
     ) -> GovernanceDecision:
         """Проверка разрешения на создание нового факта в памяти."""
-        if context.capability not in {MemoryCapability.CREATE_FACT, MemoryCapability.MODIFY_FACT}:
+        if not (
+            context.has_capability(MemoryCapability.CREATE_FACT)
+            or context.has_capability(MemoryCapability.MODIFY_FACT)
+        ):
             return GovernanceDecision.deny(
                 actor=context.actor,
                 rule=GovernanceRule.CAPABILITY_RESTRICTION_001,
@@ -125,7 +128,10 @@ class MemoryGovernanceController:
         context: GovernanceContext,
     ) -> GovernanceDecision:
         """Проверка разрешения на изменение содержимого существующего факта."""
-        if context.capability not in {MemoryCapability.MODIFY_FACT, MemoryCapability.CHANGE_STATUS}:
+        if not (
+            context.has_capability(MemoryCapability.MODIFY_FACT)
+            or context.has_capability(MemoryCapability.CHANGE_STATUS)
+        ):
             return GovernanceDecision.deny(
                 actor=context.actor,
                 rule=GovernanceRule.CAPABILITY_RESTRICTION_001,
@@ -157,7 +163,10 @@ class MemoryGovernanceController:
         context: GovernanceContext,
     ) -> GovernanceDecision:
         """Проверка разрешения на создание связи между фактами."""
-        if context.capability not in {MemoryCapability.CREATE_FACT, MemoryCapability.MODIFY_FACT}:
+        if not (
+            context.has_capability(MemoryCapability.CREATE_FACT)
+            or context.has_capability(MemoryCapability.MODIFY_FACT)
+        ):
             return GovernanceDecision.deny(
                 actor=context.actor,
                 rule=GovernanceRule.CAPABILITY_RESTRICTION_001,
@@ -176,7 +185,7 @@ class MemoryGovernanceController:
         context: GovernanceContext,
     ) -> GovernanceDecision:
         """Проверка разрешения на удаление (перевод в статус deleted)."""
-        if context.capability != MemoryCapability.DELETE_FACT:
+        if not context.has_capability(MemoryCapability.DELETE_FACT):
             return GovernanceDecision.deny(
                 actor=context.actor,
                 rule=GovernanceRule.CAPABILITY_RESTRICTION_001,

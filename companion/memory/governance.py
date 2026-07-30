@@ -7,7 +7,7 @@ GovernanceAction, GovernanceRule), обеспечивая аудит и отсл
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
 from companion.models import MemoryActor
@@ -51,33 +51,59 @@ class GovernanceContext:
 
     Не содержит всю базу или служебные тяжёлые объекты — только лёгкие метаданные
     запроса для принятия решения арбитром безопасности.
+    Анти-блоат правило: запрещено добавлять сюда тяжелые DTO, эмбеддинги, токены,
+    историю диалога и всю базу памяти. Только метаданные для проверки прав.
     """
     actor: MemoryActor
-    capability: MemoryCapability = MemoryCapability.CHANGE_STATUS
+    permissions: frozenset[MemoryCapability] = field(
+        default_factory=lambda: frozenset({MemoryCapability.CHANGE_STATUS})
+    )
     reason: str = ""
     source: str | None = None
     identity_layer: str | None = None
     confidence: float | None = None
 
+    def has_capability(self, cap: MemoryCapability) -> bool:
+        """Проверяет наличие заданной способности у субъекта."""
+        return cap in self.permissions
+
+    @property
+    def capability(self) -> MemoryCapability:
+        """Обратная совместимость для получения первой способности из набора."""
+        for cap in self.permissions:
+            return cap
+        return MemoryCapability.CHANGE_STATUS
+
     @classmethod
     def create(
         cls,
         actor: Any = "system",
-        capability: MemoryCapability | str = MemoryCapability.CHANGE_STATUS,
+        capability: MemoryCapability | str | None = None,
+        capabilities: Any = None,
         reason: str = "",
         source: str | None = None,
         identity_layer: str | None = None,
         confidence: float | None = None,
     ) -> GovernanceContext:
         act = MemoryActor.from_string(actor)
-        cap = (
-            capability
-            if isinstance(capability, MemoryCapability)
-            else MemoryCapability(str(capability))
-        )
+        if capabilities is not None:
+            caps_set = frozenset(
+                c if isinstance(c, MemoryCapability) else MemoryCapability(str(c))
+                for c in capabilities
+            )
+        elif capability is not None:
+            cap_enum = (
+                capability
+                if isinstance(capability, MemoryCapability)
+                else MemoryCapability(str(capability))
+            )
+            caps_set = frozenset({cap_enum})
+        else:
+            caps_set = frozenset({MemoryCapability.CHANGE_STATUS})
+
         return cls(
             actor=act,
-            capability=cap,
+            permissions=caps_set,
             reason=reason,
             source=source,
             identity_layer=identity_layer,

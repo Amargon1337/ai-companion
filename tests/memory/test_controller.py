@@ -112,3 +112,17 @@ def test_authorize_deletion(controller: MemoryGovernanceController) -> None:
     decision = controller.authorize_deletion(llm_ctx)
     assert decision.allowed is False
     assert decision.rule == "PRIVILEGED_DELETE_001"
+
+
+def test_authorize_multiple_capabilities(controller: MemoryGovernanceController) -> None:
+    """Проверка работы с набором способностей (capabilities set)."""
+    ctx = GovernanceContext.create(
+        actor="SYSTEM",
+        capabilities={MemoryCapability.CHANGE_STATUS, MemoryCapability.RUN_DECAY},
+    )
+    assert ctx.has_capability(MemoryCapability.CHANGE_STATUS) is True
+    assert ctx.has_capability(MemoryCapability.RUN_DECAY) is True
+    assert ctx.has_capability(MemoryCapability.DELETE_FACT) is False
+
+    decision = controller.authorize_status_transition("active", "dormant", ctx)
+    assert decision.allowed is True
