@@ -206,3 +206,11 @@ ACTIVATION_WEIGHT_RECENCY = float(os.getenv("ACTIVATION_WEIGHT_RECENCY", "0.25")
 ACTIVATION_WEIGHT_USAGE = float(os.getenv("ACTIVATION_WEIGHT_USAGE", "0.20"))
 ACTIVATION_WEIGHT_EMOTION = float(os.getenv("ACTIVATION_WEIGHT_EMOTION", "0.10"))
 ACTIVATION_WEIGHT_GOAL = float(os.getenv("ACTIVATION_WEIGHT_GOAL", "0.15"))
+# Confirmation = repeated observation spread over real time. This is what
+# separates a mood from a trait, so it outweighs raw emotion by design.
+ACTIVATION_WEIGHT_CONFIRMATION = float(os.getenv("ACTIVATION_WEIGHT_CONFIRMATION", "0.35"))
+# Minimum span (days) between first and last observation before repetition
+# counts as a real pattern rather than one intense evening.
+PROMOTION_MIN_SPAN_DAYS = float(os.getenv("PROMOTION_MIN_SPAN_DAYS", "14"))
+# Observations required before a repeated theme may become a Pattern.
+PROMOTION_MIN_OBSERVATIONS = int(os.getenv("PROMOTION_MIN_OBSERVATIONS", "3"))

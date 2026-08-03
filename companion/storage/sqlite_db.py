@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import uuid
@@ -13,6 +14,8 @@ from datetime import datetime
 from typing import Any
 
 from companion.exceptions import ConcurrentModificationError
+
+logger = logging.getLogger(__name__)
 
 
 def _json(value: Any) -> str:
@@ -35,6 +38,7 @@ class MemoryDatabase:
   def __init__(self, path: str | None = None) -> None:
     import threading
     self._lock = threading.RLock()
+    self._tx_state = threading.local()
     self._path: str = ""
     self.conn: sqlite3.Connection | None = None
     from companion.config import SQLITE_PATH as _SQLITE_PATH
@@ -72,28 +76,40 @@ class MemoryDatabase:
     """Archive audit_log records older than `days` into data/audit_archive.db."""
     archive_path = os.path.join(os.path.dirname(self.path), "audit_archive.db")
     with self._lock:
+      # ATTACH is not allowed inside a transaction, and a leaked attachment
+      # breaks every later call with "database archive is already in use".
+      if getattr(self._tx_state, "depth", 0) > 0:
+        raise sqlite3.OperationalError("archive_audit_log cannot run inside atomic_memory_transaction")
       self.conn.execute(f"ATTACH DATABASE '{archive_path}' AS archive;")
-      self.conn.execute("""
-        CREATE TABLE IF NOT EXISTS archive.audit_log (
-          audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          table_name TEXT NOT NULL,
-          record_id TEXT NOT NULL,
-          action TEXT NOT NULL,
-          old_state TEXT,
-          new_state TEXT,
-          timestamp TEXT
-        );
-      """)
-      res = self.conn.execute("""
-        INSERT INTO archive.audit_log (table_name, record_id, action, old_state, new_state, timestamp)
-        SELECT table_name, record_id, action, old_state, new_state, timestamp FROM main.audit_log
-        WHERE timestamp < datetime('now', '-' || ? || ' days');
-      """, (days,))
-      moved = res.rowcount
-      self.conn.execute("DELETE FROM main.audit_log WHERE timestamp < datetime('now', '-' || ? || ' days');", (days,))
-      self.conn.commit()
-      self.conn.execute("DETACH DATABASE archive;")
-      self.conn.commit()
+      try:
+        self.conn.execute("""
+          CREATE TABLE IF NOT EXISTS archive.audit_log (
+            audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            table_name TEXT NOT NULL,
+            record_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            old_state TEXT,
+            new_state TEXT,
+            timestamp TEXT
+          );
+        """)
+        res = self.conn.execute("""
+          INSERT INTO archive.audit_log (table_name, record_id, action, old_state, new_state, timestamp)
+          SELECT table_name, record_id, action, old_state, new_state, timestamp FROM main.audit_log
+          WHERE timestamp < datetime('now', '-' || ? || ' days');
+        """, (days,))
+        moved = res.rowcount
+        self.conn.execute("DELETE FROM main.audit_log WHERE timestamp < datetime('now', '-' || ? || ' days');", (days,))
+        self.conn.commit()
+      except Exception:
+        self.conn.rollback()
+        raise
+      finally:
+        # Always detach, otherwise every subsequent call fails.
+        try:
+          self.conn.execute("DETACH DATABASE archive;")
+        except sqlite3.OperationalError as e:
+          logger.error("Failed to DETACH audit archive: %s", e, exc_info=True)
       return moved
 
   @contextmanager
@@ -101,10 +117,10 @@ class MemoryDatabase:
     with self._lock:
       try:
         yield self.conn
-        if not getattr(self, "_in_atomic_tx", False):
+        if getattr(self._tx_state, "depth", 0) == 0:
           self.conn.commit()
       except Exception:
-        if not getattr(self, "_in_atomic_tx", False):
+        if getattr(self._tx_state, "depth", 0) == 0:
           self.conn.rollback()
         raise
 
@@ -112,21 +128,21 @@ class MemoryDatabase:
   def atomic_memory_transaction(self) -> Generator[sqlite3.Connection, None, None]:
     """Execute a block of memory operations inside a BEGIN IMMEDIATE transaction."""
     with self._lock:
-      already_in_tx = getattr(self, "_in_atomic_tx", False)
-      if not already_in_tx:
+      depth = getattr(self._tx_state, "depth", 0)
+      is_outer = (depth == 0)
+      if is_outer:
         self.conn.execute("BEGIN IMMEDIATE TRANSACTION;")
-        self._in_atomic_tx = True
+      self._tx_state.depth = depth + 1
       try:
         yield self.conn
-        if not already_in_tx:
+        if is_outer:
           self.conn.commit()
       except Exception:
-        if not already_in_tx:
+        if is_outer:
           self.conn.rollback()
         raise
       finally:
-        if not already_in_tx:
-          self._in_atomic_tx = False
+        self._tx_state.depth = max(0, getattr(self._tx_state, "depth", 1) - 1)
 
   def _init_schema(self) -> None:
     with self._conn() as conn:
@@ -158,6 +174,11 @@ class MemoryDatabase:
           updated_at TEXT,
           access_count INTEGER DEFAULT 0,
           decay_exempt INTEGER DEFAULT 0,
+          version INTEGER DEFAULT 1,
+          superseded_by TEXT DEFAULT '',
+          domain TEXT DEFAULT 'user',
+          meta TEXT DEFAULT '{}',
+          last_accessed TEXT,
           last_retrieved_at TEXT,
           last_used_at TEXT
         );
@@ -610,8 +631,8 @@ class MemoryDatabase:
                   VALUES ('entity_mentions', NEW.fact_id || ':' || NEW.entity_id, 'INSERT', json_object('snippet', NEW.context_snippet));
               END;
           ''')
-      except sqlite3.OperationalError:
-          pass
+      except sqlite3.OperationalError as e:
+          logger.error("Audit trigger creation failed: %s", e, exc_info=True)
       try:
         cursor = conn.execute("PRAGMA table_info(entities)")
         e_cols = [row[1] for row in cursor.fetchall()]
@@ -680,10 +701,22 @@ class MemoryDatabase:
             pass
         conn.execute("UPDATE facts SET anchor_flag=1 WHERE anchor_flag=0 AND (tags LIKE '%anchor%' OR tags LIKE '%core_identity%' OR tags LIKE '%pinned%' OR memory_kind='permanent')")
         conn.execute("UPDATE facts SET archived=1 WHERE archived=0 AND status='archived'")
-      except sqlite3.OperationalError:
-        pass
+      except sqlite3.OperationalError as e:
+        logger.error("Facts schema migration failed: %s", e, exc_info=True)
 
       self._migrate_jsonl_files(conn)
+
+      # Schema version marker. Set only when the target schema is actually in
+      # place — a legacy DB whose ALTERs failed stays at 0 as a signal.
+      if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(facts)").fetchall()}
+        required = {"version", "superseded_by", "domain", "meta", "last_accessed"}
+        if required.issubset(cols):
+          conn.execute("PRAGMA user_version = 1")
+        else:
+          logger.error(
+            "Schema incomplete, user_version left at 0. Missing: %s", sorted(required - cols)
+          )
 
 
   def _migrate_jsonl_files(self, conn: sqlite3.Connection) -> None:
@@ -916,9 +949,9 @@ class MemoryDatabase:
           schema_version, evidence, facts_sent_count, facts_used_count, embedding,
           category, anchor_flag, manual_lock, archived, updated_at,
           last_accessed, access_count, decay_exempt, domain, meta,
-          last_retrieved_at, last_used_at
+          last_retrieved_at, last_used_at, superseded_by
         ) VALUES
-        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
           fact=excluded.fact,
           date=excluded.date,
@@ -946,7 +979,8 @@ class MemoryDatabase:
           domain=excluded.domain,
           meta=excluded.meta,
           last_retrieved_at=COALESCE(excluded.last_retrieved_at, facts.last_retrieved_at),
-          last_used_at=COALESCE(excluded.last_used_at, facts.last_used_at)
+          last_used_at=COALESCE(excluded.last_used_at, facts.last_used_at),
+          superseded_by=excluded.superseded_by
         """,
         (
           row["id"], row["fact"], row.get("date"), row.get("created_at"),
@@ -964,6 +998,7 @@ class MemoryDatabase:
           row.get("domain") or "user",
           json.dumps(row.get("meta") or {}, ensure_ascii=False),
           row.get("last_retrieved_at"), row.get("last_used_at"),
+          row.get("superseded_by") or "",
         ),
       )
 
@@ -1169,23 +1204,7 @@ class MemoryDatabase:
       return self._row_fact(row) if row else None
 
   def update_fact_status(self, fact_id: str, status: str, expected_version: int | None = None) -> None:
-    with self._conn() as conn:
-      if expected_version is not None:
-        cursor = conn.execute(
-          "UPDATE facts SET status=?, updated_at=CURRENT_TIMESTAMP, version=version+1 WHERE id=? AND version=?",
-          (status, fact_id, expected_version),
-        )
-        if cursor.rowcount == 0:
-          row = conn.execute("SELECT version FROM facts WHERE id=?", (fact_id,)).fetchone()
-          actual_ver = row[0] if row else None
-          raise ConcurrentModificationError(
-            f"Concurrent modification on fact {fact_id}: expected version {expected_version}, actual {actual_ver}",
-            record_id=fact_id,
-            expected_version=expected_version,
-            actual_version=actual_ver,
-          )
-      else:
-        conn.execute("UPDATE facts SET status=?, updated_at=CURRENT_TIMESTAMP, version=version+1 WHERE id=?", (status, fact_id))
+    self.update_fact_fields(fact_id, {"status": status}, expected_version=expected_version)
 
   def update_fact_fields(self, fact_id: str, fields: dict[str, Any], expected_version: int | None = None) -> None:
     """Update a subset of mutable fact columns atomically."""
@@ -1216,6 +1235,12 @@ class MemoryDatabase:
       assignments = ", ".join(f"{k}=?" for k in sets)
     params = list(sets.values()) + [fact_id]
     with self._conn() as conn:
+      if "status" in sets:
+        row = conn.execute("SELECT status FROM facts WHERE id=?", (fact_id,)).fetchone()
+        if row is not None:
+          from companion.memory.lifecycle import validate_transition
+
+          validate_transition(str(row["status"]), str(sets["status"]))
       if expected_version is not None:
         params.append(expected_version)
         cursor = conn.execute(f"UPDATE facts SET {assignments} WHERE id=? AND version=?", params)

@@ -102,7 +102,7 @@ class WorldModelService:
 
         return results
 
-    def process_fact(self, fact: Fact) -> list[Entity]:
+    def process_fact(self, fact: Fact, *, index_entities: bool = True) -> list[Entity]:
         """Process a fact into the World Model: match/create entities, attributes, relations, and mentions."""
         extracted = self.extract_entities_from_fact(fact)
         processed: list[Entity] = []
@@ -190,7 +190,7 @@ class WorldModelService:
                 )
 
             # Vector Indexing
-            if self.vector and hasattr(self.vector, "compute_and_cache"):
+            if index_entities and self.vector and hasattr(self.vector, "compute_and_cache"):
                 try:
                     self.vector.compute_and_cache(
                         f"{name} ({ent_type})",

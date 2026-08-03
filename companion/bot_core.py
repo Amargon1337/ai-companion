@@ -88,11 +88,30 @@ async def proactive_ping_loop(bot):
             if 3 <= hour < 5:
                 if (now_dt.timestamp() - last_health_check) > 12 * 3600:
                     from companion.memory.health import memory_health
-                    from companion.memory.consolidation import consolidate_if_due, decay_fact_confidence
+                    from companion.memory.consolidation import consolidate_if_due, decay_fact_confidence, promote_patterns_to_insights, revalidate_insight_provenance
                     health = await asyncio.to_thread(memory_health, memory_store)
                     await asyncio.to_thread(consolidate_if_due, memory_store, 7)
                     await asyncio.to_thread(decay_fact_confidence, memory_store)
+                    try:
+                        promoted = await asyncio.to_thread(promote_patterns_to_insights, memory_store)
+                        if promoted:
+                            logger.info("Promoted %d time-earned pattern(s) into personality model", promoted)
+                    except Exception as exc:
+                        logger.error("Pattern promotion failed: %s", exc, exc_info=True)
+                    try:
+                        # Traits must answer to their sources, or an old mistake
+                        # becomes an immortal personality trait.
+                        prov = await asyncio.to_thread(revalidate_insight_provenance, memory_store)
+                        if prov.get("weakened") or prov.get("refuted"):
+                            logger.info("Provenance revalidation: %s", prov)
+                    except Exception as exc:
+                        logger.error("Provenance revalidation failed: %s", exc, exc_info=True)
                     logger.info("Nightly memory health: %s", health)
+                    try:
+                        moved = await asyncio.to_thread(memory_store.db.archive_audit_log, 30)
+                        logger.info("Nightly audit rotation archived %d row(s)", moved)
+                    except Exception as exc:
+                        logger.error("Nightly audit rotation failed: %s", exc, exc_info=True)
                     last_health_check = now_dt.timestamp()
                 if (now_dt.timestamp() - last_subconscious_run) > 12 * 3600:
                     from companion.proactive.subconscious import run_subconscious_consolidation

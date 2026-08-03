@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import pytest
 from companion.exceptions import ConcurrentModificationError
+from companion.memory.store import MemoryStore
+from companion.models import Fact
 from companion.storage.sqlite_db import MemoryDatabase
 
 
@@ -75,3 +77,42 @@ def test_concurrent_update_detection(tmp_path):
             )
     finally:
         db.close()
+
+
+def test_store_update_uses_fact_version_for_occ(tmp_path, monkeypatch):
+    import companion.config as cfg
+
+    monkeypatch.setattr(cfg, "SQLITE_PATH", str(tmp_path / "store_occ.db"))
+    store = MemoryStore()
+    store.vector.embeddings_enabled = False
+    try:
+        fact = Fact(
+            id="f-store-occ",
+            fact="Original text",
+            date="2026-08-02",
+            importance=5,
+            confidence=0.8,
+            source="test",
+        )
+        store.add_fact(fact)
+
+        advanced = {"done": False}
+
+        def simulate_concurrent_write(text):
+            if not advanced["done"]:
+                advanced["done"] = True
+                store.db.update_fact_fields(fact.id, {"importance": 9}, expected_version=1)
+            return None
+
+        monkeypatch.setattr(store.vector, "embed_text_only", simulate_concurrent_write)
+
+        with pytest.raises(ConcurrentModificationError):
+            store.update_fact(fact.id, fact="Updated text")
+
+        persisted = store.get_fact(fact.id)
+        assert persisted is not None
+        assert persisted.fact == "Original text"
+        assert persisted.importance == 9
+        assert persisted.version == 2
+    finally:
+        store.db.close()

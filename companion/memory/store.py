@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 class MemoryStore:
     def __init__(self) -> None:
         self.db = MemoryDatabase()
-        self.vector = VectorIndex()
+        self.vector = VectorIndex(db=self.db)
         self.event_bus = MemoryEventBus()
         self.index_sync = IndexSyncService(self.event_bus, self.vector, self.db)
         self.semantic_ranker = SemanticImportanceRanker(self.db)
@@ -230,16 +230,21 @@ class MemoryStore:
                 fact.status = "quarantine"
                 logger.info("ingestion_quarantine: Fact %s placed in quarantine (%s)", fact.id, decision.reason)
 
-        if hasattr(self, "world_model") and self.world_model and fact.status in ("active", "dormant"):
-            try:
-                self.world_model.process_fact(fact)
-            except Exception as e:
-                logger.debug("world_model processing error: %s", e)
-
         d = fact.to_dict()
-        self.db._insert_fact(d)
+        vec = None
         if fact.status in ("active", "dormant"):
-            self.vector.compute_and_cache(fact.fact, content_type="fact", fact_id=fact.id)
+            vec = self.vector.embed_text_only(fact.fact)
+
+        with self.db.atomic_memory_transaction():
+            self.db._insert_fact(d)
+            if hasattr(self, "world_model") and self.world_model and fact.status in ("active", "dormant"):
+                self.world_model.process_fact(fact, index_entities=False)
+            if fact.status in ("active", "dormant"):
+                if vec is not None:
+                    self.vector.upsert_embedding(fact.fact, vec, content_type="fact", fact_id=fact.id)
+                else:
+                    self.vector.compute_and_cache(fact.fact, content_type="fact", fact_id=fact.id)
+
         if self.event_bus:
             from companion.memory.events.base import FactCreatedEvent
             self.event_bus.publish(FactCreatedEvent(fact_id=fact.id, fact_text=fact.fact, importance=fact.importance, source=fact.source))
@@ -287,13 +292,21 @@ class MemoryStore:
             fields["memory_kind"] = memory_kind
         if date is not None:
             fields["date"] = date
-        self.db.update_fact_fields(fact_id, fields)
+        new_text_changed = fact is not None and fact.strip() and fact.strip() != old_text.strip()
+        vec_new = None
+        if new_text_changed and fact is not None:
+            vec_new = self.vector.embed_text_only(fact)
 
-        # FAISS resync if the wording changed.
-        if fact is not None and fact.strip() and fact.strip() != old_text.strip():
-            if old_text.strip():
-                self.vector.delete_for_content(old_text)
-            self.vector.compute_and_cache(fact, content_type="fact", fact_id=fact_id)
+        with self.db.atomic_memory_transaction():
+            self.db.update_fact_fields(fact_id, fields, expected_version=old.version)
+            if new_text_changed and fact is not None:
+                if old_text.strip():
+                    self.vector.delete_for_content(old_text)
+                if vec_new is not None:
+                    self.vector.upsert_embedding(fact, vec_new, content_type="fact", fact_id=fact_id)
+                else:
+                    self.vector.compute_and_cache(fact, content_type="fact", fact_id=fact_id)
+
         if self.event_bus:
             from companion.memory.events.base import FactUpdatedEvent
             self.event_bus.publish(FactUpdatedEvent(fact_id=fact_id, old_state={"fact": old_text}, new_state=fields, reason="update_fact"))
@@ -308,9 +321,31 @@ class MemoryStore:
         old = self.get_fact(fact_id)
         if old is None:
             return False
-        if old.fact.strip():
-            self.vector.delete_for_content(old.fact)
-        return self.db.delete_fact(fact_id)
+        with self.db.atomic_memory_transaction():
+            if old.fact.strip():
+                self.vector.delete_for_content(old.fact)
+            return self.db.delete_fact(fact_id)
+
+    def archive_fact(self, fact_id: str, reason: str = "archived") -> bool:
+        """Archive a fact (never deletes from DB, but removes from FAISS index and marks archived in DB)."""
+        old = self.get_fact(fact_id)
+        if old is None or old.status == "archived":
+            return False
+        with self.db.atomic_memory_transaction():
+            if old.fact.strip():
+                self.vector.delete_for_content(old.fact)
+            self.db.update_fact_fields(fact_id, {"status": "archived", "archived": 1}, expected_version=old.version)
+        if self.event_bus:
+            from companion.memory.events.base import FactUpdatedEvent
+            self.event_bus.publish(
+                FactUpdatedEvent(
+                    fact_id=fact_id,
+                    old_state={"status": old.status},
+                    new_state={"status": "archived"},
+                    reason=reason,
+                )
+            )
+        return True
 
     def get_fact_relations(self, fact_id: str) -> list[dict[str, Any]]:
         return self.db.get_fact_relations(fact_id)
@@ -330,11 +365,12 @@ class MemoryStore:
         """Fetch one random active fact from SQLite DB to use as a conversation anchor."""
         with self.db._conn() as conn:
             row = conn.execute(
-                "SELECT * FROM facts WHERE superseded = 0 AND status = 'active' ORDER BY RANDOM() LIMIT 1"
+                "SELECT * FROM facts WHERE (superseded_by IS NULL OR superseded_by = '') "
+                "AND status = 'active' ORDER BY RANDOM() LIMIT 1"
             ).fetchone()
             if not row:
                 return None
-            return Fact.from_dict(dict(row))
+            return Fact.from_dict(self.db._row_fact(row))
 
     def revive_dormant_fact(self, fact_id: str) -> None:
         """Promote a dormant fact back to active status."""
@@ -607,6 +643,10 @@ class MemoryStore:
         # 1) Почти идентичный текст (>0.85) — чистый дубль, пропускаем.
         dup = self.find_similar_pattern(pat.pattern, threshold=0.85)
         if dup is not None:
+            # Не дубль-запись, а ПОДТВЕРЖДЕНИЕ: наблюдение повторилось.
+            # Именно повторяемость во времени, а не суждение LLM за один
+            # проход, делает вывод чертой — поэтому bump'аем свежесть.
+            self.touch_pattern(dup.id)
             return dup
         # 2) Та же тема, но ДРУГОЙ вывод (0.5..0.85) — старый паттерн
         #    устарел/противоречит. Помечаем superseded + выкидываем из FAISS,
@@ -664,6 +704,14 @@ class MemoryStore:
             for p in self.list_patterns("active"):
                 if self.vector._content_hash(p.pattern) == match_hash:
                     return p
+        # Lexical fallback: pattern confirmation must not depend on the
+        # embedding provider being reachable, or a model/API swap silently
+        # turns every repeat observation into a fresh "trait".
+        from companion.memory.text_sim import text_overlap
+        norm = self._normalize(text)
+        for p in self.list_patterns("active"):
+            if self._normalize(p.pattern) == norm or text_overlap(text, p.pattern) >= threshold:
+                return p
         return None
 
     def update_pattern(
@@ -783,9 +831,29 @@ class MemoryStore:
                 if match is not None:
                     # подтверждение: обновляем свежесть, не плодим дубликат
                     match.last_supported_at = now
-                    match.evidence_count = (match.evidence_count or 1) + 1
-                    if inc.confidence:
+                    # evidence_count — это ЧИСЛО НАБЛЮДЕНИЙ, а не число
+                    # прогонов ночной задачи. Если источник принёс явный
+                    # счётчик (promotion передаёт confirmations паттерна),
+                    # берём максимум: он выведен из данных. Инкрементим
+                    # только когда счётчика нет — тогда это действительно
+                    # новое, отдельное наблюдение.
+                    incoming = int(getattr(inc, "evidence_count", 1) or 1)
+                    if incoming > 1:
+                        match.evidence_count = max(match.evidence_count or 1, incoming)
+                    else:
+                        match.evidence_count = (match.evidence_count or 1) + 1
+                    # Refuted-инсайт не воскресает от повторного прогона:
+                    # его опровергли источники, и только источники могут
+                    # его вернуть (revalidate снимет refuted, если ожили).
+                    if inc.confidence and match.status != "refuted":
                         match.confidence = max(match.confidence, inc.confidence)
+                    # Provenance накапливается: каждое подтверждение может
+                    # опираться на новые факты, и все они должны остаться
+                    # проверяемыми. Порядок сохраняем, дубли убираем.
+                    if inc.evidence:
+                        merged_ev = list(match.evidence or [])
+                        merged_ev.extend(e for e in inc.evidence if e not in merged_ev)
+                        match.evidence = merged_ev[:50]
                 else:
                     seen.add(n)
                     inc.last_supported_at = now

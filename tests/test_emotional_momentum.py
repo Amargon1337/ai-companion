@@ -1,11 +1,21 @@
 """Tests for Emotional Momentum and Sensitivity Guards."""
 from __future__ import annotations
 
+import pytest
+
 from companion.user_model import user_model
 from companion.policy_layer import policy_layer
 from companion.temporal import build_temporal_context_block
 from companion.llm.sessions import build_system_instruction
 from companion.memory.store import MemoryStore
+
+
+@pytest.fixture(autouse=True)
+def isolated_db(tmp_path, monkeypatch):
+    """Ensure each test gets its own fresh SQLite database."""
+    import companion.config as cfg
+    monkeypatch.setattr(cfg, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(cfg, "SQLITE_PATH", str(tmp_path / "test_emotional.db"))
 
 
 def test_record_emotional_state_calculates_momentum():

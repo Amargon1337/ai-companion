@@ -60,6 +60,11 @@ class IndexSyncService:
 
         try:
             if hasattr(self.vector_index, "compute_and_cache"):
+                if hasattr(self.vector_index, "_content_hash") and isinstance(getattr(self.vector_index, "hash_to_id", None), dict):
+                    h = self.vector_index._content_hash(fact_text)
+                    if h in self.vector_index.hash_to_id:
+                        logger.debug("Fact %s already indexed in FAISS; IndexSyncService skipping.", fact_id)
+                        return
                 self.vector_index.compute_and_cache(fact_text, content_type="fact", fact_id=fact_id)
                 self.added_count += 1
                 logger.info(
@@ -89,6 +94,11 @@ class IndexSyncService:
             return
 
         try:
+            if hasattr(self.vector_index, "_content_hash") and isinstance(getattr(self.vector_index, "hash_to_id", None), dict):
+                new_h = self.vector_index._content_hash(new_text)
+                if new_h in self.vector_index.hash_to_id:
+                    logger.debug("Updated fact %s already indexed in FAISS; IndexSyncService skipping.", fact_id)
+                    return
             if hasattr(self.vector_index, "delete_for_content"):
                 self.vector_index.delete_for_content(old_text)
             if hasattr(self.vector_index, "compute_and_cache"):
@@ -118,6 +128,11 @@ class IndexSyncService:
             return
 
         try:
+            if hasattr(self.vector_index, "_content_hash") and isinstance(getattr(self.vector_index, "hash_to_id", None), dict):
+                h = self.vector_index._content_hash(fact_text)
+                if h not in self.vector_index.hash_to_id:
+                    logger.debug("Fact %s already removed from FAISS; IndexSyncService skipping.", fact_id)
+                    return
             if hasattr(self.vector_index, "delete_for_content"):
                 self.vector_index.delete_for_content(fact_text)
                 self.removed_count += 1

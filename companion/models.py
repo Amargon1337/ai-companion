@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 MemoryKind = Literal["permanent", "state", "event"]
-FactStatus = Literal["active", "superseded", "inactive", "archived", "dormant", "pending_review"]
+FactStatus = Literal["active", "superseded", "quarantine", "archived", "dormant", "pending_review"]
 RelationType = Literal[
     "supersedes",
     "contradicts",
@@ -511,6 +511,11 @@ class HumanModelInsight:
     created_at: str = ""
     last_supported_at: str = ""
     evidence_count: int = 1
+    # Provenance: ids of the patterns/facts this inference rests on. A trait
+    # without sources is a guess that can never be refuted — when a source is
+    # superseded or archived, confidence must be recomputed, and that is only
+    # possible if the chain is stored.
+    evidence: list[str] = field(default_factory=list)
     status: InsightStatus = "active"
     id: str = ""
 
@@ -541,6 +546,13 @@ class HumanModelInsight:
                 d["confidence"] = float(d["confidence"])
             except (TypeError, ValueError):
                 d["confidence"] = 0.7
+        if "evidence" in d and not isinstance(d["evidence"], list):
+            import json as _json
+            try:
+                parsed = _json.loads(d["evidence"]) if isinstance(d["evidence"], str) else []
+                d["evidence"] = parsed if isinstance(parsed, list) else []
+            except (TypeError, ValueError):
+                d["evidence"] = []
         return cls(**d)
 
 

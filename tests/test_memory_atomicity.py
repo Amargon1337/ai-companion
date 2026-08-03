@@ -71,3 +71,42 @@ def test_atomic_transaction_rollback(tmp_path):
         assert len(logs) == 0
     finally:
         db.close()
+
+
+def test_fact_insert_rolls_back_world_model_projection(tmp_path, monkeypatch):
+    import companion.config as cfg
+    from companion.memory.store import MemoryStore
+    from companion.models import Fact
+
+    monkeypatch.setattr(cfg, "SQLITE_PATH", str(tmp_path / "world_atomicity.db"))
+    store = MemoryStore()
+    store.vector.embeddings_enabled = False
+    try:
+        def fail_embedding(*args, **kwargs):
+            raise RuntimeError("forced vector failure")
+
+        monkeypatch.setattr(store.vector, "compute_and_cache", fail_embedding)
+        fact = Fact(
+            id="f-world-rollback",
+            fact="У Ивана есть собака Морзик",
+            date="2026-08-02",
+            importance=8,
+            confidence=0.9,
+            source="test",
+        )
+
+        with pytest.raises(RuntimeError, match="forced vector failure"):
+            store.add_fact(fact)
+
+        assert store.get_fact(fact.id) is None
+        with store.db._conn() as conn:
+            mentions = conn.execute(
+                "SELECT COUNT(*) FROM entity_mentions WHERE fact_id=?", (fact.id,)
+            ).fetchone()[0]
+            attributes = conn.execute(
+                "SELECT COUNT(*) FROM entity_attributes WHERE source_fact_id=?", (fact.id,)
+            ).fetchone()[0]
+        assert mentions == 0
+        assert attributes == 0
+    finally:
+        store.db.close()

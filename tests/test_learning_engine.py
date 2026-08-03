@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+from datetime import datetime
+
 import pytest
 
 from companion.memory.store import MemoryStore
@@ -21,20 +23,18 @@ from companion.learning_engine import (
 
 
 @pytest.fixture
-def temp_store():
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
+def temp_store(tmp_path, monkeypatch):
+    """MemoryStore with proper SQLITE_PATH set before construction.
+
+    Replaces the old pattern of reassigning store.db.path after MemoryStore()
+    creation, which left VectorIndex pointing at the wrong SQLite file.
+    """
+    import companion.config as cfg
+    monkeypatch.setattr(cfg, "DATA_DIR", str(tmp_path))
+    db_path = str(tmp_path / "test_learning.db")
+    monkeypatch.setattr(cfg, "SQLITE_PATH", db_path)
     store = MemoryStore()
-    store.db.path = path
-    store.db._init_schema()
     yield store
-    if hasattr(store.db, "close"):
-        store.db.close()
-    if os.path.exists(path):
-        try:
-            os.remove(path)
-        except PermissionError:
-            pass
 
 
 def test_memory_outcome_tracking():
@@ -144,9 +144,46 @@ def test_long_term_consolidation():
     ]
     report = LongTermConsolidationService.consolidate(facts=facts)
     assert report.facts_processed == 3
-    assert report.episodes_created >= 1
-    assert report.beliefs_promoted >= 1
+    assert report.episode_candidates >= 1
+    assert report.belief_candidates >= 1
     assert "work" in report.summary_text
+
+
+def test_gc_report_reflects_actual_db_writes(memory_store):
+    """The GC report must not claim archivals it never performed.
+
+    Previously the writer was guarded by `hasattr(db, "update_fact")` — a
+    method MemoryDatabase does not have — so the guard was always False:
+    facts were counted as archived while staying active in the DB.
+    """
+    from datetime import datetime, timedelta
+
+    from companion.models import Fact
+
+    stale_date = (datetime.now() - timedelta(days=60)).isoformat()
+    fact = Fact(id="gc-target", fact="давно забытый факт", date=stale_date[:10],
+                importance=3, confidence=0.2, source="t")
+    memory_store.db._insert_fact(fact.to_dict())
+
+    report = MemoryGarbageCollector.collect(
+        candidates=[{"id": "gc-target", "confidence": 0.2,
+                     "references_count": 0, "last_retrieved_at": stale_date}],
+        db=memory_store.db,
+    )
+
+    assert report.archived_count == 1
+    assert memory_store.db.get_fact("gc-target")["status"] == "archived", (
+        "report claimed an archival that never reached the database"
+    )
+
+
+def test_gc_without_db_still_reports_candidates():
+    """Dry-run mode (no db) must keep working for callers that only scan."""
+    report = MemoryGarbageCollector.collect(
+        candidates=[{"id": "f_low", "confidence": 0.20, "references_count": 0}],
+    )
+    assert report.archived_count == 1
+    assert "f_low" in report.archived_ids
 
 
 def test_self_evaluation():
@@ -175,6 +212,16 @@ def test_offline_learning_and_service(temp_store):
     assert "retrieval_quality" in turn_res
     assert "self_evaluation" in turn_res
     assert "adaptive_weights" in turn_res
+
+    # Insert stale candidate facts into the store so GC can archive them.
+    from datetime import datetime
+    stale_date = (datetime.now().replace(year=2024, month=1, day=1)).isoformat()
+    for fid, text in [("f_old", "старая записка"), ("f_work1", "Новый проект запущен"), ("f_work2", "Работа над проектом идет в графике")]:
+        temp_store.db._insert_fact({
+            "id": fid, "fact": text, "date": "2026-06-01",
+            "importance": 5, "confidence": 0.8, "source": "test",
+            "status": "active", "metadata": {}, "meta": "{}",
+        })
 
     daily = svc.run_daily_offline_learning(
         facts_candidates=[

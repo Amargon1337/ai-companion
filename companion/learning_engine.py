@@ -374,6 +374,7 @@ class MemoryGarbageCollector:
         candidates: list[dict[str, Any]],
         tracker: MemoryOutcomeTracker | None = None,
         db: Any = None,
+        store: Any = None,
     ) -> GarbageCollectionReport:
         archived: list[str] = []
         now = datetime.now()
@@ -400,12 +401,25 @@ class MemoryGarbageCollector:
             is_never_retrieved = (m.retrieved_count == 0) if m else is_stale
 
             if (is_never_retrieved and is_stale) or (conf < 0.30 and refs_count == 0):
-                archived.append(cid)
-                if db and hasattr(db, "update_fact"):
-                    try:
-                        db.update_fact(cid, {"status": "archived"})
-                    except Exception:
-                        pass
+                if store is not None and hasattr(store, "archive_fact"):
+                    if store.archive_fact(cid, reason="gc_stale_or_low_confidence"):
+                        archived.append(cid)
+                    continue
+
+                if db is None:
+                    archived.append(cid)
+                    continue
+                try:
+                    if hasattr(db, "update_fact_status"):
+                        db.update_fact_status(cid, "archived")
+                    elif hasattr(db, "update_fact_fields"):
+                        db.update_fact_fields(cid, {"status": "archived", "archived": 1})
+                    else:
+                        logger.warning("GC cannot archive %s: no writer on db", cid)
+                        continue
+                    archived.append(cid)
+                except Exception as exc:
+                    logger.error("GC failed to archive %s: %s", cid, exc, exc_info=True)
 
         return GarbageCollectionReport(
             scanned_count=len(candidates),
@@ -421,11 +435,28 @@ class MemoryGarbageCollector:
 
 @dataclass
 class ConsolidationReport:
-    """Report of weekly consolidation of Facts -> Episodes -> Beliefs."""
+    """Report of clustering candidates for Facts -> Episodes -> Beliefs.
+
+    NOTE: this service only *detects* candidate clusters — it writes nothing.
+    Actual episode building lives in memory/episodes.py and belief/trait
+    promotion in memory/consolidation.py. The fields are named for what they
+    are (clusters found), not for writes that never happened: they previously
+    reported `episodes_created`/`beliefs_promoted` while performing zero DB
+    operations, which made the daily summary state things that were false.
+    """
     facts_processed: int
-    episodes_created: int
-    beliefs_promoted: int
+    episode_candidates: int
+    belief_candidates: int
     summary_text: str
+
+    # Back-compat: existing callers/tests read the old names.
+    @property
+    def episodes_created(self) -> int:
+        return self.episode_candidates
+
+    @property
+    def beliefs_promoted(self) -> int:
+        return self.belief_candidates
 
 
 class LongTermConsolidationService:
@@ -442,8 +473,8 @@ class LongTermConsolidationService:
             except Exception:
                 items = []
 
-        episodes_created = 0
-        beliefs_promoted = 0
+        episode_candidates = 0
+        belief_candidates = 0
 
         # Simple clustering by keyword
         clusters: dict[str, list[dict[str, Any]]] = {}
@@ -459,16 +490,16 @@ class LongTermConsolidationService:
         summaries = []
         for topic, group in clusters.items():
             if len(group) >= 2:
-                episodes_created += 1
-                summaries.append(f"Consolidated {len(group)} facts in topic '{topic}'.")
+                episode_candidates += 1
+                summaries.append(f"Found {len(group)} related facts in topic '{topic}'.")
                 if len(group) >= 3:
-                    beliefs_promoted += 1
+                    belief_candidates += 1
 
-        summary_text = " | ".join(summaries) if summaries else "No recurring clusters required consolidation."
+        summary_text = " | ".join(summaries) if summaries else "No recurring clusters found."
         return ConsolidationReport(
             facts_processed=len(items),
-            episodes_created=episodes_created,
-            beliefs_promoted=beliefs_promoted,
+            episode_candidates=episode_candidates,
+            belief_candidates=belief_candidates,
             summary_text=summary_text,
         )
 
@@ -551,6 +582,7 @@ class OfflineLearningService:
         db: Any = None,
         tracker: MemoryOutcomeTracker | None = None,
         facts_candidates: list[dict[str, Any]] | None = None,
+        store: Any = None,
     ) -> DailyLearningSummary:
         date_str = datetime.now().isoformat()[:10]
 
@@ -559,7 +591,7 @@ class OfflineLearningService:
 
         # 2. GC scan
         gc_rep = MemoryGarbageCollector.collect(
-            candidates=facts_candidates or [], tracker=tracker, db=db
+            candidates=facts_candidates or [], tracker=tracker, db=db, store=store
         )
 
         # 3. Consolidation
@@ -567,7 +599,9 @@ class OfflineLearningService:
 
         strategy_msg = (
             f"Updated strategy: weakest prediction domain='{pred_profile.weakest_domain}'; "
-            f"archived={gc_rep.archived_count} items; consolidated={cons_rep.facts_processed} facts."
+            f"archived={gc_rep.archived_count} items; "
+            f"scanned={cons_rep.facts_processed} facts, "
+            f"{cons_rep.episode_candidates} cluster(s) flagged for consolidation."
         )
 
         return DailyLearningSummary(
@@ -634,5 +668,5 @@ class LearningEngineService:
         self, facts_candidates: list[dict[str, Any]] | None = None
     ) -> DailyLearningSummary:
         return OfflineLearningService.run_daily_cycle(
-            db=self.db, tracker=self.tracker, facts_candidates=facts_candidates
+            db=self.db, tracker=self.tracker, facts_candidates=facts_candidates, store=getattr(self, "store", None)
         )

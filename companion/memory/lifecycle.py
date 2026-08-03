@@ -8,13 +8,16 @@ from companion.exceptions import InvalidStateTransitionError
 
 
 class FactStatus(str, Enum):
-    """Authoritative memory lifecycle statuses for facts."""
-    DRAFT = "draft"
+    """Authoritative memory lifecycle statuses for facts.
+
+    Kept in sync with `models.FactStatus` and with what production actually
+    writes (store/policies). `aging`/`stale` are NOT here: those describe
+    HumanModel insight freshness (see consolidation._items), not fact status.
+    """
     QUARANTINE = "quarantine"
     ACTIVE = "active"
-    PINNED = "pinned"
-    AGING = "aging"
-    STALE = "stale"
+    DORMANT = "dormant"
+    PENDING_REVIEW = "pending_review"
     ARCHIVED = "archived"
     SUPERSEDED = "superseded"
     PURGED = "purged"
@@ -32,35 +35,27 @@ class FactStatus(str, Enum):
 
 # Authoritative transition matrix
 VALID_TRANSITIONS: dict[FactStatus, set[FactStatus]] = {
-    FactStatus.DRAFT: {
-        FactStatus.ACTIVE,
-        FactStatus.QUARANTINE,
-        FactStatus.PURGED,
-    },
     FactStatus.QUARANTINE: {
         FactStatus.ACTIVE,
+        FactStatus.PENDING_REVIEW,
+        FactStatus.ARCHIVED,
+        FactStatus.PURGED,
+    },
+    FactStatus.PENDING_REVIEW: {
+        FactStatus.ACTIVE,
+        FactStatus.QUARANTINE,
+        FactStatus.ARCHIVED,
         FactStatus.PURGED,
     },
     FactStatus.ACTIVE: {
-        FactStatus.PINNED,
-        FactStatus.AGING,
-        FactStatus.STALE,
+        FactStatus.QUARANTINE,
+        FactStatus.PENDING_REVIEW,
+        FactStatus.DORMANT,
         FactStatus.ARCHIVED,
         FactStatus.SUPERSEDED,
         FactStatus.PURGED,
     },
-    FactStatus.PINNED: {
-        FactStatus.ACTIVE,
-        FactStatus.SUPERSEDED,
-    },
-    FactStatus.AGING: {
-        FactStatus.ACTIVE,
-        FactStatus.STALE,
-        FactStatus.ARCHIVED,
-        FactStatus.SUPERSEDED,
-        FactStatus.PURGED,
-    },
-    FactStatus.STALE: {
+    FactStatus.DORMANT: {
         FactStatus.ACTIVE,
         FactStatus.ARCHIVED,
         FactStatus.SUPERSEDED,

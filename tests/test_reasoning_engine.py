@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+
 import pytest
 
 from companion.memory.store import MemoryStore
@@ -25,20 +26,14 @@ from companion.reasoning_engine import (
 
 
 @pytest.fixture
-def temp_store():
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
+def temp_store(tmp_path, monkeypatch):
+    """MemoryStore with proper SQLITE_PATH set before construction."""
+    import companion.config as cfg
+    monkeypatch.setattr(cfg, "DATA_DIR", str(tmp_path))
+    db_path = str(tmp_path / "test_reasoning.db")
+    monkeypatch.setattr(cfg, "SQLITE_PATH", db_path)
     store = MemoryStore()
-    store.db.path = path
-    store.db._init_schema()
     yield store
-    if hasattr(store.db, "close"):
-        store.db.close()
-    if os.path.exists(path):
-        try:
-            os.remove(path)
-        except PermissionError:
-            pass
 
 
 def test_reasoning_planner():

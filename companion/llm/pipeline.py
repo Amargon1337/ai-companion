@@ -275,7 +275,8 @@ def extract_patterns(
     """
     period = period or datetime.now().strftime("%Y-%m")
     facts = store.facts_for_period(period, min_importance=5)
-    fact_text = "\n".join(f"- {f.fact}" for f in facts[:30])
+    fact_text = "\n".join(f"- [{f.id}] {f.fact}" for f in facts[:30])
+    known_ids = {f.id for f in facts[:30]}
 
     prompt = PATTERN_PROMPT.format(
         period=period,
@@ -311,7 +312,10 @@ def extract_patterns(
         pat = Pattern(
             pattern=pat_text,
             category=str(item.get("category", "behavior")).lower(),
-            evidence=[str(e) for e in item.get("evidence", []) if e],
+            # Only ids the model was actually shown survive. A weak model
+            # happily invents plausible-looking ids, and an unresolvable
+            # reference is worse than none: it fakes provenance.
+            evidence=[str(e) for e in item.get("evidence", []) if str(e) in known_ids],
             importance=max(1, min(10, int(item.get("importance", 6)))),
             confidence=float(item.get("confidence", 0.7)),
             status="active",

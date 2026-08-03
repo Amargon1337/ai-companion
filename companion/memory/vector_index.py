@@ -127,10 +127,11 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 class VectorIndex:
     """Manages embedding storage in SQLite and provides vector search."""
 
-    def __init__(self, path: str | None = None) -> None:
+    def __init__(self, path: str | None = None, db: Any = None) -> None:
         import os
         from companion.config import SQLITE_PATH as _SQLITE_PATH
         self.path = path if path is not None else _SQLITE_PATH
+        self.db = db
         import threading
         self.lock = threading.RLock()
         self._init_table()
@@ -142,6 +143,7 @@ class VectorIndex:
         self.hash_to_id: dict[str, int] = {}
         self.id_to_type: dict[int, str] = {}
         self._next_id = 0
+        self._deleted_ids: set[int] = set()
         
         self._is_initialized = False
         self._dirty_updates = 0
@@ -218,6 +220,17 @@ class VectorIndex:
 
     @contextmanager
     def _conn(self) -> Generator[sqlite3.Connection, None, None]:
+        if getattr(self, "db", None) is not None and hasattr(self.db, "conn"):
+            with self.db._lock:
+                try:
+                    yield self.db.conn
+                    if getattr(self.db._tx_state, "depth", 0) == 0:
+                        self.db.conn.commit()
+                except Exception:
+                    if getattr(self.db._tx_state, "depth", 0) == 0:
+                        self.db.conn.rollback()
+                    raise
+            return
         conn = sqlite3.connect(self.path)
         _configure_conn(conn)
         try:
@@ -226,14 +239,35 @@ class VectorIndex:
         finally:
             conn.close()
 
+    @contextmanager
+    def _locked(self) -> Generator[None, None, None]:
+        """Acquire the DB lock BEFORE the in-memory index lock.
+
+        Global lock order (MemoryDatabase._lock -> VectorIndex.lock) matches the
+        atomic_memory_transaction path (db._lock held, then vector.lock inside).
+        Any other order produces an ABBA deadlock between writers and searchers.
+        """
+        db = getattr(self, "db", None)
+        if db is not None and hasattr(db, "conn"):
+            with db._lock:
+                with self.lock:
+                    yield
+        else:
+            with self.lock:
+                yield
+
     def _load_index(self) -> None:
         import os
         import json
         import faiss
-        with self.lock:
+        with self._locked():
             if os.path.exists(self.index_path):
-                from companion.storage.sqlite_db import MemoryDatabase
-                db = MemoryDatabase(self.path)
+                db = getattr(self, "db", None)
+                should_close = False
+                if db is None:
+                    from companion.storage.sqlite_db import MemoryDatabase
+                    db = MemoryDatabase(self.path)
+                    should_close = True
                 try:
                     data = db.get_state_model("faiss_mapping")
                     dirty = db.get_meta("faiss_index_dirty", "0") == "1"
@@ -244,6 +278,7 @@ class VectorIndex:
                         self.hash_to_id = data.get("hash_to_id", {})
                         self.id_to_type = {int(k): v for k, v in data.get("id_to_type", {}).items()}
                         self._next_id = data.get("next_id", 0)
+                        self._deleted_ids = set(int(k) for k in data.get("deleted_ids", []))
                         self._is_initialized = True
                         self._sync_fts()
                         return
@@ -252,29 +287,36 @@ class VectorIndex:
                 except Exception as e:
                     logger.warning(f"Failed to load FAISS index from disk, rebuilding: {e}")
                 finally:
-                    db.close()
+                    if should_close:
+                        db.close()
             
             self._rebuild_index()
 
     def save_index_to_disk(self):
         import faiss
-        with self.lock:
+        with self._locked():
             if self._is_initialized and hasattr(self, 'index') and self.index is not None:
                 faiss.write_index(self.index, self.index_path)
-                from companion.storage.sqlite_db import MemoryDatabase
-                db = MemoryDatabase(self.path)
+                db = getattr(self, "db", None)
+                should_close = False
+                if db is None:
+                    from companion.storage.sqlite_db import MemoryDatabase
+                    db = MemoryDatabase(self.path)
+                    should_close = True
                 try:
                     db.save_state_model("faiss_mapping", {
                         "id_to_content": self.id_to_content,
                         "id_to_hash": self.id_to_hash,
                         "hash_to_id": self.hash_to_id,
                         "id_to_type": self.id_to_type,
-                        "next_id": self._next_id
+                        "next_id": self._next_id,
+                        "deleted_ids": list(self._deleted_ids)
                     })
                     db.set_meta("faiss_index_dirty", "0")
                     self._dirty_updates = 0
                 finally:
-                    db.close()
+                    if should_close:
+                        db.close()
 
     def flush_index(self) -> None:
         if self._dirty_updates:
@@ -296,6 +338,7 @@ class VectorIndex:
         self.hash_to_id = {}
         self.id_to_type = {}
         self._next_id = 0
+        self._deleted_ids.clear()
         
         base_index = faiss.IndexHNSWFlat(_EMBEDDING_DIM, 32)
         self.index = faiss.IndexIDMap(base_index)
@@ -366,7 +409,7 @@ class VectorIndex:
     ) -> None:
         h = self._content_hash(text)
         blob = _float_list_to_blob(embedding)
-        with self.lock:
+        with self._locked():
             needs_index_add = content_type != "query" and self._is_initialized and h not in self.hash_to_id
             with self._conn() as conn:
                 if content_type == "fact":
@@ -431,6 +474,21 @@ class VectorIndex:
         if row:
             return _blob_to_float_list(row[0])
         return None
+
+    def embed_text_only(self, text: str) -> list[float] | None:
+        """Compute or retrieve embedding vector WITHOUT mutating SQLite or holding transaction locks.
+
+        Enables the 2-phase locking rule: LLM -> Lock -> SQLite.
+        """
+        if not self.embeddings_enabled or not text.strip():
+            return None
+        existing = self.get_embedding(text)
+        if existing:
+            return existing
+        try:
+            return _embed_texts([text])[0]
+        except Exception:
+            return None
 
     def compute_and_cache(
         self,
@@ -551,9 +609,8 @@ class VectorIndex:
 
         fts_query = " OR ".join(f'"{t}"' for t in set(terms))
 
-        with self.lock:
-            if not self._is_initialized:
-                self._load_index()
+        if not self._is_initialized:
+            self._load_index()
 
         with self._conn() as conn:
             try:
@@ -671,9 +728,8 @@ class VectorIndex:
     ) -> list[dict[str, Any]]:
         if not self.embeddings_enabled:
             return []
-        with self.lock:
-            if not self._is_initialized:
-                self._load_index()
+        if not self._is_initialized:
+            self._load_index()
 
         if hybrid:
             return self.search_hybrid(query, top_k=top_k, content_type=content_type)
@@ -692,11 +748,11 @@ class VectorIndex:
             ntotal = self.index.ntotal
             if ntotal == 0:
                 return []
-            distances, indices = self.index.search(q, min(ntotal, top_k * 5))
+            distances, indices = self.index.search(q, min(ntotal, (top_k + len(self._deleted_ids)) * 5))
             
             results = []
             for dist, idx in zip(distances[0], indices[0]):
-                if idx != -1 and idx in self.id_to_content:
+                if idx != -1 and idx in self.id_to_content and idx not in self._deleted_ids:
                     item_type = self.id_to_type.get(idx)
                     if content_type and item_type != content_type:
                         continue
@@ -732,7 +788,7 @@ class VectorIndex:
         if not texts:
             return
         hashes = [self._content_hash(t) for t in texts]
-        with self.lock:
+        with self._locked():
             needs_index_update = any(h in self.hash_to_id for h in hashes)
             with self._conn() as conn:
                 if needs_index_update:
@@ -766,7 +822,14 @@ class VectorIndex:
                 try:
                     self.index.remove_ids(np.array(ids_to_remove, dtype=np.int64))
                 except RuntimeError:
-                    # Index type (e.g. HNSW) doesn't support remove_ids, rebuild full index
-                    self._rebuild_index()
+                    # Index type (e.g. HNSW) doesn't support remove_ids.
+                    # Use hybrid threshold: rebuild only if deleted > 1000 or > 10% of total.
+                    for del_id in ids_to_remove:
+                        self._deleted_ids.add(del_id)
+                    total_vectors = getattr(self.index, "ntotal", 0)
+                    if len(self._deleted_ids) > 1000 or (total_vectors > 0 and (len(self._deleted_ids) / total_vectors) > 0.10):
+                        self._rebuild_index()
+                    else:
+                        self.save_index_to_disk()
                     return
                 self.save_index_to_disk()

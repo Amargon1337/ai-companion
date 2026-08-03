@@ -52,18 +52,21 @@ def mock_chat():
 
 
 @pytest.fixture
-def memory_store(tmp_path):
-    """MemoryStore with SQLite in temp dir."""
+def memory_store(tmp_path, monkeypatch):
+    """MemoryStore with SQLite in temp dir.
+
+    Sets SQLITE_PATH *before* constructing MemoryStore so that VectorIndex
+    and MemoryDatabase share the same backing file.
+    """
     import companion.config as cfg
     from companion.memory.store import MemoryStore
-    original_data_dir = cfg.DATA_DIR
-    original_sqlite = cfg.SQLITE_PATH
-    cfg.DATA_DIR = str(tmp_path)
-    cfg.SQLITE_PATH = str(tmp_path / "companion.db")
+    monkeypatch.setattr(cfg, "DATA_DIR", str(tmp_path))
+    db_path = str(tmp_path / "companion.db")
+    monkeypatch.setattr(cfg, "SQLITE_PATH", db_path)
     store = MemoryStore()
+    assert store.db.path == db_path
+    assert store.vector.path == db_path
     yield store
-    cfg.DATA_DIR = original_data_dir
-    cfg.SQLITE_PATH = original_sqlite
 
 
 def make_fact(fact_text: str, importance: int = 5, tags: list = None, kind: str = "event") -> Fact:

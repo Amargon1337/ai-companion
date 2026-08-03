@@ -158,12 +158,14 @@ PATTERN_PROMPT = """
     {{
       "pattern": "сформулированный паттерн-вывод",
       "category": "behavior|coping|mistake|relationship|trend",
-      "evidence": ["факт-основание 1"],
+      "evidence": ["fact_20260101_ab12cd34"],
       "importance": 1-10,
       "confidence": 0.0-1.0
     }}
   ]
 }}
+В поле evidence впиши ТОЛЬКО точные ID фактов из списка ниже (в квадратных скобках перед текстом факта),
+на которых основан вывод. Не пересказывай текст факта. Если основания нет — оставь [].
 Период: {period}
 Факты: {facts}
 Саммери: {summary}

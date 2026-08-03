@@ -120,3 +120,109 @@ class TestDuplicateInsertionFix:
         ids = [f.id for f in active]
         assert new.id in ids
         assert old.id not in ids
+
+
+class TestGetRandomFactFix:
+    """get_random_fact queried a non-existent `superseded` column and bypassed
+    _row_fact, so it raised OperationalError on every call. These tests use a
+    real SQLite store (no mocking) — the previous suite mocked the store whole,
+    which is why the breakage survived."""
+
+    def _store(self, tmp_path):
+        import companion.config as cfg
+
+        cfg.DATA_DIR = str(tmp_path)
+        cfg.SQLITE_PATH = str(tmp_path / "companion.db")
+        return MemoryStore()
+
+    def test_empty_db_returns_none(self, tmp_path):
+        store = self._store(tmp_path)
+        assert store.get_random_fact() is None
+
+    def test_returns_added_fact(self, tmp_path):
+        store = self._store(tmp_path)
+        fact = make_fact(fact="Пса зовут Морзик")
+        store.add_fact(fact)
+
+        result = store.get_random_fact()
+        assert result is not None
+        assert result.id == fact.id
+        assert result.fact == "Пса зовут Морзик"
+
+    def test_json_fields_are_decoded(self, tmp_path):
+        """Regression: _row_fact must decode JSON columns into Python types."""
+        store = self._store(tmp_path)
+        store.add_fact(make_fact(fact="Иван любит Python", tags=["anchor", "tech"]))
+
+        result = store.get_random_fact()
+        assert result is not None
+        assert isinstance(result.tags, list)
+        assert "anchor" in result.tags
+        assert isinstance(result.evidence, list)
+        assert isinstance(result.meta, dict)
+
+    def test_skips_superseded_fact(self, tmp_path):
+        """Regression: the filter must exclude superseded rows via superseded_by."""
+        store = self._store(tmp_path)
+        old = make_fact(fact="работал в старой компании")
+        store.add_fact(old)
+        store.db.update_fact_status(old.id, "superseded")
+        store.db.update_fact_fields(old.id, {"superseded_by": "fact_newer"})
+
+        assert store.get_random_fact() is None
+
+
+class TestPatternConfirmation:
+    """A repeated observation must CONFIRM the existing pattern, not silently
+    vanish. Time and repetition — not a single LLM verdict — are what turn an
+    observation into a trait, so the confirmation must be recorded."""
+
+    def _store(self, tmp_path):
+        import companion.config as cfg
+
+        cfg.DATA_DIR = str(tmp_path)
+        cfg.SQLITE_PATH = str(tmp_path / "companion.db")
+        return MemoryStore()
+
+    def test_repeat_observation_bumps_freshness(self, tmp_path):
+        import time
+
+        from companion.models import Pattern
+
+        store = self._store(tmp_path)
+        text = "использует музыку для регуляции состояния"
+
+        first = store.add_pattern(Pattern(pattern=text, category="coping"))
+        before = store.get_pattern(first.id).last_confirmed_at
+        time.sleep(0.01)
+        second = store.add_pattern(Pattern(pattern=text, category="coping"))
+
+        assert second.id == first.id, "must return the existing pattern, not a duplicate"
+        assert len(store.list_patterns("active")) == 1
+        assert store.get_pattern(first.id).last_confirmed_at > before, (
+            "repeat observation must be recorded as confirmation"
+        )
+
+    def test_dedup_works_without_embeddings(self, tmp_path):
+        """Confirmation must not depend on the embedding provider — otherwise
+        swapping the embedding model turns every repeat into a fresh trait."""
+        from companion.models import Pattern
+
+        store = self._store(tmp_path)
+        store.vector.embeddings_enabled = False
+        text = "предпочитает глубокую архитектуру вместо быстрых решений"
+
+        first = store.add_pattern(Pattern(pattern=text, category="behavior"))
+        second = store.add_pattern(Pattern(pattern=text, category="behavior"))
+
+        assert second.id == first.id
+        assert len(store.list_patterns("active")) == 1
+
+    def test_genuinely_new_pattern_is_still_added(self, tmp_path):
+        from companion.models import Pattern
+
+        store = self._store(tmp_path)
+        store.add_pattern(Pattern(pattern="использует музыку для регуляции", category="coping"))
+        store.add_pattern(Pattern(pattern="предпочитает работать ночью", category="behavior"))
+
+        assert len(store.list_patterns("active")) == 2

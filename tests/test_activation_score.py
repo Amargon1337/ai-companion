@@ -1,7 +1,11 @@
 """Tests for Stage 2: Activation Score."""
 import pytest
 from companion.models import Fact
-from companion.memory.activation import calculate_activation_score, fact_activation_score
+from companion.memory.activation import (
+    calculate_activation_score,
+    confirmation_strength,
+    fact_activation_score,
+)
 from companion.memory.importance import retrieval_score
 
 
@@ -64,4 +68,57 @@ def test_retrieval_bias_affects_activation_score() -> None:
     score_neutral = fact_activation_score(f_neutral)
     score_boosted = fact_activation_score(f_boosted)
     assert score_boosted > score_neutral
+
+
+class TestConfirmationStrength:
+    """Time, not the model's opinion, is what turns a mood into a trait."""
+
+    def test_single_observation_is_never_confirmed(self) -> None:
+        # One LLM assertion, however confident, earns nothing.
+        assert confirmation_strength(1, "2026-01-01", "2026-07-01") == 0.0
+        assert confirmation_strength(0, "", "") == 0.0
+
+    def test_one_evening_does_not_make_a_trait(self) -> None:
+        """Three mentions in one evening describe a state, not a person."""
+        one_evening = confirmation_strength(3, "2026-07-30T20:00", "2026-07-30T23:00")
+        three_months = confirmation_strength(3, "2026-05-01T12:00", "2026-07-30T12:00")
+
+        assert one_evening < 0.05, "a single evening must stay near zero"
+        assert three_months > 0.4, "a months-long pattern must score high"
+        # Same count — only the time span differs.
+        assert three_months > one_evening * 10
+
+    def test_span_saturates_at_threshold(self) -> None:
+        short = confirmation_strength(5, "2026-07-24", "2026-07-30")   # 6 days
+        full = confirmation_strength(5, "2026-06-01", "2026-07-30")    # ~60 days
+        assert full > short
+        assert 0.0 <= full <= 1.0
+
+    def test_missing_dates_do_not_crash(self) -> None:
+        assert confirmation_strength(5, "", "") == 0.0
+        assert 0.0 <= confirmation_strength(5, "2026-07-01", "") <= 1.0
+
+
+class TestConfirmationOutranksRecency:
+    """The core inversion: earned memory must survive recency decay."""
+
+    def test_confirmed_old_beats_fresh_unproven(self) -> None:
+        fresh = calculate_activation_score(importance=6, recency=1.0, usage=0.0, confirmation=0.0)
+        earned = calculate_activation_score(importance=6, recency=0.3, usage=0.5, confirmation=0.8)
+        assert earned > fresh, "a confirmed pattern must outrank a fresh one-off"
+
+    def test_confirmation_outweighs_raw_emotion(self) -> None:
+        """importance != emotion: a calm, repeated fact beats a dramatic one-off."""
+        emotional = calculate_activation_score(
+            importance=5, recency=0.5, usage=0.0, emotional_weight=1.0, confirmation=0.0
+        )
+        confirmed = calculate_activation_score(
+            importance=5, recency=0.5, usage=0.0, emotional_weight=0.0, confirmation=0.9
+        )
+        assert confirmed > emotional
+
+    def test_signature_is_backwards_compatible(self) -> None:
+        # Existing callers omit `confirmation` entirely.
+        score = calculate_activation_score(7, 0.8, 0.3)
+        assert 0.0 <= score <= 1.0
 

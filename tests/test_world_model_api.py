@@ -1,17 +1,11 @@
 """Tests for World Model Unified Graph API & Phase 2.2 Intelligence features."""
 from __future__ import annotations
 
-import tempfile
 from companion.models import Fact
-from companion.memory.store import MemoryStore
 
 
-def test_world_model_unified_api() -> None:
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
-        db_path = tf.name
-
-    store = MemoryStore()
-    store.db.path = db_path
+def test_world_model_unified_api(memory_store) -> None:
+    store = memory_store
     store.world._ensure_user_entity()
     try:
         # 1. Create entities
