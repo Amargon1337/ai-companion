@@ -36,10 +36,13 @@ class MemoryStore:
     def __init__(self) -> None:
         self.db = MemoryDatabase()
         self.vector = VectorIndex(db=self.db)
-        self.event_bus = MemoryEventBus()
+        # Async bus: handlers (IndexSyncService) may hit the embedding network;
+        # decouple them from the mutating call path so a slow API stalls a
+        # background worker rather than the conversation.
+        self.event_bus = MemoryEventBus(async_mode=True)
         self.index_sync = IndexSyncService(self.event_bus, self.vector, self.db)
         self.semantic_ranker = SemanticImportanceRanker(self.db)
-        self.identity = IdentityVault(self.db.path)
+        self.identity = IdentityVault(self.db.path, db=self.db)
         self.governor = MemoryGovernor(self.db)
         self.persistence = MemoryPersistenceLayer(self.db, self.governor, event_bus=self.event_bus)
         self.feedback_loop = MemoryFeedbackLoop(self.db, self.governor)
@@ -54,6 +57,23 @@ class MemoryStore:
         self._learning_engine = LearningEngineService(db=self.db, store=self)
         import threading
         self._cache_lock = threading.Lock()
+
+    def close(self) -> None:
+        """Graceful shutdown: drain the async event bus, then close the DB.
+
+        Without this, events queued by tests/one-shot scripts are lost when the
+        process exits before the daemon worker drains them. In the long-running
+        bot the asyncio shutdown path calls this implicitly via MemoryStore
+        teardown; one-shot callers should call it explicitly."""
+        try:
+            bus = getattr(self, "event_bus", None)
+            if bus is not None and hasattr(bus, "shutdown"):
+                bus.shutdown()
+        finally:
+            try:
+                self.db.close()
+            except Exception:
+                pass
 
     @property
     def world(self) -> Any:
@@ -322,9 +342,19 @@ class MemoryStore:
         if old is None:
             return False
         with self.db.atomic_memory_transaction():
+            # Read the blob BEFORE deleting the row: once fact_A is gone there is
+            # no embedding left for delete_for_content to transfer to a same-text
+            # sibling (facts.embedding lives on the fact row, keyed by text).
+            prior_row = self.db.get_fact(fact_id)
+            prior_blob = prior_row.get("embedding") if prior_row else None
+            deleted = self.db.delete_fact(fact_id)
             if old.fact.strip():
-                self.vector.delete_for_content(old.fact)
-            return self.db.delete_fact(fact_id)
+                self.vector.delete_for_content(
+                    old.fact,
+                    exclude_fact_id=fact_id,
+                    prior_embedding=bytes(prior_blob) if isinstance(prior_blob, (bytes, bytearray, memoryview)) else None,
+                )
+            return deleted
 
     def archive_fact(self, fact_id: str, reason: str = "archived") -> bool:
         """Archive a fact (never deletes from DB, but removes from FAISS index and marks archived in DB)."""
@@ -332,9 +362,22 @@ class MemoryStore:
         if old is None or old.status == "archived":
             return False
         with self.db.atomic_memory_transaction():
-            if old.fact.strip():
-                self.vector.delete_for_content(old.fact)
+            # Read the blob BEFORE the status transition: the persisted row keeps
+            # the embedding, but the transfer-source query excludes this fact id,
+            # so we hand the blob in explicitly.
+            prior_row = self.db.get_fact(fact_id)
+            prior_blob = prior_row.get("embedding") if prior_row else None
+            # Transition FIRST so this fact is no longer a candidate when
+            # delete_for_content looks for a surviving same-text sibling to
+            # receive the embedding; reversing the order would let the about-to-be
+            # archived row win the transfer and immediately bury the blob.
             self.db.update_fact_fields(fact_id, {"status": "archived", "archived": 1}, expected_version=old.version)
+            if old.fact.strip():
+                self.vector.delete_for_content(
+                    old.fact,
+                    exclude_fact_id=fact_id,
+                    prior_embedding=bytes(prior_blob) if isinstance(prior_blob, (bytes, bytearray, memoryview)) else None,
+                )
         if self.event_bus:
             from companion.memory.events.base import FactUpdatedEvent
             self.event_bus.publish(
@@ -456,44 +499,95 @@ class MemoryStore:
             return
 
         d = rel.to_dict()
-        self.db._insert_relation(d)
-        if rel.relation == "supersedes":
-            self.db.update_fact_status(rel.to_id, "superseded")
-            old_fact = self.get_fact(rel.to_id)
-            if old_fact and old_fact.fact:
+
+        # A2: Wrap the whole relation write + lifecycle mutation in ONE
+        # atomic transaction. Previously this was a chain of auto-committing
+        # _conn() calls, so a crash between _insert_relation and the status
+        # update left an orphan `supersedes` relation whose target was never
+        # marked superseded.
+        superseded_event: tuple[str, str, str, str] | None = None  # (fact_id, fact_text, superseded_by, relation)
+
+        with self.db.atomic_memory_transaction():
+            self.db._insert_relation(d)
+            if rel.relation == "supersedes":
+                target = to_fact  # rel.to_id, already fetched above
+                self.db.update_fact_status(rel.to_id, "superseded")
                 self.db.update_fact_fields(
                     rel.to_id,
-                    {"superseded_by": rel.from_id, "version": old_fact.version + 1},
+                    {"superseded_by": rel.from_id, "version": target.version + 1},
                 )
-                self.vector.delete_for_content(old_fact.fact)
-        elif rel.relation == "contradicts":
-            old_fact = self.get_fact(rel.to_id)
-            if not old_fact:
-                return
-            protected = old_fact.memory_kind == "permanent" or any(
-                t.lower() in {"anchor", "core_identity", "pinned"} for t in old_fact.tags
-            )
-            if protected:
-                # Новый факт противоречит защищенному. Защищенный побеждает.
-                self.db.update_fact_status(rel.from_id, "superseded")
-                new_fact = self.get_fact(rel.from_id)
-                if new_fact:
+                self.db.log_mutation(
+                    entity_id=rel.to_id,
+                    action="supersede",
+                    reason=rel.reason or "relation_supersedes",
+                    state_before={"status": target.status},
+                    state_after={"status": "superseded", "superseded_by": rel.from_id},
+                    initiator="store.add_relation",
+                )
+                if target.fact:
+                    superseded_event = (rel.to_id, target.fact, rel.from_id, rel.relation)
+            elif rel.relation == "contradicts":
+                old_fact = self.get_fact(rel.to_id)
+                if not old_fact:
+                    return
+                protected = old_fact.memory_kind == "permanent" or any(
+                    t.lower() in {"anchor", "core_identity", "pinned"} for t in old_fact.tags
+                )
+                if protected:
+                    # Новый факт противоречит защищенному. Защищенный побеждает.
+                    new_fact = from_fact  # rel.from_id, already fetched above
+                    self.db.update_fact_status(rel.from_id, "superseded")
                     self.db.update_fact_fields(
                         rel.from_id,
                         {"superseded_by": rel.to_id, "version": new_fact.version + 1},
                     )
-                    self.vector.delete_for_content(new_fact.fact)
-                return
-            # Newer fact wins: the old one is superseded (autonomous memory,
-            # no human review). Mirror the `supersedes` branch — hide it AND
-            # drop its stale vector, otherwise FAISS keeps serving it.
-            self.db.update_fact_status(rel.to_id, "superseded")
-            if old_fact and old_fact.fact:
-                self.db.update_fact_fields(
-                    rel.to_id,
-                    {"superseded_by": rel.from_id, "version": old_fact.version + 1},
+                    self.db.log_mutation(
+                        entity_id=rel.from_id,
+                        action="supersede",
+                        reason=rel.reason or "contradiction_protected_wins",
+                        state_before={"status": new_fact.status},
+                        state_after={"status": "superseded", "superseded_by": rel.to_id},
+                        initiator="store.add_relation",
+                    )
+                    if new_fact.fact:
+                        superseded_event = (rel.from_id, new_fact.fact, rel.to_id, rel.relation)
+                else:
+                    # Newer fact wins: the old one is superseded (autonomous memory,
+                    # no human review). Mirror the `supersedes` branch — hide it AND
+                    # drop its stale vector, otherwise FAISS keeps serving it.
+                    self.db.update_fact_status(rel.to_id, "superseded")
+                    self.db.update_fact_fields(
+                        rel.to_id,
+                        {"superseded_by": rel.from_id, "version": old_fact.version + 1},
+                    )
+                    self.db.log_mutation(
+                        entity_id=rel.to_id,
+                        action="supersede",
+                        reason=rel.reason or "contradiction_newer_wins",
+                        state_before={"status": old_fact.status},
+                        state_after={"status": "superseded", "superseded_by": rel.from_id},
+                        initiator="store.add_relation",
+                    )
+                    if old_fact.fact:
+                        superseded_event = (rel.to_id, old_fact.fact, rel.from_id, rel.relation)
+
+        # A3: post-commit side effects — drop stale vector + emit the lifecycle
+        # event so event-driven components see the state change. Previously this
+        # path mutated both without ever emitting an event or mutation-log row.
+        if superseded_event is not None:
+            sid, stext, sby, srel = superseded_event
+            if stext.strip():
+                self.vector.delete_for_content(stext)
+            if self.event_bus:
+                from companion.memory.events.base import FactSupersededEvent
+                self.event_bus.publish(
+                    FactSupersededEvent(
+                        fact_id=sid,
+                        fact_text=stext,
+                        superseded_by=sby,
+                        reason=rel.reason or f"relation:{srel}",
+                    )
                 )
-                self.vector.delete_for_content(old_fact.fact)
 
     def get_connected_facts(
         self,

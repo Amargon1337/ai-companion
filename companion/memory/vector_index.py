@@ -463,8 +463,17 @@ class VectorIndex:
     def get_embedding(self, text: str) -> list[float] | None:
         h = self._content_hash(text)
         with self._conn() as conn:
+            # Prefer a live (active/dormant) fact's embedding for this text; fall
+            # back to any row so a still-valid cached blob isn't reported missing
+            # merely because the only holder just transitioned status.
             row = conn.execute(
-                "SELECT embedding FROM facts WHERE fact=? AND embedding IS NOT NULL LIMIT 1", (text,)
+                """
+                SELECT embedding FROM facts
+                WHERE fact=? AND embedding IS NOT NULL
+                ORDER BY CASE WHEN status IN ('active','dormant') THEN 0 ELSE 1 END
+                LIMIT 1
+                """,
+                (text,),
             ).fetchone()
             if row:
                 return _blob_to_float_list(row[0])
@@ -778,10 +787,14 @@ class VectorIndex:
                 ).fetchone()[0]
             return conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
 
-    def delete_for_content(self, text: str) -> None:
-        self.delete_for_content_batch([text])
+    def delete_for_content(self, text: str, exclude_fact_id: str | None = None, prior_embedding: bytes | None = None) -> None:
+        self.delete_for_content_batch(
+            [text],
+            exclude_fact_id=exclude_fact_id,
+            prior_embedding=prior_embedding,
+        )
 
-    def delete_for_content_batch(self, texts: list[str]) -> None:
+    def delete_for_content_batch(self, texts: list[str], exclude_fact_id: str | None = None, prior_embedding: bytes | None = None) -> None:
         """Удалить несколько эмбеддингов и перестроить индекс ОДИН раз.
         Раньше delete_for_content делал _load_index() на каждый вызов →
         apply_importance_decay перестраивал весь HNSW N раз подряд."""
@@ -797,10 +810,44 @@ class VectorIndex:
                     "DELETE FROM embeddings WHERE content_hash=?",
                     [(h,) for h in hashes],
                 )
-                conn.executemany(
-                    "UPDATE facts SET embedding=NULL WHERE fact=?",
-                    [(t,) for t in texts],
-                )
+                for t in texts:
+                    # A1: embedding ownership. facts.embedding holds the blob on
+                    # whichever row add_fact/upsert wrote it to; sibling rows with
+                    # the SAME text keep embedding=NULL. When the holder is removed,
+                    # hand its blob to a surviving live sibling (same content should
+                    # keep ONE shared vector); only NULL it when NO live fact still
+                    # references the text — otherwise the survivor is orphaned from
+                    # the index at the next rebuild. The caller that deletes the row
+                    # passes its blob in via `prior_embedding`, because after the
+                    # DELETE there is no in-DB source left to transfer from.
+                    if exclude_fact_id:
+                        row = conn.execute(
+                            "SELECT id FROM facts WHERE fact=? AND status IN ('active','dormant') AND id != ? LIMIT 1",
+                            (t, exclude_fact_id),
+                        ).fetchone()
+                    else:
+                        row = conn.execute(
+                            "SELECT id FROM facts WHERE fact=? AND status IN ('active','dormant') LIMIT 1",
+                            (t,),
+                        ).fetchone()
+                    if row is None:
+                        conn.execute("UPDATE facts SET embedding=NULL WHERE fact=?", (t,))
+                    else:
+                        blob: bytes | None = None
+                        if prior_embedding is not None:
+                            blob = bytes(prior_embedding)
+                        else:
+                            blob_row = conn.execute(
+                                "SELECT embedding FROM facts WHERE fact=? AND embedding IS NOT NULL AND id != ? LIMIT 1",
+                                (t, exclude_fact_id or ""),
+                            ).fetchone()
+                            if blob_row is not None:
+                                blob = bytes(blob_row[0])
+                        if blob is not None:
+                            conn.execute(
+                                "UPDATE facts SET embedding=? WHERE id=?",
+                                (sqlite3.Binary(blob), row[0]),
+                            )
                 try:
                     conn.executemany(
                         "DELETE FROM embeddings_fts WHERE content_hash=?",

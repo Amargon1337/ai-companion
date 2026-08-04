@@ -206,6 +206,19 @@ async def run() -> None:
     except Exception as exc:
         logger.warning("Vector index initialization skipped: %s", exc)
 
+    # Phase D (Self-Healing): reconcile SQLite facts against the in-memory FAISS
+    # index. recover_index_consistency was implemented and unit-tested but never
+    # invoked at startup — orphan vectors and dropped embeddings accumulated in
+    # silence until a manual rebuild. Run it once after reindex; it is idempotent.
+    try:
+        recovered = memory_store.recover_index_consistency()
+        if recovered.get("missing_computed") or recovered.get("orphans_removed"):
+            logger.warning("Index consistency repair applied at startup: %s", recovered)
+        else:
+            logger.info("Index consistency verified at startup: %s", recovered)
+    except Exception as exc:
+        logger.warning("Index consistency repair skipped: %s", exc)
+
     logger.info("Testing embedding API on startup...")
     if not memory_store.vector.test_embeddings():
         logger.critical("Embedding API test failed on startup. Disabling vector retrieval.")

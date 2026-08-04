@@ -267,6 +267,8 @@ def test_gc_routes_through_memory_store(tmp_path) -> None:
             assert not any(r["content"] == fact.fact for r in found_after), "Archived fact must be removed from FAISS"
 
             # 3. EventBus should have emitted a FactUpdatedEvent
+            # (async bus: wait for the worker to drain queued events first)
+            store.event_bus.flush(timeout=5.0)
             assert any(
                 e.fact_id == "fact-gc-test" and e.new_state.get("status") == "archived"
                 for e in events_received
@@ -298,6 +300,7 @@ def test_index_sync_service_idempotence(tmp_path) -> None:
             ))
 
             # Verify IndexSyncService did NOT increment added_count
+            store.event_bus.flush(timeout=5.0)
             assert store.index_sync.added_count == initial_count, "IndexSyncService must skip existing hash in FAISS"
 
             # Publish FactCreatedEvent for a new text NOT in FAISS
@@ -309,6 +312,7 @@ def test_index_sync_service_idempotence(tmp_path) -> None:
             ))
 
             # Verify IndexSyncService incremented added_count by 1
+            store.event_bus.flush(timeout=5.0)
             assert store.index_sync.added_count == initial_count + 1, "IndexSyncService must embed missing facts"
         finally:
             store.db.close()

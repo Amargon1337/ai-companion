@@ -1,0 +1,51 @@
+BASELINE — pre-phase-a-integrity (git tag, created before fixes)
+============================================================
+Tests: 319 passed / 2 failed (3 deselected)
+DB (fresh init): all tables 0 rows; FAISS 0.3 KB file.
+
+================================================================
+POST-FIX BASELINE (after Phase A/B/C/D)
+================================================================
+Tests: 319 passed / 2 failed (IDENTICAL count to pre-fix).
+
+The 2 persistent failures are degenerate-mock test artifacts, NOT
+regressions introduced by these fixes:
+  - test_deleted_ids_cleared_after_rebuild
+      All facts share ONE constant mock vector ([1,0,0..]).
+      add_fact's content-hash dedup collapses 100 identical embeddings
+      into 1 FAISS entry by design (ntotal=1), so "delete some →
+      search remaining" is structurally degenerate. Real per-fact
+      embeddings (verified separately) do vector-correct delete/rebuild.
+  - test_no_mechanism_to_retry_embedding
+      add_fact with mocked-NULL embedding [persists correctly as NULL];
+      the test asserts a later auto-retry, which was never part of this
+      scope. The startup reconcile (Phase D) now covers gap-filling.
+
+Fixes applied and verified working:
+  A1  embedding ownership: delete guard + transfer the blob to a live
+      same-text sibling; get_embedding prefers active/dormant holders.
+      CORRECTED during implementation: the first version tried to read
+      the blob after the deleting/archiving row had already vanished or
+      flipped status; final design passes the pre-mutation blob into
+      delete_for_content(..., prior_embedding=...) so the transfer has a
+      real source. Verified end-to-end: deleting fact_A transfers the
+      blob to same-text fact_B (SET), fact_B survives _rebuild_index and
+      stays searchable.
+  A2  add_relation wrapped in one atomic_memory_transaction.
+  A3  add_relation emits FactSupersededEvent + memory_mutation_log row.
+  B   IdentityVault routes through shared MemoryDatabase; per-call
+      sqlite.connect removed; actor/reason/override_reason recorded in a
+      new identity_change_log table.
+  C   MemoryEventBus gained async_mode=True (queue + daemon worker);
+      MemoryStore uses it; flush()/shutdown() added; tests that assert
+      on delivery now call flush() first.
+  D   recover_index_consistency wired into companion/main.py startup.
+
+Residual non-regressions (identical to pre-fix baseline):
+  - test_deleted_ids_cleared_after_rebuild — all facts share one
+    constant mock embedding, so content-hash dedup collapses 100 rows to
+    1 FAISS entry; the test is structurally degenerate.
+  - test_no_mechanism_to_retry_embedding — path under test is by design
+    (a NULL embedding stays NULL until reconcile covers it).
+
+No git commit performed (per project rule).
