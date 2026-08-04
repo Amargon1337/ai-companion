@@ -288,6 +288,7 @@ class MemoryStore:
         tags: list[str] | None = None,
         memory_kind: str | None = None,
         date: str | None = None,
+        status: str | None = None,
     ) -> bool:
         """Edit a fact in place. Keeps FAISS and DB in sync.
 
@@ -297,6 +298,12 @@ class MemoryStore:
         """
         old = self.get_fact(fact_id)
         if old is None:
+            return False
+        if old.status in {"archived", "superseded"}:
+            if status == "active":
+                raise ValueError(
+                    f"Illegal lifecycle transition: cannot reactivate '{old.status}' fact {fact_id} to 'active'. Use restore_fact() to reactivate."
+                )
             return False
         fields: dict[str, Any] = {"version": old.version + 1}
         old_text = old.fact
@@ -379,12 +386,44 @@ class MemoryStore:
                     prior_embedding=bytes(prior_blob) if isinstance(prior_blob, (bytes, bytearray, memoryview)) else None,
                 )
         if self.event_bus:
+            from companion.memory.events.base import FactArchivedEvent, FactUpdatedEvent
+            self.event_bus.publish(
+                FactUpdatedEvent(
+                    fact_id=fact_id,
+                    old_state={"status": old.status, "fact": old.fact},
+                    new_state={"status": "archived", "fact": old.fact},
+                    reason=reason,
+                )
+            )
+            self.event_bus.publish(
+                FactArchivedEvent(
+                    fact_id=fact_id,
+                    fact_text=old.fact,
+                    reason=reason,
+                    initiator="store.archive_fact",
+                )
+            )
+        return True
+
+    def restore_fact(self, fact_id: str, reason: str = "restore") -> bool:
+        """Explicitly restore an archived or superseded fact back to 'active' status."""
+        old = self.get_fact(fact_id)
+        if old is None or old.status not in {"archived", "superseded"}:
+            return False
+        vec = self.vector.embed_text_only(old.fact)
+        with self.db.atomic_memory_transaction():
+            self.db.update_fact_fields(fact_id, {"status": "active", "archived": 0, "superseded_by": ""}, expected_version=old.version)
+            if vec is not None:
+                self.vector.upsert_embedding(old.fact, vec, content_type="fact", fact_id=fact_id)
+            else:
+                self.vector.compute_and_cache(old.fact, content_type="fact", fact_id=fact_id)
+        if self.event_bus:
             from companion.memory.events.base import FactUpdatedEvent
             self.event_bus.publish(
                 FactUpdatedEvent(
                     fact_id=fact_id,
-                    old_state={"status": old.status},
-                    new_state={"status": "archived"},
+                    old_state={"status": old.status, "fact": old.fact},
+                    new_state={"status": "active", "fact": old.fact},
                     reason=reason,
                 )
             )
@@ -676,10 +715,17 @@ class MemoryStore:
         """Dedup check across active and dormant facts only."""
         from companion.memory.text_sim import text_overlap
         norm = self._normalize(text)
-        candidates = [f for f in self.list_all_facts() if f.status in {"active", "dormant"}]
+        candidates = self.list_facts("active") + self.list_facts("dormant")
         best: Fact | None = None
         best_score = 0.0
+        negations = {"не", "нет", "никогда", "ненавижу", "против"}
+        query_words = set(re.findall(r"\w+", norm))
+        query_neg = bool(query_words & negations)
         for f in candidates:
+            cand_words = set(re.findall(r"\w+", self._normalize(f.fact)))
+            cand_neg = bool(cand_words & negations)
+            if query_neg != cand_neg:
+                continue
             score = text_overlap(norm, self._normalize(f.fact))
             if score > best_score:
                 best_score = score
@@ -702,22 +748,25 @@ class MemoryStore:
         return [Reflection.from_dict(r) for r in rows]
 
     def search_reflections(self, query: str, limit: int = 10) -> list[Reflection]:
+        """Search active reflections using token/keyword relevance (FTS/BM25 style).
+        Reflections are intentionally excluded from FAISS to prevent recursive self-contamination.
+        """
         active = self.list_reflections("active")
         if not query:
             return active[:limit]
-        try:
-            results = self.vector.search(query, top_k=limit, content_type="reflection")
-            if results:
-                hit_hashes = {r["content_hash"] for r in results}
-                found = [r for r in active if self.vector._content_hash(r.insight) in hit_hashes]
-                if found:
-                    return found[:limit]
-        except Exception as exc:
-            logger.debug("Reflection vector search unavailable: %s", exc)
-
+        from companion.memory.text_sim import text_overlap
         q_norm = self._normalize(query)
-        fallback = [r for r in active if q_norm in self._normalize(r.insight)]
-        return fallback[:limit]
+        scored = []
+        for r in active:
+            r_norm = self._normalize(r.insight)
+            if q_norm in r_norm:
+                scored.append((1.0, r))
+            else:
+                score = text_overlap(q_norm, r_norm)
+                if score >= 0.2:
+                    scored.append((score, r))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [r for _, r in scored[:limit]]
 
     def search_summaries(self, query: str, limit: int = 3) -> list[str]:
         if not query:

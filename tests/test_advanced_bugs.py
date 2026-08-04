@@ -258,7 +258,7 @@ class TestFAISSMemoryLeak:
         test_vec[0] = 1.0
         monkeypatch.setattr(store.vector, 'embed_text_only', lambda text: test_vec.tolist())
         monkeypatch.setattr(store.vector, 'compute_and_cache', 
-                         lambda text, *args, **kwargs: store.vector.upsert_embedding(text, test_vec.tolist(), *args, **kwargs))
+                         lambda text, *args, **kwargs: (store.vector.upsert_embedding(text, test_vec.tolist(), *args, **kwargs), test_vec.tolist())[1])
         
         # Add facts
         added_facts = []
@@ -266,22 +266,38 @@ class TestFAISSMemoryLeak:
             fact = make_fact(f"Memory leak test fact {i}", importance=5)
             result = store.add_fact(fact)
             added_facts.append(result)
-        
+
+        with store.db._conn() as conn:
+            cnt = conn.execute("SELECT count(*) FROM facts WHERE embedding IS NOT NULL").fetchone()[0]
+            print("TOTAL NON-NULL AFTER ALL 100 FACTS ADDED:", cnt)
+
         # Check initial state
         assert len(store.vector._deleted_ids) == 0, "No deleted IDs initially"
         
         # Delete some facts
-        for fact in added_facts[:50]:
+        for idx, fact in enumerate(added_facts[:50]):
             store.delete_fact(fact.id)
+            if idx == 0:
+                with store.db._conn() as c:
+                    print("NON NULL AFTER DELETING 1 FACT:", c.execute("SELECT count(*) FROM facts WHERE embedding IS NOT NULL").fetchone()[0])
         
         # Verify deletion worked
         for fact in added_facts[:50]:
             results = store.vector.search(fact.fact, top_k=1)
             assert len(results) == 0, f"Fact {fact.id} should not be searchable after deletion"
         
+        with store.db._conn() as conn:
+            non_null_before = conn.execute("SELECT count(*) FROM facts WHERE embedding IS NOT NULL").fetchone()[0]
+            print("NON NULL EMBEDDINGS BEFORE REBUILD:", non_null_before)
+
         # Rebuild index
         store.vector._rebuild_index()
         
+        with store.db._conn() as conn:
+            non_null_after = conn.execute("SELECT count(*) FROM facts WHERE embedding IS NOT NULL").fetchone()[0]
+            print("NON NULL EMBEDDINGS AFTER REBUILD:", non_null_after)
+            print("FAISS NTOTAL:", store.vector.index.ntotal)
+
         # Verify state is consistent
         assert len(store.vector._deleted_ids) == 0, \
             "Bug: _deleted_ids not cleared after rebuild"

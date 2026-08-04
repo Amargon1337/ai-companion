@@ -258,8 +258,9 @@ async def run() -> None:
         logger.info("Shutting down bot...")
         try:
             memory_store.vector.flush_index()
+            memory_store.close()
         except Exception as exc:
-            logger.error("Failed to flush FAISS index during shutdown: %s", exc, exc_info=True)
+            logger.error("Failed to flush FAISS index or close memory store during shutdown: %s", exc, exc_info=True)
         ping_task.cancel()
         try:
             await asyncio.gather(ping_task, return_exceptions=True)

@@ -48,6 +48,13 @@ class MemoryPersistenceLayer:
         if old_state is None:
             old_state = self.db.get_entity(entity_type, fact_id) or {}
 
+        old_status = old_state.get("status")
+        new_status = decision.updates.get("status")
+        if old_status in {"archived", "superseded"} and new_status == "active":
+            raise ValueError(
+                f"Illegal lifecycle transition: cannot reactivate '{old_status}' entity {fact_id} to 'active' via apply_decision. Use explicit restore_fact() if reactivation is required."
+            )
+
         # Extract only the modified keys for before/after snapshots
         old_sub = {k: old_state.get(k) for k in decision.updates.keys()}
         new_sub = dict(decision.updates)
