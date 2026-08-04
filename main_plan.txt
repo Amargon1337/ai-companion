@@ -1,0 +1,1175 @@
+Отлично. Теперь это уже не просто план исправления багов, а **полная программа превращения Amargon's Void Memory OS в устойчивую долгоживущую Memory Platform**.
+
+Я бы зафиксировал именно этот вариант как финальный roadmap. Я ещё немного поправлю детали Gemini, чтобы он был максимально практичным для твоего проекта.
+
+Главное решение: **не Alembic/SQLAlchemy**.
+
+Для этого проекта я бы оставил чистый SQLite + собственный migration engine.
+
+Почему:
+
+* у тебя уже есть собственный слой `MemoryDatabase`;
+* SQLite используется напрямую;
+* переход на ORM сейчас создаст огромный лишний слой;
+* Alembic хорош для веб-приложений с SQLAlchemy, но здесь он будет бороться с твоей архитектурой.
+
+Твой стек:
+
+```
+SQLite
++
+собственный migration runner
++
+versioned SQL/Python migrations
+```
+
+идеально подходит.
+
+---
+
+# Amargon's Void Memory OS
+
+# Final Production Hardening Roadmap
+
+Версия плана: 1.0 Final
+
+Цель:
+
+Создать устойчивую систему долгосрочной памяти, которая:
+
+* не теряет знания;
+* умеет восстанавливаться после сбоев;
+* контролирует собственную целостность;
+* безопасно развивается через годы;
+* поддерживает замену LLM и embedding моделей;
+* имеет наблюдаемость уровня production systems.
+
+---
+
+# PHASE 0
+
+# Memory Integrity Baseline
+
+## Название коммита
+
+```
+chore(memory): establish integrity baseline
+```
+
+## Цель
+
+Перед изменениями создать контрольную точку.
+
+---
+
+## Добавить Memory Integrity Report
+
+Новый модуль:
+
+```
+companion/memory/integrity.py
+```
+
+Компонент:
+
+```
+MemoryIntegrityReporter
+```
+
+---
+
+Проверки:
+
+## SQLite
+
+Количество:
+
+```
+facts
+beliefs
+relations
+embeddings
+events
+```
+
+---
+
+## Lifecycle
+
+Проверить:
+
+```
+active
+dormant
+archived
+superseded
+```
+
+Нет ли:
+
+```
+invalid states
+```
+
+---
+
+## Embedding
+
+Проверить:
+
+```
+facts without embeddings
+```
+
+---
+
+## FAISS
+
+Проверить:
+
+```
+index.ntotal
+
+mapping count
+
+orphan vectors
+```
+
+---
+
+## Output:
+
+Пример:
+
+```
+Memory Integrity Report
+
+Facts:
+ active: 5200
+ dormant: 800
+ archived: 1200
+
+
+Embeddings:
+ valid: 5900
+ missing: 100
+
+
+FAISS:
+ vectors: 5900
+ mappings: 5900
+
+
+Status:
+ HEALTHY
+```
+
+---
+
+# PHASE 1
+
+# IdentityVault Transaction Isolation
+
+## Коммит
+
+```
+fix(storage): unify IdentityVault transaction model
+```
+
+## Severity
+
+P1
+
+---
+
+## Проблема
+
+Сейчас:
+
+```
+MemoryDatabase
+        |
+        |
+      RLock
+        |
+ transaction
+
+
+IdentityVault
+
+ sqlite3.connect()
+        |
+        |
+ bypass
+```
+
+---
+
+## Изменения
+
+Удалить:
+
+```python
+sqlite3.connect()
+```
+
+из:
+
+```
+memory/identity_vault.py
+```
+
+---
+
+Было:
+
+```python
+IdentityVault(db_path)
+```
+
+Стало:
+
+```python
+IdentityVault(db)
+```
+
+---
+
+Все операции:
+
+```
+SELECT
+UPDATE
+INSERT
+```
+
+проходят через:
+
+```
+MemoryDatabase.atomic_memory_transaction()
+```
+
+---
+
+## Тесты
+
+Добавить:
+
+```
+test_identity_rollback()
+test_identity_concurrent_update()
+```
+
+---
+
+# PHASE 2
+
+# Database Migration Framework
+
+## Коммит
+
+```
+feat(storage): introduce migration engine
+```
+
+Это фундамент всех будущих изменений.
+
+---
+
+Создать:
+
+```
+storage/
+    migrations/
+        manager.py
+        001_initial.py
+        002_fact_embeddings.py
+```
+
+---
+
+## Таблица
+
+```sql
+schema_migrations
+```
+
+Поля:
+
+```
+id
+version
+name
+checksum
+applied_at
+```
+
+---
+
+## MigrationManager
+
+Функции:
+
+```
+get_current_version()
+
+apply_pending()
+
+rollback_last()
+
+verify_checksum()
+```
+
+---
+
+## Перед каждой миграцией
+
+Автобэкап:
+
+```
+backup/
+
+companion_before_migration_002.db
+```
+
+Через:
+
+```python
+shutil.copy2()
+```
+
+---
+
+## Migration Lock
+
+Чтобы два процесса не мигрировали одновременно.
+
+---
+
+# PHASE 3
+
+# Embedding Ownership Separation
+
+## Коммит
+
+```
+refactor(memory): separate facts and embeddings
+```
+
+## Самое важное изменение схемы.
+
+---
+
+Сейчас:
+
+```
+facts
+
+id
+text
+embedding
+```
+
+---
+
+После:
+
+```
+facts
+
+id
+text
+
+
+fact_embeddings
+
+id
+fact_id
+vector
+model
+dimension
+created_at
+```
+
+---
+
+## Причина
+
+Факт:
+
+```
+семантическое знание
+```
+
+Embedding:
+
+```
+представление знания
+```
+
+Это разные сущности.
+
+---
+
+## Поддержка нескольких моделей
+
+Добавить:
+
+```
+embedding_model
+embedding_dimension
+```
+
+---
+
+Например:
+
+```
+Gemini-embedding-768
+
+local-minilm-384
+```
+
+---
+
+# PHASE 4
+
+# Multi-Space Vector Architecture
+
+## Коммит
+
+```
+feat(vector): support multi embedding spaces
+```
+
+---
+
+FAISS больше не:
+
+```
+faiss_index.bin
+```
+
+---
+
+Теперь:
+
+```
+vectors/
+
+gemini_768/
+    faiss_index.bin
+
+
+minilm_384/
+    faiss_index.bin
+```
+
+---
+
+## Metadata
+
+Таблица:
+
+```
+vector_indexes
+```
+
+Поля:
+
+```
+model
+dimension
+path
+created_at
+status
+```
+
+---
+
+При запуске:
+
+Проверка:
+
+```
+DB model
+
+vs
+
+FAISS metadata
+```
+
+Если:
+
+```
+dimension mismatch
+```
+
+тогда:
+
+```
+rebuild
+```
+
+---
+
+# PHASE 5
+
+# Deterministic Fact Identity
+
+## Коммит
+
+```
+fix(memory): enforce deterministic fact identity
+```
+
+---
+
+Добавить:
+
+```
+normalized_text
+
+fact_hash
+```
+
+---
+
+Три уровня защиты.
+
+---
+
+## Level 1
+
+Exact duplicate:
+
+SQLite:
+
+```
+UNIQUE INDEX
+```
+
+---
+
+## Level 2
+
+Semantic duplicate:
+
+FAISS similarity.
+
+---
+
+## Level 3
+
+LLM merge:
+
+Пример:
+
+```
+у меня собака
+
+у меня пёс
+```
+
+---
+
+# PHASE 6
+
+# Resource Aware Embedding Recovery
+
+## Коммит
+
+```
+feat(memory): add embedding recovery worker
+```
+
+---
+
+Состояния:
+
+```
+pending
+
+processing
+
+completed
+
+failed
+```
+
+---
+
+Worker:
+
+```
+EmbeddingRecoveryScheduler
+```
+
+---
+
+Ограничения:
+
+```
+batch_size=10
+```
+
+---
+
+После каждого batch:
+
+```python
+await asyncio.sleep(0.5)
+```
+
+---
+
+Semaphore:
+
+```
+max concurrent embeddings = 1
+```
+
+---
+
+Причина:
+
+не убить:
+
+* event loop;
+* API quota;
+* слабое железо.
+
+---
+
+# PHASE 7
+
+# Event State Machine
+
+## Коммит
+
+```
+refactor(events): introduce memory event lifecycle
+```
+
+---
+
+Было:
+
+```
+FactCreatedEvent
+```
+
+---
+
+Стало:
+
+```
+FactStored
+
+FactValidated
+
+FactEmbedded
+
+FactIndexed
+
+FactAvailable
+```
+
+---
+
+Каждый этап:
+
+состояние.
+
+---
+
+# Dead Letter Queue
+
+Добавить:
+
+```
+dead_letter_events
+```
+
+Поля:
+
+```
+event_id
+type
+payload
+attempts
+last_error
+created_at
+```
+
+---
+
+Правило:
+
+После 3 ошибок:
+
+```
+queue
+
+↓
+
+DLQ
+```
+
+---
+
+Команды:
+
+```
+/dlq_stats
+
+/retry_dlq
+```
+
+---
+
+# PHASE 8
+
+# FAISS Crash Safety
+
+## Коммит
+
+```
+fix(vector): implement atomic persistence
+```
+
+---
+
+Сохранение:
+
+Было:
+
+```
+write index.bin
+```
+
+---
+
+Стало:
+
+```
+write temp
+
+fsync
+
+os.replace()
+```
+
+---
+
+Добавить:
+
+```
+faiss journal
+```
+
+---
+
+Пример:
+
+```
+ADD fact123
+DELETE fact55
+```
+
+---
+
+При старте:
+
+```
+recover journal
+```
+
+---
+
+# PHASE 9
+
+# User Actor Concurrency Model
+
+## Коммит
+
+```
+feat(bot): introduce user session actors
+```
+
+---
+
+Архитектура:
+
+```
+Telegram update
+
+↓
+
+User Queue
+
+↓
+
+Single Worker
+
+↓
+
+Memory Mutation
+```
+
+---
+
+Для каждого:
+
+```
+user_id
+```
+
+своя очередь.
+
+---
+
+Результат:
+
+Исчезают:
+
+* duplicate writes;
+* race conditions;
+* out-of-order memory.
+
+---
+
+# PHASE 10
+
+# Resource Governance
+
+## Коммит
+
+```
+feat(runtime): add background resource governance
+```
+
+---
+
+Все фоновые процессы получают:
+
+```
+priority
+
+budget
+
+timeout
+
+max_runtime
+```
+
+---
+
+Пример:
+
+```
+User message
+priority 100
+
+
+Recovery
+priority 50
+
+
+Dreaming
+priority 10
+```
+
+---
+
+# PHASE 11
+
+# Memory Domain Decomposition
+
+## Коммит
+
+```
+refactor(memory): split domain services
+```
+
+---
+
+Не микросервисы.
+
+Один процесс.
+
+---
+
+Структура:
+
+```
+MemoryFacade
+
+├── StorageRepository
+├── RetrievalService
+├── VectorService
+├── GraphService
+├── LifecycleService
+└── HygieneService
+```
+
+---
+
+# PHASE 12
+
+# Epistemic Intelligence Safety
+
+## Коммит
+
+```
+feat(reasoning): enforce epistemic boundaries
+```
+
+---
+
+Типы:
+
+```
+FACT
+
+BELIEF
+
+INFERENCE
+
+PREDICTION
+
+HYPOTHESIS
+```
+
+---
+
+Каждый inference:
+
+хранит:
+
+```
+evidence_ids
+
+confidence
+
+timestamp
+
+source
+```
+
+---
+
+Запрет:
+
+```
+LLM output
+
+↓
+
+FACT
+```
+
+без validation.
+
+---
+
+# PHASE 13
+
+# Long Term Memory Hygiene
+
+## Коммит
+
+```
+feat(memory): introduce hygiene engine
+```
+
+---
+
+Проверки:
+
+* orphan facts;
+* stale embeddings;
+* contradictions;
+* duplicate clusters;
+* dead relations.
+
+---
+
+# PHASE 14
+
+# Memory Watchdog Self Healing
+
+## Коммит
+
+```
+feat(memory): add self healing watchdog
+```
+
+---
+
+Фоновый сервис:
+
+```
+WatchdogService
+```
+
+---
+
+Проверяет:
+
+```
+fact exists
+
+↓
+
+embedding exists
+
+
+vector exists
+
+↓
+
+mapping exists
+```
+
+---
+
+Автоисправление:
+
+Удалить:
+
+```
+orphan vectors
+```
+
+Создать:
+
+```
+missing embeddings jobs
+```
+
+Пометить:
+
+```
+failed
+```
+
+---
+
+# PHASE 15
+
+# Disaster Recovery Testing
+
+## Коммит
+
+```
+test(storage): add disaster recovery scenarios
+```
+
+---
+
+Тесты:
+
+Убить процесс:
+
+* во время SQLite commit;
+* во время FAISS save;
+* во время migration;
+* во время event processing.
+
+Проверить:
+
+```
+restart
+
+↓
+
+recover
+
+↓
+
+memory intact
+```
+
+---
+
+# PHASE 16
+
+# Memory Invariant Test Suite
+
+## Коммит
+
+```
+test(memory): enforce invariants
+```
+
+---
+
+Постоянные правила:
+
+```
+ACTIVE FACT
+=
+VALID EMBEDDING
+
+
+FAISS VECTOR
+=
+VALID FACT
+
+
+EVENT
+=
+VALID STATE
+
+
+MIGRATION
+=
+CHECKSUM OK
+```
+
+---
+
+# Финальный порядок реализации
+
+```
+1. Integrity baseline
+
+2. IdentityVault isolation
+
+3. Migration engine
+
+4. Embedding separation
+
+5. Multi-space vector indexes
+
+6. Fact identity system
+
+7. Embedding recovery
+
+8. Event state machine + DLQ
+
+9. FAISS crash safety
+
+10. User actors
+
+11. Resource governance
+
+12. Domain decomposition
+
+13. Reasoning safety
+
+14. Hygiene engine
+
+15. Watchdog
+
+16. Disaster recovery tests
+
+17. Invariant suite
+```
+
+---
+
+После выполнения этого плана Amargon's Void будет уже не просто Telegram-ботом с памятью. Это будет полноценный локальный **Memory OS с контролируемым жизненным циклом знаний**.
+
+Самое важное: первые 6 фаз дадут примерно 80% результата. Остальное уже превращает хорошую систему в очень живучую. 🧠
