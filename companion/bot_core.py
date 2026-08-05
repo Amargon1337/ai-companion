@@ -45,6 +45,9 @@ memory_store = MemoryStore()
 retrieval_mgr = RetrievalBudgetManager(store=memory_store)
 context_aggregator = ContextAggregator(memory_store.db)
 
+# Embedding retry worker (initialized after memory_store)
+embedding_retry_worker = None
+
 # In-memory sessions
 user_chats: dict[int, Any] = {}
 user_message_counts: dict[int, int] = {}
@@ -62,6 +65,14 @@ async def proactive_ping_loop(bot):
     """Каждую минуту проверяет prospective memory и обычную проактивность."""
     from datetime import datetime
     from companion.proactive.loop import run_proactive_loop
+    
+    # Initialize embedding retry worker on first loop iteration
+    global embedding_retry_worker
+    if embedding_retry_worker is None:
+        from companion.memory.embedding_retry_worker import init_embedding_retry_worker
+        embedding_retry_worker = init_embedding_retry_worker(memory_store)
+        await embedding_retry_worker.start()
+        logger.info("Embedding Retry Worker initialized and started")
     
     last_subconscious_run = 0.0
     last_dreaming_run = 0.0

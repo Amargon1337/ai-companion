@@ -252,8 +252,14 @@ class MemoryStore:
 
         d = fact.to_dict()
         vec = None
+        # Generate embedding BEFORE transaction to avoid holding DB lock during API call
         if fact.status in ("active", "dormant"):
             vec = self.vector.embed_text_only(fact.fact)
+            # BUG-002 FIX: If embedding fails, mark as pending_embedding instead of creating broken active fact
+            if vec is None and fact.status == "active":
+                fact.status = "pending_embedding"
+                d["status"] = "pending_embedding"  # Update dict that will be inserted
+                logger.warning("add_fact: embedding failed for fact %s, marking as pending_embedding", fact.id)
 
         with self.db.atomic_memory_transaction():
             self.db._insert_fact(d)
@@ -263,6 +269,8 @@ class MemoryStore:
                 if vec is not None:
                     self.vector.upsert_embedding(fact.fact, vec, content_type="fact", fact_id=fact.id)
                 else:
+                    # This should not happen for active/dormant facts after the fix above
+                    logger.warning("add_fact: attempting to compute embedding inside transaction for fact %s", fact.id)
                     self.vector.compute_and_cache(fact.fact, content_type="fact", fact_id=fact.id)
 
         if self.event_bus:
@@ -448,7 +456,7 @@ class MemoryStore:
         with self.db._conn() as conn:
             row = conn.execute(
                 "SELECT * FROM facts WHERE (superseded_by IS NULL OR superseded_by = '') "
-                "AND status = 'active' ORDER BY RANDOM() LIMIT 1"
+                "AND status IN ('active', 'pending_embedding') ORDER BY RANDOM() LIMIT 1"
             ).fetchone()
             if not row:
                 return None

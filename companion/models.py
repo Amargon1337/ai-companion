@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 MemoryKind = Literal["permanent", "state", "event"]
-FactStatus = Literal["active", "superseded", "quarantine", "archived", "dormant", "pending_review"]
+FactStatus = Literal["active", "superseded", "quarantine", "archived", "dormant", "pending_review", "pending_embedding"]
 RelationType = Literal[
     "supersedes",
     "contradicts",
