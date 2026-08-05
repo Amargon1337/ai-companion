@@ -74,18 +74,19 @@ def test_atomic_transaction_rollback(tmp_path):
 
 
 def test_fact_insert_rolls_back_world_model_projection(tmp_path, monkeypatch):
+    """Test that when embedding fails during add_fact, fact is marked pending_embedding and not fully processed."""
     import companion.config as cfg
     from companion.memory.store import MemoryStore
     from companion.models import Fact
 
     monkeypatch.setattr(cfg, "SQLITE_PATH", str(tmp_path / "world_atomicity.db"))
     store = MemoryStore()
-    store.vector.embeddings_enabled = False
+    # Keep embeddings enabled so our fix triggers
     try:
-        def fail_embedding(*args, **kwargs):
-            raise RuntimeError("forced vector failure")
+        def fail_embed_text_only(*args, **kwargs):
+            return None  # Simulate embedding API failure
 
-        monkeypatch.setattr(store.vector, "compute_and_cache", fail_embedding)
+        monkeypatch.setattr(store.vector, "embed_text_only", fail_embed_text_only)
         fact = Fact(
             id="f-world-rollback",
             fact="У Ивана есть собака Морзик",
@@ -93,12 +94,19 @@ def test_fact_insert_rolls_back_world_model_projection(tmp_path, monkeypatch):
             importance=8,
             confidence=0.9,
             source="test",
+            status="active",
         )
 
-        with pytest.raises(RuntimeError, match="forced vector failure"):
-            store.add_fact(fact)
-
-        assert store.get_fact(fact.id) is None
+        # After BUG-002 fix: embedding failure marks fact as pending_embedding instead of raising
+        result = store.add_fact(fact)
+        
+        # Fact should exist but be in pending_embedding status
+        assert result is not None
+        saved_fact = store.get_fact(fact.id)
+        assert saved_fact is not None
+        assert saved_fact.status == "pending_embedding"
+        
+        # World model projection should not have happened for pending_embedding facts
         with store.db._conn() as conn:
             mentions = conn.execute(
                 "SELECT COUNT(*) FROM entity_mentions WHERE fact_id=?", (fact.id,)

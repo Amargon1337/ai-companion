@@ -256,6 +256,16 @@ async def run() -> None:
         await dp.start_polling(bot, handle_as_tasks=True)
     finally:
         logger.info("Shutting down bot...")
+        
+        # Stop embedding retry worker first
+        from companion.bot_core import embedding_retry_worker
+        if embedding_retry_worker:
+            try:
+                await embedding_retry_worker.stop()
+                logger.info("Embedding Retry Worker stopped. Stats: %s", embedding_retry_worker.get_stats())
+            except Exception as exc:
+                logger.error("Failed to stop embedding retry worker: %s", exc, exc_info=True)
+        
         try:
             memory_store.vector.flush_index()
             memory_store.close()
