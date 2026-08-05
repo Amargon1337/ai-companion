@@ -1,46 +1,28 @@
-# Базовый мусор Python
+```gitignore
+# Python cache files
 __pycache__/
-*.py[cod]
-*$py.class
-venc/
-.venv/
+*.pyc
+*.pyo
+*.pyd
 
-# Окружение и секреты
+# Environment variables
 .env
-api.env
-api.env.txt
-*.env
-cc.bat
+.env.local
+*.env.*
 
-# IDE и тулинг
-.vscode/
-.claude/
-analyze.py
-C:/Games/exocortex_structure.txt
-
-
-# Локальные данные, логи и базы (Твоя память и черновики книги)
+# Logs
+*.log
 bot.log
-data/
-monthbook/
-*.db
-*.sqlite3
-*.index
-*.faiss
 
-# Личные файлы знаний и бэкапы (То, что раскопал аудит)
-ivan.txt
-master_summary.txt.bak
-pinned_facts.json
-fact_usage.json
-audit_results.json
-audit_metrics.json
+# Database and data files
+data/companion.db
+data/faiss_index.bin
+data/logs/
+
+# Test cache
+.tests/__pycache__/
+
+# Backup files
 *.bak
-*.jsonl
-
-# Медиа-ассеты Reaper / Telegram
-*.mp4
-*.webp
-*.ogg
-*.wav
-*.mp3
+master_summary.txt.bak
+```

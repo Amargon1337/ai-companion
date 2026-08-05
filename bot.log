@@ -1,0 +1,16 @@
+2026-08-05 01:22:14,135 [WARNING] companion.main: Suspicious injection pattern detected in world_model.json! Moved to pending_review_contexts and logged.
+2026-08-05 01:22:14,135 [WARNING] companion.main: Suspicious injection pattern detected in world_model.json! Moved to pending_review_contexts and logged.
+2026-08-05 01:22:14,217 [WARNING] companion.memory.store: Attempted to revive non-dormant fact fact_20260805_ef41f075 (status: pending_review)
+2026-08-05 01:22:14,253 [ERROR] companion.llm.client: oneshot call failed (attempt 1/1): 400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': 'API key not valid. Please pass a valid API key.', 'status': 'INVALID_ARGUMENT', 'details': [{'@type': 'type.googleapis.com/google.rpc.ErrorInfo', 'reason': 'API_KEY_INVALID', 'domain': 'googleapis.com', 'metadata': {'service': 'generativelanguage.googleapis.com'}}, {'@type': 'type.googleapis.com/google.rpc.LocalizedMessage', 'locale': 'en-US', 'message': 'API key not valid. Please pass a valid API key.'}]}}
+2026-08-05 01:22:14,316 [WARNING] companion.llm.shadow_eval: ShadowEvaluator rejected identity drift for core_identity. Reason: Too dramatic
+2026-08-05 01:22:14,318 [ERROR] companion.llm.shadow_eval: ShadowEvaluator failed: API Error
+2026-08-05 01:22:15,454 [INFO] audit.user_model: {"timestamp": "2026-08-05T01:22:15.454223", "discoveries": ["ShadowEvaluator blocked fears drift.", "ShadowEvaluator blocked roles drift."], "confirmations": [], "falsifications": [], "belief_changes": [], "pattern_observations": [], "emotional_notes": [], "recurring_themes": []}
+2026-08-05 01:22:15,779 [WARNING] companion.policy_layer: Removed 2 questions to meet constraint
+2026-08-05 01:26:04,056 [WARNING] companion.main: Suspicious injection pattern detected in world_model.json! Moved to pending_review_contexts and logged.
+2026-08-05 01:26:04,056 [WARNING] companion.main: Suspicious injection pattern detected in world_model.json! Moved to pending_review_contexts and logged.
+2026-08-05 01:26:04,096 [WARNING] companion.memory.store: Attempted to revive non-dormant fact fact_20260805_cdf73215 (status: pending_review)
+2026-08-05 01:26:04,114 [ERROR] companion.llm.client: oneshot call failed (attempt 1/1): 400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': 'API key not valid. Please pass a valid API key.', 'status': 'INVALID_ARGUMENT', 'details': [{'@type': 'type.googleapis.com/google.rpc.ErrorInfo', 'reason': 'API_KEY_INVALID', 'domain': 'googleapis.com', 'metadata': {'service': 'generativelanguage.googleapis.com'}}, {'@type': 'type.googleapis.com/google.rpc.LocalizedMessage', 'locale': 'en-US', 'message': 'API key not valid. Please pass a valid API key.'}]}}
+2026-08-05 01:26:04,179 [WARNING] companion.llm.shadow_eval: ShadowEvaluator rejected identity drift for core_identity. Reason: Too dramatic
+2026-08-05 01:26:04,192 [ERROR] companion.llm.shadow_eval: ShadowEvaluator failed: API Error
+2026-08-05 01:26:05,459 [INFO] audit.user_model: {"timestamp": "2026-08-05T01:26:05.459471", "discoveries": ["ShadowEvaluator blocked fears drift.", "ShadowEvaluator blocked roles drift."], "confirmations": [], "falsifications": [], "belief_changes": [], "pattern_observations": [], "emotional_notes": [], "recurring_themes": []}
+2026-08-05 01:26:05,774 [WARNING] companion.policy_layer: Removed 2 questions to meet constraint

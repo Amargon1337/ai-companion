@@ -15,6 +15,7 @@ class FactStatus(str, Enum):
     HumanModel insight freshness (see consolidation._items), not fact status.
     """
     QUARANTINE = "quarantine"
+    PENDING_EMBEDDING = "pending_embedding"
     ACTIVE = "active"
     DORMANT = "dormant"
     PENDING_REVIEW = "pending_review"
@@ -36,14 +37,24 @@ class FactStatus(str, Enum):
 # Authoritative transition matrix
 VALID_TRANSITIONS: dict[FactStatus, set[FactStatus]] = {
     FactStatus.QUARANTINE: {
+        FactStatus.PENDING_EMBEDDING,
         FactStatus.ACTIVE,
         FactStatus.PENDING_REVIEW,
         FactStatus.ARCHIVED,
         FactStatus.PURGED,
     },
+    FactStatus.PENDING_EMBEDDING: {
+        FactStatus.ACTIVE,
+        FactStatus.QUARANTINE,
+        FactStatus.PENDING_REVIEW,
+        FactStatus.ARCHIVED,
+        FactStatus.SUPERSEDED,
+        FactStatus.PURGED,
+    },
     FactStatus.PENDING_REVIEW: {
         FactStatus.ACTIVE,
         FactStatus.QUARANTINE,
+        FactStatus.PENDING_EMBEDDING,
         FactStatus.ARCHIVED,
         FactStatus.PURGED,
     },
