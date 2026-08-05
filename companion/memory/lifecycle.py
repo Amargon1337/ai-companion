@@ -21,6 +21,7 @@ class FactStatus(str, Enum):
     PENDING_REVIEW = "pending_review"
     ARCHIVED = "archived"
     SUPERSEDED = "superseded"
+    CONTRADICTED = "contradicted"
     PURGED = "purged"
 
     @classmethod
@@ -64,12 +65,14 @@ VALID_TRANSITIONS: dict[FactStatus, set[FactStatus]] = {
         FactStatus.DORMANT,
         FactStatus.ARCHIVED,
         FactStatus.SUPERSEDED,
+        FactStatus.CONTRADICTED,
         FactStatus.PURGED,
     },
     FactStatus.DORMANT: {
         FactStatus.ACTIVE,
         FactStatus.ARCHIVED,
         FactStatus.SUPERSEDED,
+        FactStatus.CONTRADICTED,
         FactStatus.PURGED,
     },
     FactStatus.ARCHIVED: {
@@ -78,6 +81,15 @@ VALID_TRANSITIONS: dict[FactStatus, set[FactStatus]] = {
     },
     FactStatus.SUPERSEDED: {
         FactStatus.ACTIVE,
+        FactStatus.PURGED,
+    },
+    # R1 'contradicted' aggregate state. A fact in it is excluded from direct
+    # retrieval but kept (no deletion). It may return to ACTIVE only via a new
+    # confirmation — policy (human review or >=2 independent support_count) is
+    # enforced by the mutator, not this structural matrix.
+    FactStatus.CONTRADICTED: {
+        FactStatus.ACTIVE,
+        FactStatus.ARCHIVED,
         FactStatus.PURGED,
     },
     FactStatus.PURGED: set(),  # Terminal state

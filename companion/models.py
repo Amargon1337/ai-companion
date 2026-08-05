@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 MemoryKind = Literal["permanent", "state", "event"]
-FactStatus = Literal["active", "superseded", "quarantine", "archived", "dormant", "pending_review", "pending_embedding"]
+FactStatus = Literal["active", "superseded", "quarantine", "archived", "dormant", "pending_review", "pending_embedding", "contradicted"]
 RelationType = Literal[
     "supersedes",
     "contradicts",
@@ -55,6 +55,12 @@ class Fact:
     # {"uses": int, "intents": {intent: n}, "reactions": {"pos": n, "neg": n}, "last_used_at": iso}
     meta: dict[str, Any] = field(default_factory=dict)
     entity_ids: list[str] = field(default_factory=list)
+    # R1 cognitive kernel: epistemic typing + certainty counters.
+    # DIRECT_FACT = observed/user-stated; HYPOTHESIS/LLM_INFERENCE = model output;
+    # PREDICTION = forward-looking. support/contradiction accumulate via relations.
+    epistemic_class: str = "DIRECT_FACT"
+    support_count: int = 0
+    contradiction_count: int = 0
 
     def __post_init__(self) -> None:
         if not self.id:

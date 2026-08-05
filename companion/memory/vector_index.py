@@ -302,9 +302,11 @@ class VectorIndex:
                 temp_path = self.index_path + ".tmp"
                 try:
                     faiss.write_index(self.index, temp_path)
-                    # Ensure data is flushed to disk
-                    with open(temp_path, "rb") as f:
-                        import os
+                    # Flush to disk. fsync of an O_RDONLY handle is not supported on
+                    # Windows (Errno 9), so open for reading+writing. On POSIX the
+                    # distinction is a no-op; the atomic rename below is unchanged.
+                    import os
+                    with open(temp_path, "r+b") as f:
                         os.fsync(f.fileno())
                     # Atomic rename (atomic on POSIX systems)
                     os.replace(temp_path, self.index_path)

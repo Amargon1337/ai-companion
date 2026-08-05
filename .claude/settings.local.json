@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir /b companion\\\\handlers)",
+      "Bash(dir /b companion)",
+      "Bash(findstr /i handler)",
+      "Bash(grep -E '\\\\.py$')",
+      "Bash(python -m pytest --collect-only -q)",
+      "Bash(awk '{print $3}')",
+      "Bash(python -m pytest -q -x --timeout=120)",
+      "Bash(python *)",
+      "Bash(export API_TOKEN=t:t GOOGLE_API_KEY=k ADMIN_IDS=1)",
+      "Bash(export PYTHONIOENCODING=utf-8 API_TOKEN=t:t GOOGLE_API_KEY=k ADMIN_IDS=1)"
+    ]
+  }
+}

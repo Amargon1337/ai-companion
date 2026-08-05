@@ -705,18 +705,170 @@ class MemoryDatabase:
         logger.error("Facts schema migration failed: %s", e, exc_info=True)
 
       self._migrate_jsonl_files(conn)
+      self._migrate_cognitive_schema(conn)
 
-      # Schema version marker. Set only when the target schema is actually in
-      # place — a legacy DB whose ALTERs failed stays at 0 as a signal.
-      if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(facts)").fetchall()}
-        required = {"version", "superseded_by", "domain", "meta", "last_accessed"}
-        if required.issubset(cols):
-          conn.execute("PRAGMA user_version = 1")
-        else:
-          logger.error(
-            "Schema incomplete, user_version left at 0. Missing: %s", sorted(required - cols)
-          )
+      # Schema version marker. v2 = cognitive epistemic columns present. Set only
+      # when the required facts columns are in place — a legacy DB whose ALTERs
+      # failed stays at its prior version as a signal rather than silently ok.
+      cols = {r[1] for r in conn.execute("PRAGMA table_info(facts)").fetchall()}
+      required = {"version", "superseded_by", "domain", "meta", "last_accessed"}
+      if required.issubset(cols):
+        current_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        cognitive_ok = {"epistemic_class", "support_count", "contradiction_count"}.issubset(cols)
+        target = 2 if cognitive_ok else 1
+        if current_version < target:
+          conn.execute(f"PRAGMA user_version = {target}")
+      else:
+        logger.error(
+          "Schema incomplete, user_version left unchanged. Missing: %s", sorted(required - cols)
+        )
+
+
+  def _migrate_cognitive_schema(self, conn: sqlite3.Connection) -> None:
+    """R1 (schema-only): epistemic typing columns + cognitive kernel tables.
+
+    Every statement is idempotent (IF NOT EXISTS / guarded ALTERs) so rerunning
+    `_init_schema` on a live database is a no-op. No logic changes ship in this
+    migration — behavior lands in later roadmap steps. Cognitive function of each
+    table is recorded in graphify-out/OMNI_COGNITIVE_BLUEPRINT.md (Phase 3).
+    """
+    # -- facts: epistemic typing + support/contradiction counters (kernel K2) --
+    try:
+      cols = {r[1] for r in conn.execute("PRAGMA table_info(facts)").fetchall()}
+      fact_alters: dict[str, str] = {
+        "epistemic_class": (
+          "ALTER TABLE facts ADD COLUMN epistemic_class TEXT NOT NULL DEFAULT 'DIRECT_FACT' "
+          "CHECK (epistemic_class IN ('DIRECT_FACT','HYPOTHESIS','LLM_INFERENCE','PREDICTION'))"
+        ),
+        "support_count": "ALTER TABLE facts ADD COLUMN support_count INTEGER NOT NULL DEFAULT 0 CHECK (support_count >= 0)",
+        "contradiction_count": "ALTER TABLE facts ADD COLUMN contradiction_count INTEGER NOT NULL DEFAULT 0 CHECK (contradiction_count >= 0)",
+      }
+      for col, ddl in fact_alters.items():
+        if col not in cols:
+          conn.execute(ddl)
+    except sqlite3.OperationalError as e:
+      logger.error("Cognitive schema: facts alter failed: %s", e, exc_info=True)
+
+    # -- causal_links: provenance columns (kernel K3) --
+    try:
+      cl_cols = {r[1] for r in conn.execute("PRAGMA table_info(causal_links)").fetchall()}
+      if "derived_from" not in cl_cols:
+        conn.execute("ALTER TABLE causal_links ADD COLUMN derived_from TEXT NOT NULL DEFAULT '[]'")
+      if "method" not in cl_cols:
+        conn.execute("ALTER TABLE causal_links ADD COLUMN method TEXT NOT NULL DEFAULT 'llm' CHECK (method IN ('llm','rule','human','compression'))")
+    except sqlite3.OperationalError as e:
+      logger.error("Cognitive schema: causal_links alter failed: %s", e, exc_info=True)
+
+    # -- K4 memory_genome: long-run selection pressure on memories --
+    conn.execute(
+      """
+      CREATE TABLE IF NOT EXISTS memory_genome (
+        memory_id        TEXT PRIMARY KEY REFERENCES facts(id) ON UPDATE CASCADE,
+        origin           TEXT NOT NULL DEFAULT 'unknown',
+        generation       INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+        parent_memory_id TEXT REFERENCES facts(id),
+        mutation_history TEXT NOT NULL DEFAULT '[]',
+        adaptation_log   TEXT NOT NULL DEFAULT '[]',
+        survival_score   REAL NOT NULL DEFAULT 0.5 CHECK (survival_score BETWEEN 0.0 AND 1.0),
+        born_at          TEXT NOT NULL DEFAULT '',
+        last_evaluated_at TEXT
+      );
+      """
+    )
+    # -- K5 cognitive_working_memory: bounded, TTL-expiring live context --
+    conn.execute(
+      """
+      CREATE TABLE IF NOT EXISTS cognitive_working_memory (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id    INTEGER NOT NULL,
+        slot_type  TEXT NOT NULL CHECK (slot_type IN
+                   ('current_goal','active_identity','open_question','salient_fact','affective_state')),
+        ref_kind   TEXT CHECK (ref_kind IN ('fact','goal','entity','none')),
+        ref_id     TEXT,
+        payload    TEXT NOT NULL DEFAULT '',
+        salience   REAL NOT NULL DEFAULT 0.5 CHECK (salience BETWEEN 0.0 AND 1.0),
+        entered_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+      """
+    )
+    conn.execute(
+      "CREATE INDEX IF NOT EXISTS idx_cwm_user_live ON cognitive_working_memory (user_id, expires_at);"
+    )
+    # -- Theory of Mind (derived): layered social cognition; never DIRECT_FACT --
+    conn.execute(
+      """
+      CREATE TABLE IF NOT EXISTS theory_of_mind (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        subject_entity_id TEXT NOT NULL REFERENCES entities(entity_id) ON UPDATE CASCADE,
+        level       INTEGER NOT NULL CHECK (level IN (1,2,3)),
+        claim       TEXT NOT NULL,
+        epistemic_class TEXT NOT NULL DEFAULT 'LLM_INFERENCE'
+                  CHECK (epistemic_class IN ('HYPOTHESIS','LLM_INFERENCE','PREDICTION')),
+        confidence  REAL NOT NULL CHECK (confidence BETWEEN 0.0 AND 1.0),
+        basis_ids   TEXT NOT NULL DEFAULT '[]',
+        status      TEXT NOT NULL DEFAULT 'active'
+                CHECK (status IN ('active','superseded','archived','refuted')),
+        created_at  TEXT NOT NULL,
+        superseded_by INTEGER REFERENCES theory_of_mind(id)
+      );
+      """
+    )
+    conn.execute(
+      "CREATE INDEX IF NOT EXISTS idx_tom_subject ON theory_of_mind (subject_entity_id, level, status);"
+    )
+    # -- Council votes (derived): auditable multi-role evaluation of high-stakes mutations --
+    conn.execute(
+      """
+      CREATE TABLE IF NOT EXISTS council_votes (
+        vote_id      TEXT PRIMARY KEY,
+        subject_kind TEXT NOT NULL CHECK (subject_kind IN ('fact','pattern','identity','belief','transition')),
+        subject_id   TEXT NOT NULL,
+        role         TEXT NOT NULL CHECK (role IN ('explorer','critic','historian','predictor','guardian')),
+        verdict      TEXT NOT NULL CHECK (verdict IN ('accept','reject','abstain','quarantine')),
+        rationale    TEXT NOT NULL DEFAULT '',
+        created_at   TEXT NOT NULL
+      );
+      """
+    )
+    conn.execute(
+      "CREATE INDEX IF NOT EXISTS idx_council_subject ON council_votes (subject_kind, subject_id);"
+    )
+    # -- Cognitive timeline (derived): reconstruct a turn's phase sequence --
+    conn.execute(
+      """
+      CREATE TABLE IF NOT EXISTS cognitive_timeline (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        turn_id   TEXT NOT NULL,
+        user_id   INTEGER NOT NULL,
+        phase     TEXT NOT NULL CHECK (phase IN
+                  ('perception','interpretation','reflection','decision','memory_update','action')),
+        payload_hash TEXT NOT NULL DEFAULT '',
+        payload   TEXT NOT NULL DEFAULT '',
+        latency_ms REAL,
+        created_at TEXT NOT NULL,
+        archived  INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0,1))
+      );
+      """
+    )
+    conn.execute(
+      "CREATE INDEX IF NOT EXISTS idx_ctimeline_turn ON cognitive_timeline (turn_id, id);"
+    )
+    # -- K8 homeostasis_metrics: drift time series for the meta-auditor --
+    conn.execute(
+      """
+      CREATE TABLE IF NOT EXISTS homeostasis_metrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        measured_at TEXT NOT NULL,
+        contradiction_density REAL NOT NULL,
+        stale_ratio REAL NOT NULL,
+        null_embedding_ratio REAL NOT NULL,
+        confidence_inflation REAL NOT NULL,
+        quarantine_ratio REAL NOT NULL,
+        entropy_score REAL NOT NULL
+      );
+      """
+    )
 
 
   def _migrate_jsonl_files(self, conn: sqlite3.Connection) -> None:
@@ -769,17 +921,23 @@ class MemoryDatabase:
     )
 
   def _upsert_causal_link_conn(self, conn: sqlite3.Connection, row: dict[str, Any]) -> None:
+    # R2: name columns explicitly — the table gained provenance columns
+    # (derived_from, method) in the cognitive schema, so positional VALUES would
+    # silently corrupt or reject rows whenever they are populated.
     conn.execute(
       """
-      INSERT INTO causal_links VALUES (?,?,?,?,?,?,?,?)
+      INSERT INTO causal_links
+        (link_id, cause, effect, confidence, evidence, mechanism, observed_count, created_at, derived_from, method)
+      VALUES (?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(link_id) DO UPDATE SET
         cause=excluded.cause, effect=excluded.effect, confidence=excluded.confidence,
         evidence=excluded.evidence, mechanism=excluded.mechanism,
-        observed_count=excluded.observed_count
+        observed_count=excluded.observed_count, derived_from=excluded.derived_from, method=excluded.method
       """,
       (
         row["link_id"], row["cause"], row["effect"], row.get("confidence", 0.5),
         _json(row.get("evidence", [])), row.get("mechanism", ""), row.get("observed_count", 1), row.get("created_at"),
+        _json(row.get("derived_from", [])), row.get("method", "llm"),
       ),
     )
 
@@ -1146,6 +1304,7 @@ class MemoryDatabase:
   def _row_causal_link(self, row: sqlite3.Row) -> dict[str, Any]:
     d = dict(row)
     d["evidence"] = _loads(d.get("evidence"))
+    d["derived_from"] = _loads(d.get("derived_from"))
     return d
 
   def _row_prediction(self, row: sqlite3.Row) -> dict[str, Any]:
@@ -1153,6 +1312,59 @@ class MemoryDatabase:
     for key in ("conditions", "based_on"):
       d[key] = _loads(d.get(key))
     return d
+
+  # --- Memory Genome (K4) -------------------------------------------------
+
+  def upsert_memory_genome(self, row: dict[str, Any]) -> None:
+    with self._conn() as conn:
+      conn.execute(
+        """
+        INSERT INTO memory_genome
+          (memory_id, origin, generation, parent_memory_id, mutation_history,
+           adaptation_log, survival_score, born_at, last_evaluated_at)
+        VALUES (?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(memory_id) DO UPDATE SET
+          generation=excluded.generation,
+          parent_memory_id=COALESCE(memory_genome.parent_memory_id, excluded.parent_memory_id),
+          mutation_history=excluded.mutation_history,
+          survival_score=excluded.survival_score,
+          last_evaluated_at=excluded.last_evaluated_at
+        """,
+        (
+          row["memory_id"], row["origin"], row.get("generation", 0),
+          row.get("parent_memory_id"), _json(row.get("mutation_history", [])),
+          _json(row.get("adaptation_log", [])), float(row.get("survival_score", 0.5)),
+          row.get("born_at", ""), row.get("last_evaluated_at"),
+        ),
+      )
+
+  def get_memory_genome(self, memory_id: str) -> dict[str, Any] | None:
+    with self._conn() as conn:
+      row = conn.execute("SELECT * FROM memory_genome WHERE memory_id=?", (memory_id,)).fetchone()
+      if not row:
+        return None
+      d = dict(row)
+      d["mutation_history"] = _loads(d.get("mutation_history"))
+      d["adaptation_log"] = _loads(d.get("adaptation_log"))
+      return d
+
+  def count_memory_genome(self) -> int:
+    with self._conn() as conn:
+      return conn.execute("SELECT COUNT(*) FROM memory_genome").fetchone()[0]
+
+  def facts_missing_genome(self, limit: int = 500) -> list[str]:
+    """Backfill hook: active/dormant facts lacking a genome row (1:1 invariant)."""
+    with self._conn() as conn:
+      rows = conn.execute(
+        """
+        SELECT f.id FROM facts f
+        LEFT JOIN memory_genome g ON g.memory_id = f.id
+        WHERE g.memory_id IS NULL AND f.status IN ('active','dormant')
+        LIMIT ?
+        """,
+        (limit,),
+      ).fetchall()
+      return [r[0] for r in rows]
 
 
 
@@ -1218,6 +1430,7 @@ class MemoryDatabase:
       "valid_from", "valid_until", "evidence", "version", "superseded_by",
       "memory_kind", "source", "source_type", "anchor_flag", "manual_lock",
       "domain", "meta", "archived", "facts_sent_count", "facts_used_count",
+      "epistemic_class", "support_count", "contradiction_count",
     }
     sets = {k: v for k, v in fields.items() if k in allowed}
     if not sets:
@@ -1377,6 +1590,11 @@ class MemoryDatabase:
 
   def delete_fact(self, fact_id: str) -> bool:
     with self._conn() as conn:
+      # Delete the genome row first: it FK-references facts(id), and a hard
+      # delete of the fact would otherwise violate the FK. Genome is 1:1 with
+      # the fact, so removing it here is the delete-path equivalent of the
+      # relation cleanup below.
+      conn.execute("DELETE FROM memory_genome WHERE memory_id=?", (fact_id,))
       cur = conn.execute("DELETE FROM facts WHERE id=?", (fact_id,))
       conn.execute("DELETE FROM fact_relations WHERE from_id=? OR to_id=?", (fact_id, fact_id))
       return cur.rowcount > 0

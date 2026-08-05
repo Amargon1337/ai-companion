@@ -407,3 +407,65 @@ def decay_fact_confidence(store: Any, *, half_life_days: int = 365, minimum: flo
             changed += 1
     store.db.save_state_model("memory_confidence_decay", {"date": today, "changed": changed})
     return changed
+
+
+# ── R2 — Epistemic auditor (kernel K8 precursor) ───────────────────────────
+
+def audit_provenance_cycles(store) -> list[list[str]]:
+    """Detect circular derivation in the fact-relation graph.
+
+    Cognitive function (K3): a provenance chain must be acyclic. A cycle means
+    A justified B and B now justifies A — circular reasoning that survives
+    compression would be undetectable by confidence scores alone. Returns the
+    list of cycles found (each a list of fact ids); callers quarantine the
+    members, not delete them (Iron Law #5).
+    """
+    edges: dict[str, set[str]] = {}
+    for f in store.list_all_facts():
+        for rel in store.db.get_fact_relations(f.id):
+            if rel.get("relation") in ("supersedes", "supports", "summarizes") and rel.get("from_id"):
+                edges.setdefault(rel["from_id"], set()).add(rel["to_id"])
+
+    cycles: list[list[str]] = []
+    visited: set[str] = set()
+    stack: list[str] = []
+    on_stack: set[str] = set()
+
+    def dfs(node: str) -> None:
+        visited.add(node)
+        on_stack.add(node)
+        stack.append(node)
+        for nbr in edges.get(node, ()):
+            if nbr not in visited:
+                dfs(nbr)
+            elif nbr in on_stack:
+                i = stack.index(nbr)
+                cycles.append(stack[i:] + [nbr])
+        stack.pop()
+        on_stack.discard(node)
+
+    for start in list(edges):
+        if start not in visited:
+            dfs(start)
+    return cycles
+
+
+def reconcile_genome_parity(store) -> dict[str, int]:
+    """Backfill genome rows for facts created before R2.
+
+    Cognitive function (K4): the 1:1 fact<->genome invariant is the substrate
+    for survival scoring and compression lineage. Idempotent — safe to run
+    nightly and on startup after migrations.
+    """
+    missing = store.db.facts_missing_genome(limit=1000)
+    for fid in missing:
+        row = store.db.get_fact(fid)
+        if not row:
+            continue
+        store.db.upsert_memory_genome({
+            "memory_id": fid,
+            "origin": str(row.get("source") or "unknown"),
+            "born_at": str(row.get("created_at") or ""),
+        })
+    return {"backfilled": len(missing)}
+

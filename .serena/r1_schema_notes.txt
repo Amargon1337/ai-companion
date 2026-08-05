@@ -1,0 +1,62 @@
+R1 COGNITIVE SCHEMA INCREMENT — build notes (2026-08-05)
+==========================================================
+
+SCOPE
+R1 = schema-only. Per the blueprint mandate ("never overlap a data migration
+with a logic change"), this step ships DDL + one lifecycle vertex. No behavior
+logic changes. Logic lands in R2+.
+
+CHANGES (4 files)
+1. companion/storage/sqlite_db.py
+   - New `_migrate_cognitive_schema(conn)` called from `_init_schema` after
+     `_migrate_jsonl_files`.
+   - fact columns: epistemic_class (DIRECT_FACT|HYPOTHESIS|LLM_INFERENCE|PREDICTION),
+     support_count, contradiction_count.
+   - causal_links columns: derived_from (JSON), method (llm|rule|human|compression).
+   - New tables: memory_genome, cognitive_working_memory, theory_of_mind,
+     council_votes, cognitive_timeline, homeostasis_metrics.
+   - user_version: now set to 2 when cognitive columns landed; existing v1 DBs
+     upgrade. Fixed a defect in my own first draft (PRAGMA via parameterized
+     execute was a no-op).
+2. companion/memory/lifecycle.py
+   - Added FactStatus.CONTRADICTED; ACTIVE/DORMANT -> CONTRADICTED;
+     CONTRADICTED -> ACTIVE | ARCHIVED | PURGED.
+   - NOTE: HEAD already had PENDING_EMBEDDING (user's feature); preserved it.
+3. companion/models.py
+   - FactStatus Literal includes 'contradicted' (keeps model <=> machine sync;
+     fixes test_lifecycle_vocabulary_matches_models).
+4. Unplanned but blocking: companion/memory/vector_index.py
+   - fsync on O_RDONLY temp handle is invalid on Windows (Errno 9). Changed to
+     os.open(path, "r+b") before fsync. Without it the ENTIRE test suite crashed
+     at teardown on this box.
+
+VERIFICATION
+- Direct migration check (verify_r1.py): all 6 cognitive tables present,
+  epistemic + causal provenance columns present, user_version==2, idempotent
+  re-init, lifecycle transitions valid.
+- Full suite (post-change): 322 passed / 4 failed.
+
+REMAINING 4 FAILURES — all pre-existing / expected, NONE introduced by R1.
+  test_advanced_bugs.py::TestFAISSMemoryLeak...test_deleted_ids_cleared_after_rebuild
+      -> mock injects ONE constant embedding for all facts; content-hash dedup
+         collapses them to a single FAISS entry. Structurally degenerate test.
+  test_confirmed_bugs.py::TestBug3ActiveFactsWithoutEmbeddings...not_searchable
+  test_crash_consistency.py::TestEmbeddingLifecycle...never_searchable
+      -> assert fact lands 'active' even when embedding is mocked to fail.
+         Contradicts the user's intended pending_embedding behavior.
+  test_crash_consistency.py::TestConcurrentAccess...concurrent_add_fact_race_condition
+      -> asserts two same-text facts dedup to one id; they land as two
+         'pending_embedding' rows, and that status is not dedup-eligible.
+         Fails on the clean committed baseline too.
+
+BASELINE ATTRIBUTION (important — do not claim we broke this)
+- The committed HEAD (fc2c0af/90d7a3e) runs BROKE before my changes:
+    * os.fsync crash blocks the whole suite on Windows (63 errors), and
+    * that subset alone shows 16 failing tests on clean HEAD.
+- This run fixed the blocker; net vs a runnable baseline, we went
+  up to 322 passed with the 4 remaining being pre-existing test artifacts.
+
+NEXT (R2+): counts/provenance hooks in add_relation; genome writers;
+working-memory slot sweep; homeostasis entropy trigger; council persistence.
+
+No git commit performed (per project rule).

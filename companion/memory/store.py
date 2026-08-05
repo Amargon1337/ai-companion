@@ -272,6 +272,17 @@ class MemoryStore:
                     # This should not happen for active/dormant facts after the fix above
                     logger.warning("add_fact: attempting to compute embedding inside transaction for fact %s", fact.id)
                     self.vector.compute_and_cache(fact.fact, content_type="fact", fact_id=fact.id)
+            # K4 genome parity: every fact has exactly one genome row (1:1 invariant).
+            # origin = what brought it into the world; generation increments on
+            # compression. Used by survival scoring + the 10y failure analysis.
+            try:
+                self.db.upsert_memory_genome({
+                    "memory_id": fact.id,
+                    "origin": str(fact.source or "unknown"),
+                    "born_at": fact.created_at,
+                })
+            except Exception as exc:
+                logger.debug("genome insert for %s failed (non-fatal): %s", fact.id, exc)
 
         if self.event_bus:
             from companion.memory.events.base import FactCreatedEvent
@@ -556,6 +567,34 @@ class MemoryStore:
 
         with self.db.atomic_memory_transaction():
             self.db._insert_relation(d)
+            # Epistemic certainty counters (K2). A relation is evidence: a
+            # "confirms" edge raises the TARGET's support; a "contradicts" edge
+            # raises the TARGET's contradiction count and may flip it to
+            # 'contradicted' (kept, not deleted) once contradictions dominate.
+            if rel.relation == "confirms":
+                self.db.update_fact_fields(
+                    rel.to_id,
+                    {"support_count": (to_fact.support_count or 0) + 1},
+                )
+                self.db.log_mutation(
+                    entity_id=rel.to_id,
+                    action="confirm",
+                    reason=rel.reason or "relation_confirms",
+                    state_before={"support_count": to_fact.support_count},
+                    state_after={"support_count": (to_fact.support_count or 0) + 1},
+                    initiator="store.add_relation",
+                )
+            elif rel.relation == "contradicts":
+                # Count the contradiction as epistemic evidence. The existing
+                # supersede branch below (protected vs. non-protected resolution)
+                # then handles the lifecycle transition — `contradicted` here is a
+                # tally, NOT a separate status flip, since resolution already
+                # settles the older fact to `superseded`.
+                new_contra = (to_fact.contradiction_count or 0) + 1
+                self.db.update_fact_fields(
+                    rel.to_id,
+                    {"contradiction_count": new_contra},
+                )
             if rel.relation == "supersedes":
                 target = to_fact  # rel.to_id, already fetched above
                 self.db.update_fact_status(rel.to_id, "superseded")
