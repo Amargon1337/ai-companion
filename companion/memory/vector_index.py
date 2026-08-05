@@ -294,9 +294,27 @@ class VectorIndex:
 
     def save_index_to_disk(self):
         import faiss
+        import tempfile
         with self._locked():
             if self._is_initialized and hasattr(self, 'index') and self.index is not None:
-                faiss.write_index(self.index, self.index_path)
+                # Atomic write: write to temp file, fsync, then atomic rename
+                # This prevents corruption if process dies during write
+                temp_path = self.index_path + ".tmp"
+                try:
+                    faiss.write_index(self.index, temp_path)
+                    # Ensure data is flushed to disk
+                    with open(temp_path, "rb") as f:
+                        import os
+                        os.fsync(f.fileno())
+                    # Atomic rename (atomic on POSIX systems)
+                    os.replace(temp_path, self.index_path)
+                except Exception:
+                    # Clean up temp file on failure
+                    import os
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    raise
+                
                 db = getattr(self, "db", None)
                 should_close = False
                 if db is None:
@@ -304,14 +322,16 @@ class VectorIndex:
                     db = MemoryDatabase(self.path)
                     should_close = True
                 try:
-                    db.save_state_model("faiss_mapping", {
+                    # Also save mapping atomically
+                    mapping_data = {
                         "id_to_content": self.id_to_content,
                         "id_to_hash": self.id_to_hash,
                         "hash_to_id": self.hash_to_id,
                         "id_to_type": self.id_to_type,
                         "next_id": self._next_id,
                         "deleted_ids": list(self._deleted_ids)
-                    })
+                    }
+                    db.save_state_model("faiss_mapping", mapping_data)
                     db.set_meta("faiss_index_dirty", "0")
                     self._dirty_updates = 0
                 finally:

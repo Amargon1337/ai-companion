@@ -159,7 +159,7 @@ class MemoryDatabase:
           source TEXT,
           source_type TEXT,
           tags TEXT DEFAULT '[]',
-          status TEXT DEFAULT 'active',
+          status TEXT DEFAULT 'active' CHECK(status IN ('quarantine', 'pending_embedding', 'active', 'dormant', 'pending_review', 'archived', 'superseded', 'purged')),
           valid_from TEXT,
           valid_until TEXT,
           schema_version INTEGER DEFAULT 1,

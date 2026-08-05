@@ -43,6 +43,7 @@ class MemoryEventBus:
 
         self._queue: queue.Queue[object] | None = None
         self._worker: threading.Thread | None = None
+        self._accepting_events = True  # BUG-102 FIX: Track if we accept new events during shutdown
         if self._async:
             self._queue = queue.Queue()
             self._worker = threading.Thread(
@@ -106,10 +107,17 @@ class MemoryEventBus:
                 )
 
     def publish(self, event: MemoryEvent) -> None:
-        """Publish an event to all matching subscribers and wildcard subscribers."""
+        """Publish an event to all matching subscribers and wildcard subscribers.
+        
+        BUG-102 FIX: Reject events during shutdown to prevent race conditions.
+        """
         logger.debug("Publishing memory event: %s", event)
         if self._async:
             assert self._queue is not None
+            # BUG-102 FIX: Don't accept new events during shutdown
+            if not self._accepting_events:
+                logger.warning("EventBus shutting down, rejecting event: %s", event)
+                return
             self._queue.put(event)
             return
         self._dispatch(event)
@@ -140,8 +148,29 @@ class MemoryEventBus:
                 pass
 
     def shutdown(self) -> None:
-        """Stop the worker thread gracefully (async mode only)."""
+        """Stop the worker thread gracefully (async mode only).
+        
+        BUG-102 FIX: Set accepting_events=False before draining to prevent race conditions.
+        """
         if self._worker is not None and self._queue is not None:
+            # BUG-102 FIX: Stop accepting new events FIRST
+            self._accepting_events = False
+            logger.info("EventBus shutdown: stopping event acceptance, draining %d pending events", self._queue.qsize())
+            
+            # Process all remaining events before sending shutdown signal
+            while not self._queue.empty():
+                try:
+                    event = self._queue.get_nowait()
+                    if event is self._SHUTDOWN:
+                        return
+                    try:
+                        self._dispatch(event)
+                    finally:
+                        self._queue.task_done()
+                except queue.Empty:
+                    break
+            
+            # Now send shutdown sentinel
             self._queue.put(self._SHUTDOWN)
             self._worker.join(timeout=2.0)
             self._worker = None
