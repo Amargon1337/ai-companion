@@ -38,9 +38,8 @@ class MemoryStore:
         self.vector = VectorIndex(db=self.db)
         # Async bus: handlers (IndexSyncService) may hit the embedding network;
         # decouple them from the mutating call path so a slow API stalls a
-        # background worker rather than the conversation. journal_db makes
-        # publish durable BEFORE side effects (crash-consistency bridge).
-        self.event_bus = MemoryEventBus(async_mode=True, journal_db=self.db)
+        # background worker rather than the conversation.
+        self.event_bus = MemoryEventBus(async_mode=True)
         self.index_sync = IndexSyncService(self.event_bus, self.vector, self.db)
         self.semantic_ranker = SemanticImportanceRanker(self.db)
         self.identity = IdentityVault(self.db.path, db=self.db)
@@ -56,38 +55,8 @@ class MemoryStore:
         self._reasoning_engine = ReasoningEngineService(db=self.db, store=self)
         from companion.learning_engine import LearningEngineService
         self._learning_engine = LearningEngineService(db=self.db, store=self)
-        from companion.memory.working_memory import WorkingMemoryService
-        self._working_memory = WorkingMemoryService(self.db)
-        from companion.memory.council import CouncilService
-        self._council = CouncilService(self.db)
-        from companion.memory.tom import TheoryOfMindEngine
-        self._tom = TheoryOfMindEngine(self.db, store=self)
-        from companion.memory.narrative import NarrativeEngine
-        self._narrative = NarrativeEngine(self.db, store=self)
-        from companion.memory.timeline import CognitiveTimeline
-        self._timeline = CognitiveTimeline(self.db)
         import threading
         self._cache_lock = threading.Lock()
-
-    @property
-    def working_memory(self) -> Any:
-        return self._working_memory
-
-    @property
-    def council(self) -> Any:
-        return self._council
-
-    @property
-    def tom(self) -> Any:
-        return self._tom
-
-    @property
-    def narrative(self) -> Any:
-        return self._narrative
-
-    @property
-    def timeline(self) -> Any:
-        return self._timeline
 
     def close(self) -> None:
         """Graceful shutdown: drain the async event bus, then close the DB.
@@ -124,21 +93,36 @@ class MemoryStore:
 
     @property
     def lock(self) -> asyncio.Lock:
-        """Lock for critical sections reading and mutating state.
-        
-        Contract:
-        - Ownership: The lock protects read-modify-write operations on shared files 
-          (e.g., personality.json) and multi-step dependent DB transactions.
-        - Acquisition: The CALLER (e.g., pipeline, background task) MUST acquire this 
-          lock BEFORE invoking methods that perform read-modify-write cycles. 
-          MemoryStore does NOT acquire this lock internally to avoid deadlocks.
-        - Blocking I/O: Do NOT hold this lock during long blocking I/O (like LLM calls). 
-          Synchronous file I/O inside the lock should be delegated to threads.
+        """Asyncio lock for critical sections that stay within the event loop.
+
+        For cross-thread protection (when using asyncio.to_thread), use
+        sync_lock instead. asyncio.Lock does NOT protect against concurrent
+        mutations from different OS threads spawned by to_thread().
         """
         import asyncio
         if not hasattr(self, "_lock"):
             self._lock = asyncio.Lock()
         return self._lock
+
+    @property
+    def sync_lock(self) -> Any:
+        """Threading lock for critical sections that run inside asyncio.to_thread().
+
+        Use this when the read-modify-write cycle executes in a worker thread:
+            def _critical(store, ...):
+                with store.sync_lock:
+                    data = store.load_personality()
+                    data.update(...)
+                    store.save_personality(data)
+            await asyncio.to_thread(_critical, store, ...)
+
+        This prevents lost-update race conditions between concurrent to_thread()
+        calls — asyncio.Lock alone cannot serialize threads.
+        """
+        import threading
+        if not hasattr(self, "_sync_lock"):
+            self._sync_lock = threading.Lock()
+        return self._sync_lock
 
     def _assert_locked(self) -> None:
         """Debug assertion to ensure the lock was acquired by the caller."""
@@ -245,8 +229,6 @@ class MemoryStore:
         mode: str = "default",
         signals: list[str] | None = None,
         user_id: int | None = None,
-        msg_id: str = "",
-        ts: str = "",
     ) -> MessageRecord:
         from companion.security.sanitizer import sanitize_markup
         sanitized_text = sanitize_markup(text) or ""
@@ -257,8 +239,6 @@ class MemoryStore:
             mode=mode,
             signals=signals or [],
             user_id=user_id,
-            id=msg_id,
-            ts=ts,
         )
         d = msg.to_dict()
         self.db._insert_message(d)
@@ -273,23 +253,20 @@ class MemoryStore:
     # ── Facts ─────────────────────────────────────────────────────────
 
     def add_fact(self, fact: Fact) -> Fact:
+        """Insert a fact into memory with embedding, world model, and genome.
+
+        Architecture (P0-6 fix):
+          Phase 1 — prepare: dedup, governor check, compute embedding (may call API)
+          Phase 2 — transaction: SQLite insert + world model + genome
+          Phase 3 — post-commit: FAISS upsert + event publish
+
+        No external API calls happen inside the SQLite transaction.
+        """
         # Dedup gate: block duplicates against already active/dormant facts.
         existing = self.find_similar_fact_any_status(fact.fact)
         if existing is not None:
             logger.debug("Dedup: skipping fact similar to %s", existing.id)
             return existing
-
-        # Admission gate: injection-marked content never enters ACTIVE memory.
-        # Previously this check existed only in the compress pipeline and
-        # add_belief — add_fact itself trusted the caller, so the Legacy
-        # Import Pipeline (and any future direct caller) would have let a
-        # prompt-injection become a live fact. pending_review keeps it (Iron
-        # Law #5) but hides it from retrieval until reviewed.
-        if fact.status == "active":
-            from companion.security.sanitizer import _looks_like_injection
-            if _looks_like_injection(fact.fact):
-                fact.status = "pending_review"
-                logger.warning("admission_gate: Fact %s demoted to pending_review (injection markers)", fact.id)
 
         if fact.status == "active" and hasattr(self, "governor") and self.governor:
             decision = self.governor.validate_ingestion(fact)
@@ -299,29 +276,36 @@ class MemoryStore:
 
         d = fact.to_dict()
         vec = None
-        # Generate embedding BEFORE transaction to avoid holding DB lock during API call
+
+        # ── Phase 1: Compute embedding BEFORE transaction ──────────────
+        # Never call embedding API while holding SQLite write lock.
         if fact.status in ("active", "dormant"):
             vec = self.vector.embed_text_only(fact.fact)
-            # BUG-002 FIX: If embedding fails, mark as pending_embedding instead of creating broken active fact
             if vec is None and fact.status == "active":
+                # Embedding API failed → pending_embedding, not broken active fact
                 fact.status = "pending_embedding"
-                d["status"] = "pending_embedding"  # Update dict that will be inserted
-                logger.warning("add_fact: embedding failed for fact %s, marking as pending_embedding", fact.id)
+                d["status"] = "pending_embedding"
+                logger.warning(
+                    "add_fact: embedding failed for fact %s, marking as pending_embedding",
+                    fact.id,
+                )
 
+        # ── Phase 2: SQLite transaction (no API calls inside) ──────────
         with self.db.atomic_memory_transaction():
             self.db._insert_fact(d)
+
+            # World model entity extraction — isolated so failure here
+            # does NOT rollback the fact insert (P0-7 fix).
             if hasattr(self, "world_model") and self.world_model and fact.status in ("active", "dormant"):
-                self.world_model.process_fact(fact, index_entities=False)
-            if fact.status in ("active", "dormant"):
-                if vec is not None:
-                    self.vector.upsert_embedding(fact.fact, vec, content_type="fact", fact_id=fact.id)
-                else:
-                    # This should not happen for active/dormant facts after the fix above
-                    logger.warning("add_fact: attempting to compute embedding inside transaction for fact %s", fact.id)
-                    self.vector.compute_and_cache(fact.fact, content_type="fact", fact_id=fact.id)
-            # K4 genome parity: every fact has exactly one genome row (1:1 invariant).
-            # origin = what brought it into the world; generation increments on
-            # compression. Used by survival scoring + the 10y failure analysis.
+                try:
+                    self.world_model.process_fact(fact, index_entities=False)
+                except Exception as exc:
+                    logger.warning(
+                        "world_model.process_fact() failed for fact %s (fact still saved): %s",
+                        fact.id, exc, exc_info=True,
+                    )
+
+            # K4 genome parity: every fact has exactly one genome row (1:1).
             try:
                 self.db.upsert_memory_genome({
                     "memory_id": fact.id,
@@ -331,39 +315,32 @@ class MemoryStore:
             except Exception as exc:
                 logger.debug("genome insert for %s failed (non-fatal): %s", fact.id, exc)
 
+        # ── Phase 3: Post-commit side effects ──────────────────────────
+        # FAISS upsert is outside the transaction. If it fails, the fact
+        # is still in SQLite and will be recovered by recover_index_consistency()
+        # on next startup. This matches the dual-write principle.
+        if vec is not None and fact.status in ("active", "dormant"):
+            try:
+                self.vector.upsert_embedding(fact.fact, vec, content_type="fact", fact_id=fact.id)
+            except Exception as exc:
+                logger.warning(
+                    "FAISS upsert failed for fact %s (will recover on next rebuild): %s",
+                    fact.id, exc,
+                )
+
         if self.event_bus:
             from companion.memory.events.base import FactCreatedEvent
-            self.event_bus.publish(FactCreatedEvent(fact_id=fact.id, fact_text=fact.fact, importance=fact.importance, source=fact.source))
-
-        # Mutation log: record the creation for provenance/audit. Logged AFTER
-        # commit (same pattern as persistence.apply_decision) so a failed
-        # insert never leaves a phantom mutation entry.
-        try:
-            self.db.log_mutation(
-                entity_id=fact.id,
-                action="create",
-                reason=f"source:{fact.source}",
-                state_before={},
-                state_after={"fact": fact.fact, "status": fact.status,
-                             "importance": fact.importance},
-                initiator="store.add_fact",
-            )
-        except Exception as exc:
-            logger.debug("mutation log for %s failed (non-fatal): %s", fact.id, exc)
+            self.event_bus.publish(FactCreatedEvent(
+                fact_id=fact.id,
+                fact_text=fact.fact,
+                importance=fact.importance,
+                source=fact.source,
+            ))
         return fact
 
     def recover_index_consistency(self) -> dict[str, int]:
         from companion.memory.events.sync import recover_index_consistency
         return recover_index_consistency(self)
-
-    def replay_event_journal(self) -> int:
-        """Re-queue journaled events that never reached the FAISS drain.
-
-        Phase B: after a crash between SQLite commit and the event worker, the
-        pending rows in event_journal are replayed at startup. Idempotent
-        handlers (IndexSyncService hash-guards) make replay safe.
-        """
-        return self.event_bus.replay_pending()
 
     def get_fact(self, fact_id: str) -> Fact | None:
         row = self.db.get_fact(fact_id)
@@ -1210,23 +1187,6 @@ class MemoryStore:
             if self._normalize(existing.get("belief", "")) == norm:
                 return
         status = "pending_review" if _looks_like_injection(belief) else "active"
-
-        # R5: belief adoption is a high-stakes personality mutation — run the
-        # internal council. A non-approved verdict demotes to pending_review
-        # (kept, never rejected outright — Iron Law #5).
-        try:
-            from companion.memory.council import CouncilService
-            verdict = CouncilService(self.db).evaluate(
-                subject_kind="belief", subject_id="new",
-                payload={"belief": belief, "importance": importance},
-            )
-            if not verdict.approved:
-                status = "pending_review"
-                logger.info("belief_council: %s demoted to pending_review (votes=%s)",
-                            belief[:60], [v["verdict"] for v in verdict.votes])
-        except Exception as exc:
-            logger.debug("belief council skipped (non-fatal): %s", exc)
-
         d = {
             "id": f"belief_{uuid.uuid4().hex[:10]}",
             "belief": belief,

@@ -1,15 +1,13 @@
-```gitignore
 # Python cache files
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-# Environment variables
+# Environment variables — MUST include api.env (contains API_TOKEN, GOOGLE_API_KEY)
 .env
 .env.local
-*.env.*
-# Real credentials live here — must never be committed
+*.env
 api.env
 api.env.txt
 
@@ -19,8 +17,13 @@ bot.log
 
 # Database and data files
 data/companion.db
+data/companion.db-*
 data/faiss_index.bin
+data/faiss_index.bin.tmp
 data/logs/
+data/audit_archive.db
+data/quarantine_review.log
+data/permanent_notes.pending_review.txt
 
 # Test cache
 .tests/__pycache__/
@@ -28,4 +31,21 @@ data/logs/
 # Backup files
 *.bak
 master_summary.txt.bak
-```
+
+# Debug / scratch files in repo root
+debug_*.py
+report.txt
+tall gitleaks
+hidden.txt
+git.txt
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
