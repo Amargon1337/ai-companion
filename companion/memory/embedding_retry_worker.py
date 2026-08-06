@@ -5,16 +5,26 @@ embedding generation with exponential backoff on failure.
 
 Backoff schedule: 1m, 2m, 5m, 15m, 30m, 1h, 3h, 12h, 24h (max)
 Max retries: 10 (after which fact is marked as 'failed_embedding')
+
+Architecture note:
+  All retry metadata is stored in the Fact.meta dict field (NOT a separate
+  'metadata' field). The fact's meta column is a JSON blob that tracks:
+    - embedding_attempts: int
+    - last_embedding_error: str
+    - last_embedding_retry_at: ISO timestamp
+    - embedding_failed_permanently: bool
+
+  The worker runs OUTSIDE the main write path. Embedding API calls are
+  performed before any SQLite transaction — matching the same principle
+  as add_fact() (P0-6 fix).
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import TYPE_CHECKING
-
-from companion.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -40,16 +50,16 @@ FAILED_EMBEDDING_STATUS = "failed_embedding"
 
 
 class EmbeddingRetryWorker:
-    """Background worker that retries embedding generation for pending facts."""
+    """Background worker that retries embedding generation for pending facts.
+
+    Lifecycle:
+      1. start() — launches the async loop
+      2. _run_loop() — every check_interval seconds, scans for pending_embedding facts
+      3. _retry_fact_embedding() — per-fact retry with backoff
+      4. stop() — cancels the loop gracefully
+    """
 
     def __init__(self, memory_store: MemoryStore, check_interval: int = 60) -> None:
-        """
-        Initialize the retry worker.
-
-        Args:
-            memory_store: The memory store instance to use for fact operations.
-            check_interval: How often to check for pending facts (seconds).
-        """
         self.memory_store = memory_store
         self.check_interval = check_interval
         self._running = False
@@ -67,10 +77,13 @@ class EmbeddingRetryWorker:
         if self._running:
             logger.warning("EmbeddingRetryWorker already running")
             return
-        
         self._running = True
-        self._task = asyncio.create_task(self._run_loop(), name="embedding-retry-worker")
-        logger.info("EmbeddingRetryWorker started (check_interval=%ds)", self.check_interval)
+        self._task = asyncio.create_task(
+            self._run_loop(), name="embedding-retry-worker"
+        )
+        logger.info(
+            "EmbeddingRetryWorker started (check_interval=%ds)", self.check_interval
+        )
 
     async def stop(self) -> None:
         """Stop the background worker gracefully."""
@@ -93,184 +106,188 @@ class EmbeddingRetryWorker:
                 raise
             except Exception as e:
                 logger.exception("Error in EmbeddingRetryWorker loop: %s", e)
-            
-            # Wait before next check
             await asyncio.sleep(self.check_interval)
 
     async def _process_pending_facts(self) -> None:
         """Find and process all facts with pending_embedding status."""
         self._stats["processed"] += 1
-        
-        # Get all pending embedding facts
         pending_facts = self.memory_store.list_facts("pending_embedding")
-        
         if not pending_facts:
             return
-        
         logger.debug("Found %d facts with pending_embedding status", len(pending_facts))
-        
         for fact in pending_facts:
             if not self._running:
                 break
-            
             try:
                 await self._retry_fact_embedding(fact)
             except Exception as e:
-                logger.exception("Failed to retry embedding for fact %s: %s", fact.id, e)
+                logger.exception(
+                    "Failed to retry embedding for fact %s: %s", fact.id, e
+                )
+
+    # ------------------------------------------------------------------ #
+    #  Retry logic
+    # ------------------------------------------------------------------ #
 
     async def _retry_fact_embedding(self, fact) -> None:
-        """
-        Retry embedding generation for a single fact.
+        """Retry embedding generation for a single fact.
 
-        Uses exponential backoff based on retry count stored in metadata.
+        Uses exponential backoff based on retry count stored in fact.meta.
         """
         fact_id = fact.id
-        
-        # Get retry metadata
-        retry_count = fact.metadata.get("embedding_attempts", 0) if fact.metadata else 0
-        last_error = fact.metadata.get("last_embedding_error", "Unknown") if fact.metadata else "Unknown"
-        last_retry_at = fact.metadata.get("last_embedding_retry_at") if fact.metadata else None
-        
-        # Check if we should retry now (exponential backoff)
+        meta = fact.meta if isinstance(fact.meta, dict) else {}
+
+        retry_count = int(meta.get("embedding_attempts", 0))
+        last_error = str(meta.get("last_embedding_error", "Unknown"))
+        last_retry_at = meta.get("last_embedding_retry_at")
+
+        # --- Backoff check ---
         if last_retry_at:
             try:
-                # Parse ISO format timestamp
                 if isinstance(last_retry_at, str):
-                    last_retry_dt = datetime.fromisoformat(last_retry_at.replace('Z', '+00:00'))
+                    last_retry_dt = datetime.fromisoformat(
+                        last_retry_at.replace("Z", "+00:00")
+                    )
                 else:
                     last_retry_dt = last_retry_at
-                
-                # Determine delay based on retry count
+
                 delay_index = min(retry_count, len(BACKOFF_DELAYS) - 1)
                 required_delay = BACKOFF_DELAYS[delay_index]
-                
                 elapsed = (datetime.now(last_retry_dt.tzinfo) - last_retry_dt).total_seconds() if last_retry_dt.tzinfo else (datetime.now() - last_retry_dt).total_seconds()
-                
+
                 if elapsed < required_delay:
                     logger.debug(
                         "Fact %s: skipping retry (attempt %d, need to wait %.0f more seconds)",
-                        fact_id, retry_count + 1, required_delay - elapsed
+                        fact_id,
+                        retry_count + 1,
+                        required_delay - elapsed,
                     )
                     return
             except Exception as e:
                 logger.warning("Failed to parse last_retry_at for fact %s: %s", fact_id, e)
-        
-        # Check max retries
+
+        # --- Max retries check ---
         if retry_count >= MAX_RETRIES:
             logger.warning(
                 "Fact %s: max retries (%d) exceeded, marking as %s. Last error: %s",
-                fact_id, MAX_RETRIES, FAILED_EMBEDDING_STATUS, last_error
+                fact_id,
+                MAX_RETRIES,
+                FAILED_EMBEDDING_STATUS,
+                last_error,
             )
-            self._mark_as_failed(fact_id, retry_count, last_error)
+            self._mark_as_failed(fact_id, meta, last_error)
             self._stats["gave_up"] += 1
             return
-        
-        # Attempt embedding
+
+        # --- Attempt embedding (OUTSIDE any transaction) ---
         logger.info(
             "Fact %s: attempting embedding (attempt %d/%d, last error: %s)",
-            fact_id, retry_count + 1, MAX_RETRIES, last_error
+            fact_id,
+            retry_count + 1,
+            MAX_RETRIES,
+            last_error,
         )
-        
         try:
-            # Generate embedding
             vec = self.memory_store.vector.embed_text_only(fact.fact)
-            
             if vec is None:
                 raise ValueError("Embedding API returned None")
-            
-            # Success! Update fact status and save vector
-            self._mark_embedding_success(fact_id, vec, retry_count)
+
+            # Success: activate the fact and persist the vector
+            self._activate_with_embedding(fact_id, fact.fact, vec, meta)
             self._stats["succeeded"] += 1
             logger.info("Fact %s: embedding succeeded on attempt %d", fact_id, retry_count + 1)
-            
+
         except Exception as e:
-            # Failure - update retry metadata
             error_msg = str(e)
-            self._mark_embedding_failure(fact_id, retry_count, error_msg)
+            self._record_failure(fact_id, meta, retry_count, error_msg)
             self._stats["failed"] += 1
-            
             if retry_count < MAX_RETRIES - 1:
                 self._stats["retried"] += 1
                 delay_index = min(retry_count, len(BACKOFF_DELAYS) - 1)
                 logger.info(
                     "Fact %s: embedding failed (attempt %d), will retry after %ds. Error: %s",
-                    fact_id, retry_count + 1, BACKOFF_DELAYS[delay_index], error_msg
+                    fact_id,
+                    retry_count + 1,
+                    BACKOFF_DELAYS[delay_index],
+                    error_msg,
                 )
 
-    def _mark_embedding_success(self, fact_id: str, vec: list[float], retry_count: int) -> None:
-        """Mark fact as successfully embedded."""
+    # ------------------------------------------------------------------ #
+    #  State mutations
+    # ------------------------------------------------------------------ #
+
+    def _activate_with_embedding(
+        self, fact_id: str, fact_text: str, vec: list[float], old_meta: dict
+    ) -> None:
+        """Mark fact as active and persist its embedding vector.
+
+        Order: SQLite transaction (status update + meta cleanup) first,
+        then FAISS upsert (outside transaction, matching add_fact pattern).
+        """
+        # Clean retry metadata
+        new_meta = {k: v for k, v in old_meta.items()
+                    if k not in ("embedding_attempts", "last_embedding_error", "last_embedding_retry_at")}
+
+        # 1. SQLite transaction: status → active, meta cleanup
         with self.memory_store.db.atomic_memory_transaction():
-            # Update status to active
-            self.memory_store.db._conn().execute(
-                "UPDATE facts SET status = 'active', updated_at = ? WHERE id = ?",
-                (datetime.now().isoformat(), fact_id)
+            self.memory_store.db.update_fact_fields(
+                fact_id,
+                {"status": "active", "meta": new_meta},
             )
-            
-            # Clear embedding error metadata
-            fact = self.memory_store.get_fact(fact_id)
-            if fact and fact.metadata:
-                new_metadata = fact.metadata.copy()
-                new_metadata.pop("embedding_attempts", None)
-                new_metadata.pop("last_embedding_error", None)
-                new_metadata.pop("last_embedding_retry_at", None)
-                self.memory_store.db._update_fact_metadata(fact_id, new_metadata)
-            
-            # Add vector to FAISS
+
+        # 2. FAISS upsert (outside transaction — no API calls inside)
+        try:
             self.memory_store.vector.upsert_embedding(
-                fact.fact, vec, content_type="fact", fact_id=fact_id
+                fact_text, vec, content_type="fact", fact_id=fact_id
             )
-        
-        # Publish event
+        except Exception as exc:
+            logger.warning(
+                "FAISS upsert failed for reactivated fact %s (will recover on next rebuild): %s",
+                fact_id,
+                exc,
+            )
+
+        # 3. Publish event (outside transaction)
         if self.memory_store.event_bus:
             from companion.memory.events.base import FactUpdatedEvent
             self.memory_store.event_bus.publish(
                 FactUpdatedEvent(
                     fact_id=fact_id,
-                    old_status="pending_embedding",
-                    new_status="active",
-                    reason="embedding_retry_success"
+                    old_state={"status": "pending_embedding"},
+                    new_state={"status": "active"},
+                    reason="embedding_retry_success",
                 )
             )
 
-    def _mark_embedding_failure(self, fact_id: str, retry_count: int, error_msg: str) -> None:
-        """Update fact metadata with retry information."""
-        fact = self.memory_store.get_fact(fact_id)
-        if not fact:
-            return
-        
-        metadata = fact.metadata.copy() if fact.metadata else {}
-        metadata["embedding_attempts"] = retry_count + 1
-        metadata["last_embedding_error"] = error_msg
-        metadata["last_embedding_retry_at"] = datetime.now().isoformat()
-        
-        with self.memory_store.db.atomic_memory_transaction():
-            self.memory_store.db._update_fact_metadata(fact_id, metadata)
+    def _record_failure(
+        self, fact_id: str, old_meta: dict, retry_count: int, error_msg: str
+    ) -> None:
+        """Update fact meta with retry information after a failed attempt."""
+        new_meta = dict(old_meta)
+        new_meta["embedding_attempts"] = retry_count + 1
+        new_meta["last_embedding_error"] = error_msg
+        new_meta["last_embedding_retry_at"] = datetime.now().isoformat()
+        self.memory_store.db.update_fact_fields(fact_id, {"meta": new_meta})
 
-    def _mark_as_failed(self, fact_id: str, retry_count: int, error_msg: str) -> None:
-        """Mark fact as permanently failed after max retries."""
-        fact = self.memory_store.get_fact(fact_id)
-        if not fact:
-            return
-        
-        metadata = fact.metadata.copy() if fact.metadata else {}
-        metadata["embedding_attempts"] = retry_count
-        metadata["last_embedding_error"] = error_msg
-        metadata["embedding_failed_permanently"] = True
-        
-        with self.memory_store.db.atomic_memory_transaction():
-            # Update status to failed_embedding
-            self.memory_store.db._conn().execute(
-                "UPDATE facts SET status = ?, updated_at = ? WHERE id = ?",
-                (FAILED_EMBEDDING_STATUS, datetime.now().isoformat(), fact_id)
-            )
-            self.memory_store.db._update_fact_metadata(fact_id, metadata)
+    def _mark_as_failed(
+        self, fact_id: str, old_meta: dict, error_msg: str
+    ) -> None:
+        """Mark fact as permanently failed after max retries exhausted."""
+        new_meta = dict(old_meta)
+        new_meta["embedding_attempts"] = MAX_RETRIES
+        new_meta["last_embedding_error"] = error_msg
+        new_meta["embedding_failed_permanently"] = True
+        self.memory_store.db.update_fact_fields(
+            fact_id,
+            {"status": FAILED_EMBEDDING_STATUS, "meta": new_meta},
+        )
 
     def get_stats(self) -> dict[str, int]:
         """Return worker statistics."""
         return self._stats.copy()
 
 
-# Global instance (will be initialized by main.py)
+# Global instance (initialized by main.py via init_embedding_retry_worker)
 _embedding_retry_worker: EmbeddingRetryWorker | None = None
 
 

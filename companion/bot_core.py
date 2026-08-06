@@ -51,6 +51,7 @@ embedding_retry_worker = None
 # In-memory sessions
 user_chats: dict[int, Any] = {}
 user_message_counts: dict[int, int] = {}
+_importance_accumulator: dict[int, float] = {}  # tracks accumulated importance for smart compress
 
 # Rate limiter for LLM requests
 _user_request_times: dict[int, list[float]] = {}
@@ -146,7 +147,16 @@ async def proactive_ping_loop(bot):
         except asyncio.CancelledError:
             break
         except Exception:
-            logger.exception("proactive_ping_loop crashed, restarting...")
+            logger.exception("proactive_ping_loop crashed, backing off...")
+            # Exponential backoff: 10s, 20s, 40s ... capped at 5 minutes.
+            # Without this, a persistent error (DB corrupt, API down) would
+            # produce log spam at loop-iteration speed (~millisecond intervals).
+            backoff = min(300, getattr(proactive_ping_loop, "_backoff", 10))
+            proactive_ping_loop._backoff = backoff * 2  # type: ignore[attr-defined]
+            await asyncio.sleep(backoff)
+        else:
+            # Reset backoff on successful iteration
+            proactive_ping_loop._backoff = 10  # type: ignore[attr-defined]
 
 
 async def send_typing(message: types.Message):
@@ -158,8 +168,21 @@ async def send_typing(message: types.Message):
 
 
 async def send_long_message(message: types.Message, text: str, **kwargs) -> None:
+    """Send a long message, splitting into chunks of max 4000 chars.
+
+    Tries to split at sentence/word boundaries. Falls back to hard split
+    if no boundary found. Safety guard: split is clamped to >=1 to prevent
+    infinite loops in edge cases.
+    """
     max_len = 4000
+    max_chunks = 100  # safety limit to prevent runaway loops
+    chunks_sent = 0
     while len(text) > max_len:
+        chunks_sent += 1
+        if chunks_sent > max_chunks:
+            # Safety valve: send remaining text as-is and stop
+            await message.answer(text, **kwargs)
+            return
         split = max_len
         m = _re.search(r"[.!?]\s", text[max_len - 200:max_len])
         if m:
@@ -168,9 +191,8 @@ async def send_long_message(message: types.Message, text: str, **kwargs) -> None
             m = _re.search(r"\s", text[max_len - 100:max_len])
             if m:
                 split = max_len - 100 + m.start()
-            else:
-                # No split point found — force split at max_len to prevent infinite loop
-                split = max_len
+        # Guarantee forward progress: split must consume at least 1 char
+        split = max(1, min(split, max_len))
         await message.answer(text[:split], **kwargs)
         text = text[split:].lstrip()
     if text:
@@ -486,10 +508,26 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
     if uid not in user_chats:
         await _init_user_session(uid, query)
     user_message_counts[uid] = user_message_counts.get(uid, 0) + 1
+    
+    # Track accumulated importance — emotionally dense conversations
+    # should compress sooner than light chatting.
+    _importance_accumulator[uid] = _importance_accumulator.get(uid, 0) + state.message_importance
+    
     run_background_tasks(uid, state, memory_store, user_message_counts)
-    if user_message_counts[uid] >= SUMMARY_THRESHOLD:
+    
+    # Smart compress: trigger when EITHER:
+    # 1. Message count reaches threshold (hard limit, prevents token overflow)
+    # 2. Accumulated importance exceeds threshold (emotional conversations
+    #    compress sooner because there's more worth extracting)
+    importance_threshold = SUMMARY_THRESHOLD * 5  # ~250 importance points
+    should_compress = (
+        user_message_counts[uid] >= SUMMARY_THRESHOLD
+        or _importance_accumulator.get(uid, 0) >= importance_threshold
+    )
+    if should_compress:
         await message.answer("Сжимаю контекст...")
         await compress_and_reset(uid)
+        _importance_accumulator[uid] = 0  # reset after compress
 
     return {
         "uid": uid, "query": query, "state": state, "intent": intent,
@@ -961,6 +999,17 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
         hidden_emotion = _analyze_hidden_emotion(query)
         if hidden_emotion:
             ctx_block += f"{hidden_emotion}\n\n"
+        
+        # Emotional callback: "last time you talked about work, you were stressed"
+        # This is what makes the bot feel like a friend, not a search engine.
+        # Zero LLM cost — pure heuristic analysis.
+        try:
+            from companion.memory.emotional_context import build_emotional_callback
+            emotional_hint = build_emotional_callback(memory_store, query)
+            if emotional_hint:
+                ctx_block += f"{emotional_hint}\n\n"
+        except Exception as exc:
+            logger.debug("Emotional callback skipped: %s", exc)
             
         # Закомментировано по просьбе (отключение калибратора/допроса):
         # if getattr(state, "needs_clarification", ""):
@@ -990,43 +1039,49 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
         raw_history = chat.get_history() if hasattr(chat, "get_history") else getattr(chat, "history", getattr(chat, "_curated_history", []))
         history = _sanitize_chat_history(raw_history)
 
-    # Фаза 1: Внутренняя генерация плана (CoT)
-    @observe(as_type="generation", name="cot_phase_1")
-    async def generate_plan() -> str:
-        history_text = ""
-        for m in history[-5:]:
-            if isinstance(m, dict):
-                role = m.get("role", "unknown")
-                parts = m.get("parts", [])
-                text = parts[0].get("text", "") if (parts and isinstance(parts[0], dict)) else ""
-            else:
-                role = getattr(m, "role", "unknown")
-                parts = getattr(m, "parts", [])
-                text = getattr(parts[0], "text", "") if parts else ""
-            history_text += f"[{str(role).upper()}]: {text}\n"
-            
-        plan_prompt = (
-            "Перед тем как дать финальный ответ, проанализируй историю диалога, текущий запрос пользователя и контекст памяти. "
-            "Учти контекст последних реплик! Напиши краткий внутренний план (Chain of Thought), "
-            "как лучше ответить.\n\n"
-            f"История диалога (последние 5 сообщений):\n{history_text}\n"
-            f"Запрос пользователя:\n{query}\n\nКонтекст памяти:\n{ctx_block}"
-        )
-        try:
-            from companion.llm.client import aio_oneshot
-            return await aio_oneshot(plan_prompt, model=MODEL_NAME, temperature=0.5)
-        except Exception as e:
-            logger.warning(f"Phase 1 plan generation failed: {e}")
-            return ""
+    # Фаза 1: CoT plan — отключена по умолчанию.
+    # На 500 RPD каждый вызов = 1 разговор из бюджета.
+    # План не добавляет качества: финальная модель и так видит весь контекст.
+    # Включается только для важных сообщений (importance >= 8).
+    plan = ""
+    if state.message_importance >= 8:
+        @observe(as_type="generation", name="cot_phase_1")
+        async def generate_plan() -> str:
+            history_text = ""
+            for m in history[-5:]:
+                if isinstance(m, dict):
+                    role = m.get("role", "unknown")
+                    parts = m.get("parts", [])
+                    text = parts[0].get("text", "") if (parts and isinstance(parts[0], dict)) else ""
+                else:
+                    role = getattr(m, "role", "unknown")
+                    parts = getattr(m, "parts", [])
+                    text = getattr(parts[0], "text", "") if parts else ""
+                history_text += f"[{str(role).upper()}]: {text}\n"
+                
+            plan_prompt = (
+                "Перед тем как дать финальный ответ, проанализируй историю диалога, текущий запрос пользователя и контекст памяти. "
+                "Учти контекст последних реплик! Напиши краткий внутренний план (Chain of Thought), "
+                "как лучше ответить.\n\n"
+                f"История диалога (последние 5 сообщений):\n{history_text}\n"
+                f"Запрос пользователя:\n{query}\n\nКонтекст памяти:\n{ctx_block}"
+            )
+            try:
+                from companion.llm.client import aio_oneshot
+                return await aio_oneshot(plan_prompt, model=MODEL_NAME, temperature=0.5)
+            except Exception as e:
+                logger.warning(f"Phase 1 plan generation failed: {e}")
+                return ""
 
-    plan = await generate_plan()
-    if plan:
-        logger.info("[ROUTER] Фаза 1 (CoT) успешно выполнена.")
-        content_payload = (
-            f"[SYSTEM: Внутренний план ответа]\n"
-            f"{plan}\n\n"
-            f"[USER]\n{base_payload}"
-        )
+        plan = await generate_plan()
+        if plan:
+            logger.info("[ROUTER] Фаза 1 (CoT) выполнена для важного сообщения.")
+            content_payload = (
+                f"[SYSTEM: Внутренний план ответа]\n"
+                f"{plan}\n\n"
+                f"[USER]\n{base_payload}"
+            )
+    # else: plan stays "" — skip CoT entirely for normal messages
 
     # Создаем базовый чат для ответа только после получения плана,
     # чтобы вшить в него отфильтрованный контекст.
@@ -1143,6 +1198,13 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
         trace = observability.active_trace(uid)
         if trace:
             trace.response_text = text
+
+        # Track emotional state for future callbacks (zero LLM cost)
+        try:
+            from companion.memory.emotional_context import track_emotional_state
+            track_emotional_state(memory_store, query, text)
+        except Exception:
+            pass
 
         if bundle and ctx_block and msg_rec and text:
             try:

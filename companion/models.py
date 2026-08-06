@@ -1,6 +1,7 @@
 """Data models for memory architecture."""
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime

@@ -182,10 +182,12 @@ async def background_personality_micro_update(state, store) -> None:
             curr["last_updated"] = datetime.now().isoformat()
             store_ref.save_personality(curr)
 
-        # Критическая секция: read-modify-write под тем же локом, что и
-        # generate_personality_snapshot, иначе перетирают изменения друг друга.
-        async with store.lock:
-            await asyncio.to_thread(_sync_micro_update, store, interests_delta, new_change)
+        # P0-8 fix: sync_lock (threading.Lock) inside to_thread, NOT asyncio.Lock
+        # around it. asyncio.Lock cannot serialize different OS threads.
+        def _locked_micro_update(store_ref, delta, change):
+            with store_ref.sync_lock:
+                _sync_micro_update(store_ref, delta, change)
+        await asyncio.to_thread(_locked_micro_update, store, interests_delta, new_change)
 
         logger.info("Personality micro-update completed")
         _record_success(task_name)
