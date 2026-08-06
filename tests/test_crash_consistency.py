@@ -308,16 +308,18 @@ class TestEmbeddingLifecycle:
     """Prove that facts without embeddings cause silent search failures."""
 
     def test_fact_without_embedding_never_searchable(self, tmp_path, monkeypatch):
-        """BUG REPRODUCTION:
-        
+        """INTENDED BEHAVIOR (pending_embedding lifecycle):
+
         Scenario:
-        1. add_fact() called with status='active'
+        1. add_fact() called
         2. embed_text_only() returns None (API down)
         3. compute_and_cache() also returns None
-        4. Fact added to SQLite with status='active'
+        4. Fact added to SQLite with status='pending_embedding' (NOT 'active')
         5. Fact has no embedding in FAISS
-        
-        Expected bug: Fact never appears in search results.
+
+        The invariant "active facts must be searchable" is preserved: a fact
+        whose embedding never got produced is explicitly marked pending and is
+        retained (Iron Law #5), not silently 'active'.
         """
         import companion.config as cfg
         monkeypatch.setattr(cfg, "DATA_DIR", str(tmp_path))
@@ -334,31 +336,33 @@ class TestEmbeddingLifecycle:
         fact = make_fact("User likes cats and dogs", importance=5)
         result = store.add_fact(fact)
         
-        # Verify fact exists in DB
+        # Verify fact exists in DB with pending_embedding (not broken 'active')
         saved_fact = store.get_fact(result.id)
         assert saved_fact is not None
-        assert saved_fact.status == "active"
+        assert saved_fact.status == "pending_embedding"
         
-        # BUG: Fact has no embedding
+        # Fact has no embedding
         embedding = store.vector.get_embedding("User likes cats and dogs")
         assert embedding is None, "Fact has no embedding"
         
-        # BUG CONSEQUENCE: Vector search won't find this fact
+        # Vector search won't find it while pending — expected
         search_results = store.vector.search("User likes cats and dogs", top_k=5)
-        assert len(search_results) == 0, \
-            "Bug: active fact without embedding is not searchable"
-        
-        # This violates invariant: "active facts should be searchable via vector search"
+        assert len(search_results) == 0
+        # Fact retained in DB
+        assert store.get_fact(result.id) is not None
 
     def test_no_mechanism_to_retry_embedding(self, tmp_path, monkeypatch):
-        """BUG REPRODUCTION:
-        
+        """INTENDED BEHAVIOR (no inline retry on the mutation path):
+
         Scenario:
-        1. Fact added without embedding (API was down)
+        1. Fact added while the embedding API is down -> status pending_embedding
         2. API comes back online
-        3. No mechanism to retry embedding generation
-        
-        Expected bug: Fact remains unsearchable forever.
+        3. The MUTATION PATH does not block on a retry (non-blocking by design —
+           embedding must never stall a conversation turn).
+
+        The recovery mechanism is the startup reconcile + reindex path
+        (companion/main.py -> recover_index_consistency), which re-embeds
+        pending facts when the API is available.
         """
         import companion.config as cfg
         monkeypatch.setattr(cfg, "DATA_DIR", str(tmp_path))
@@ -374,23 +378,30 @@ class TestEmbeddingLifecycle:
         fact = make_fact("Important fact that should be searchable", importance=8)
         result = store.add_fact(fact)
         
-        # Verify fact has no embedding
+        # Fact has no embedding and is explicitly pending_embedding
         assert store.vector.get_embedding(fact.fact) is None
+        assert store.get_fact(result.id).status == "pending_embedding"
         
         # API comes back online
         from companion.config import EMBEDDING_DIM
         test_vec = np.zeros(EMBEDDING_DIM, dtype=np.float32)
         monkeypatch.setattr(store.vector, 'embed_text_only', lambda text: test_vec.tolist())
-        monkeypatch.setattr(store.vector, 'compute_and_cache', 
-                         lambda text, *args, **kwargs: store.vector.upsert_embedding(text, test_vec.tolist()))
+        def _fake_compute(text, *args, **kwargs):
+            # Mirrors real compute_and_cache: embed, persist (content_type
+            # preserved — a query embedding must never be indexed as a fact),
+            # return the vector.
+            vec = test_vec.tolist()
+            store.vector.upsert_embedding(text, vec, *args, **kwargs)
+            return vec
+        monkeypatch.setattr(store.vector, 'compute_and_cache', _fake_compute)
         
-        # BUG: No mechanism to retry embedding for existing fact
-        # User would need to manually trigger re-embedding or delete/re-add fact
-        
-        # Try searching - should still not find it
+        # The mutation path must NOT have retried inline — pending_embedding
+        # persists until a recovery pass (startup reconcile / reindex).
+        # Search still finds nothing until then: expected, non-blocking design.
         search_results = store.vector.search("Important fact", top_k=5)
-        assert len(search_results) == 0, \
-            "Bug: no retry mechanism for failed embeddings"
+        assert len(search_results) == 0
+        # Fact retained for the recovery pass
+        assert store.get_fact(result.id) is not None
 
 
 # ============================================================================
@@ -403,15 +414,16 @@ class TestConcurrentAccess:
     """Prove that concurrent access causes race conditions."""
 
     def test_concurrent_add_fact_race_condition(self, tmp_path, monkeypatch):
-        """BUG REPRODUCTION:
-        
+        """Intended behavior: the dedup gate must collapse identical texts.
+
         Scenario:
-        1. Two threads simultaneously call add_fact() with similar facts
-        2. Dedup check happens in one thread
-        3. Before first thread commits, second thread also passes dedup
-        4. Result: duplicate facts in DB
-        
-        Expected bug: Race condition in dedup check.
+        1. add_fact() called twice with the same text.
+        2. The near-duplicate gate (find_similar_fact_any_status) must return
+           the SAME fact on the second call — no duplicate row.
+
+        NOTE: the embedding mock MUST succeed, otherwise facts land in
+        'pending_embedding' which is deliberately excluded from the dedup gate
+        (a pending fact is not yet a live memory).
         """
         import companion.config as cfg
         monkeypatch.setattr(cfg, "DATA_DIR", str(tmp_path))
@@ -419,6 +431,20 @@ class TestConcurrentAccess:
         monkeypatch.setattr(cfg, "SQLITE_PATH", db_path)
         
         store = MemoryStore()
+
+        # Deterministic per-text embedding so facts become 'active' (dedup-eligible).
+        import hashlib
+        from companion.config import EMBEDDING_DIM
+        def _vec_for(text: str):
+            h = hashlib.sha256(text.encode("utf-8")).digest()
+            vec = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+            for i in range(EMBEDDING_DIM):
+                vec[i] = ((h[i % len(h)] % 200) - 100) / 100.0
+            vec[0] = 1.0
+            return vec.tolist()
+        monkeypatch.setattr(store.vector, 'embed_text_only', lambda text: _vec_for(text))
+        monkeypatch.setattr(store.vector, 'compute_and_cache',
+                         lambda text, *a, **k: (store.vector.upsert_embedding(text, _vec_for(text), *a, **k), _vec_for(text))[1])
         
         # Track number of facts added
         facts_added = []
@@ -429,9 +455,8 @@ class TestConcurrentAccess:
             facts_added.append(result)
             return result
         
-        # Simulate concurrent add_fact calls
-        # (This is hard to test without actually running concurrent threads)
-        # For now, just verify that dedup exists
+        # Two add_fact calls with the SAME text (sequential; the true race is
+        # covered by store-level atomicity — the gate here is the dedup guard).
         fact1 = make_fact("Duplicate test fact", importance=5)
         fact2 = make_fact("Duplicate test fact", importance=5)
         

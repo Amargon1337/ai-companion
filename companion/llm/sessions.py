@@ -79,6 +79,21 @@ Use each section only for its defined purpose.
     if precomputed_context:
         policy_shell += f"\n\n[ДИНАМИЧЕСКИЙ КОНТЕКСТ ПАМЯТИ RAG]\n{precomputed_context}\n"
     elif retrieval and query:
+        # R3/A1: fallback-путь (без precomputed_context) тоже подключает
+        # Working Memory и genome survival для Cognitive Gravity.
+        wm_block = ""
+        wm_ids: set[str] = set()
+        try:
+            wm = getattr(store, "working_memory", None)
+            if wm is not None:
+                slots = wm.snapshot(0)  # single-user: slots are user-agnostic fallback
+                from companion.bot_core import _format_working_memory_block
+                wm_block = _format_working_memory_block(slots)
+                wm_ids = {s.get("ref_id") for s in slots
+                          if s.get("ref_kind") == "fact" and s.get("ref_id")}
+        except Exception:
+            pass
+        from companion.bot_core import _load_genome_scores
         bundle = retrieval.select(
             query=query,
             facts=store.list_facts("active"),
@@ -96,6 +111,9 @@ Use each section only for its defined purpose.
             comm_prefs=store.get_comm_pref(),
             human_model=store.get_human_model(),
             timeline_block="\n".join(f"{e['date']} — {e['event']}" for e in store.db.load_events()[:10]),
+            working_memory_block=wm_block,
+            working_memory_ids=wm_ids,
+            genome_scores=_load_genome_scores([f.id for f in store.list_facts("active")[:500]]),
         )
         policy_shell += f"\n\n[ДИНАМИЧЕСКИЙ КОНТЕКСТ ПАМЯТИ RAG]\n{bundle.to_prompt_block()}\n"
         

@@ -9,6 +9,9 @@ __pycache__/
 .env
 .env.local
 *.env.*
+# Real credentials live here — must never be committed
+api.env
+api.env.txt
 
 # Logs
 *.log

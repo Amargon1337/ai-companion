@@ -675,11 +675,18 @@ class ContextBundle:
     human_model: "HumanModel | None" = None
     life_transitions: "list[Any]" = field(default_factory=list)  # LCE: траектория изменений
     timeline_block: str = ""  # Memory Timeline: хронология ключевых событий
+    working_memory_block: str = ""  # R3/K5: живые слоты текущего диалога (bounded)
 
     def to_prompt_block(self) -> str:
         from companion.security.sanitizer import sanitize_markup
 
         parts: list[str] = []
+        # R3/K5: Working Memory — «стол», а не «архив». Живые слоты текущего
+        # диалога идут ПЕРВЫМ блоком: они уже отфильтрованы по салиентности и
+        # TTL, поэтому модель сначала видит, что важно сейчас, а не всё.
+        if self.working_memory_block:
+            sanitized_wm = sanitize_markup(self.working_memory_block) or ""
+            parts.append(f"<working_memory>\n{sanitized_wm}\n</working_memory>")
         if self.runtime_context_block:
             parts.append(self.runtime_context_block)
         if self.identity_vault_block:

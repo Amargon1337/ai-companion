@@ -182,6 +182,10 @@ def extract_causal_links(store: MemoryStore, new_facts: list[Fact], summary: str
             evidence=[str(e) for e in item.get("evidence", [])],
             mechanism=str(item.get("mechanism", ""))
         )
+        # R2 provenance: the link is derived from the new-fact window it was
+        # extracted from. Only ids the model was actually shown are eligible —
+        # same anti-hallucination rule as patterns.evidence.
+        link.derived_from = [f.id for f in active_new_facts]
         reasoning_engine.add_causal_link(link)
 
 def generate_reflections(

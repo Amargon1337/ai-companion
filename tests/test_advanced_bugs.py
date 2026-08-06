@@ -236,14 +236,15 @@ class TestFAISSMemoryLeak:
     """Prove that _deleted_ids handling is correct."""
 
     def test_deleted_ids_cleared_after_rebuild(self, tmp_path, monkeypatch):
-        """BUG REPRODUCTION:
-        
+        """Intended behavior: _deleted_ids tombstones clear after rebuild.
+
         Scenario:
-        1. Add facts
-        2. Delete facts (if remove_ids() not supported, adds to _deleted_ids)
-        3. _rebuild_index() should clear _deleted_ids
-        
-        Expected: _deleted_ids properly managed.
+        1. Add facts (DISTINCT embedding per text — a constant mock vector
+           would collapse all facts into one FAISS entry via content-hash
+           dedup, making the test degenerate).
+        2. Delete half (HNSW can't remove_ids -> tombstones in _deleted_ids).
+        3. _rebuild_index() reconstructs from SQLite and clears tombstones.
+        4. Surviving facts stay searchable; deleted ones stay gone.
         """
         import companion.config as cfg
         monkeypatch.setattr(cfg, "DATA_DIR", str(tmp_path))
@@ -252,51 +253,60 @@ class TestFAISSMemoryLeak:
         
         store = MemoryStore()
         
-        # Mock embeddings
+        # Deterministic per-text embeddings (real embedding API returns
+        # text-dependent vectors; a constant vector is not representative).
         from companion.config import EMBEDDING_DIM
-        test_vec = np.zeros(EMBEDDING_DIM, dtype=np.float32)
-        test_vec[0] = 1.0
-        monkeypatch.setattr(store.vector, 'embed_text_only', lambda text: test_vec.tolist())
+        import hashlib
+        def _vec_for(text: str):
+            h = hashlib.sha256(text.encode("utf-8")).digest()
+            vec = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+            for i in range(EMBEDDING_DIM):
+                vec[i] = ((h[i % len(h)] % 200) - 100) / 100.0
+            vec[0] = 1.0
+            return vec.tolist()
+        monkeypatch.setattr(store.vector, 'embed_text_only', lambda text: _vec_for(text))
         monkeypatch.setattr(store.vector, 'compute_and_cache', 
-                         lambda text, *args, **kwargs: (store.vector.upsert_embedding(text, test_vec.tolist(), *args, **kwargs), test_vec.tolist())[1])
+                         lambda text, *args, **kwargs: (store.vector.upsert_embedding(text, _vec_for(text), *args, **kwargs), _vec_for(text))[1])
         
-        # Add facts
+        # Add facts — texts MUST be genuinely distinct, otherwise the
+        # near-duplicate dedup gate (text_overlap >= 0.88) collapses them into
+        # one row, which would defeat this test's purpose.
         added_facts = []
         for i in range(100):
-            fact = make_fact(f"Memory leak test fact {i}", importance=5)
+            uniq = hashlib.sha256(f"fact-{i}".encode("utf-8")).hexdigest()[:8]
+            fact = make_fact(f"Memory leak test fact {uniq} про тему {i}", importance=5)
             result = store.add_fact(fact)
             added_facts.append(result)
 
         with store.db._conn() as conn:
             cnt = conn.execute("SELECT count(*) FROM facts WHERE embedding IS NOT NULL").fetchone()[0]
-            print("TOTAL NON-NULL AFTER ALL 100 FACTS ADDED:", cnt)
+            assert cnt == 100, f"all 100 facts must carry their own embedding, got {cnt}"
 
         # Check initial state
         assert len(store.vector._deleted_ids) == 0, "No deleted IDs initially"
         
         # Delete some facts
-        for idx, fact in enumerate(added_facts[:50]):
-            store.delete_fact(fact.id)
-            if idx == 0:
-                with store.db._conn() as c:
-                    print("NON NULL AFTER DELETING 1 FACT:", c.execute("SELECT count(*) FROM facts WHERE embedding IS NOT NULL").fetchone()[0])
-        
-        # Verify deletion worked
         for fact in added_facts[:50]:
-            results = store.vector.search(fact.fact, top_k=1)
-            assert len(results) == 0, f"Fact {fact.id} should not be searchable after deletion"
+            store.delete_fact(fact.id)
+        
+        # Verify deletion worked: the DELETED text itself must never resurface
+        # (near-identical surviving facts may match the query — that's fine;
+        # the deleted fact's own content must be absent).
+        for fact in added_facts[:50]:
+            results = store.vector.search(fact.fact, top_k=5)
+            assert fact.fact not in {r.get("content") for r in results}, \
+                f"Fact {fact.id} should not be searchable after deletion"
         
         with store.db._conn() as conn:
             non_null_before = conn.execute("SELECT count(*) FROM facts WHERE embedding IS NOT NULL").fetchone()[0]
-            print("NON NULL EMBEDDINGS BEFORE REBUILD:", non_null_before)
+            assert non_null_before == 50, f"50 survivors must keep embeddings, got {non_null_before}"
 
         # Rebuild index
         store.vector._rebuild_index()
         
         with store.db._conn() as conn:
             non_null_after = conn.execute("SELECT count(*) FROM facts WHERE embedding IS NOT NULL").fetchone()[0]
-            print("NON NULL EMBEDDINGS AFTER REBUILD:", non_null_after)
-            print("FAISS NTOTAL:", store.vector.index.ntotal)
+            assert non_null_after == 50, f"rebuild must not drop survivor embeddings, got {non_null_after}"
 
         # Verify state is consistent
         assert len(store.vector._deleted_ids) == 0, \

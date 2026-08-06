@@ -149,6 +149,8 @@ class VectorIndex:
         self._dirty_updates = 0
         self._flush_every = max(1, _FAISS_FLUSH_EVERY)
         self.embeddings_enabled = True
+        # R7: measured rebuild duration (threshold for CoW-gated paths).
+        self._last_rebuild_seconds = 0.0
         
         # Load existing database embeddings into memory index at startup
         self._load_index()
@@ -260,6 +262,14 @@ class VectorIndex:
         import os
         import json
         import faiss
+        # R7 note (mmap): faiss.read_index(..., IO_FLAG_MMAP) is NOT supported
+        # for HNSW (IndexHNSWFlat) — mmap works only for Flat/IVF layouts.
+        # Switching the index type would change search semantics, so the
+        # capacity answer for the current index is:
+        #   * CoW rebuild (read phase outside the search lock, see
+        #     _rebuild_index), and
+        #   * dirty-flag rebuild from SQLite (no stale on-disk index ever
+        #     loaded), which is what _load_index does below.
         with self._locked():
             if os.path.exists(self.index_path):
                 db = getattr(self, "db", None)
@@ -352,20 +362,30 @@ class VectorIndex:
         self._dirty_updates += 1
 
     def _rebuild_index(self) -> None:
+        """Rebuild the FAISS index from SQLite (source of truth).
+
+        R7 (CoW): the expensive part — reading all rows and building the new
+        HNSW — runs WITHOUT holding the search lock, so concurrent readers
+        keep working on the old index. The final swap (index + maps) is a
+        short critical section. Callers that already hold `self.lock`
+        (delete_for_content_batch) still serialize, but the read phase is
+        outside the lock, which is what dominated the blocking time.
+        """
         import faiss
         import numpy as np
-        
-        self.id_to_content = {}
-        self.id_to_hash = {}
-        self.hash_to_id = {}
-        self.id_to_type = {}
-        self._next_id = 0
-        self._deleted_ids.clear()
-        
-        base_index = faiss.IndexHNSWFlat(_EMBEDDING_DIM, 32)
-        self.index = faiss.IndexIDMap(base_index)
-        
+        import time as _time
+        t0 = _time.perf_counter()
+
+        # Phase 1 (no search lock): snapshot the DB state into locals.
+        new_id_to_content: dict[int, str] = {}
+        new_id_to_hash: dict[int, str] = {}
+        new_hash_to_id: dict[str, int] = {}
+        new_id_to_type: dict[int, str] = {}
+        next_id = 0
         seen_hashes: set[str] = set()
+
+        base_index = faiss.IndexHNSWFlat(_EMBEDDING_DIM, 32)
+        new_index = faiss.IndexIDMap(base_index)
 
         with self._conn() as conn:
             cursor = conn.execute(
@@ -379,12 +399,10 @@ class VectorIndex:
                 WHERE content_type NOT IN ('query', 'fact')
                 """
             )
-            
             while True:
                 rows = cursor.fetchmany(2000)
                 if not rows:
                     break
-                
                 arr_vecs = []
                 ids = []
                 for content, blob, content_type in rows:
@@ -392,31 +410,53 @@ class VectorIndex:
                     if content_hash in seen_hashes:
                         continue
                     seen_hashes.add(content_hash)
-                    
                     arr_vecs.append(_blob_to_float_list(blob))
-                    current_id = self._next_id
-                    self.id_to_content[current_id] = content
-                    self.id_to_hash[current_id] = content_hash
-                    self.hash_to_id[content_hash] = current_id
-                    self.id_to_type[current_id] = content_type
+                    current_id = next_id
+                    new_id_to_content[current_id] = content
+                    new_id_to_hash[current_id] = content_hash
+                    new_hash_to_id[content_hash] = current_id
+                    new_id_to_type[current_id] = content_type
                     ids.append(current_id)
-                    self._next_id += 1
-                
+                    next_id += 1
                 if arr_vecs:
                     arr = np.array(arr_vecs, dtype=np.float32)
                     faiss.normalize_L2(arr)
                     ids_arr = np.array(ids, dtype=np.int64)
-                    self.index.add_with_ids(arr, ids_arr)
-                    
-                    # explicit memory free for large batches
-                    del arr
-                    del ids_arr
-                    del arr_vecs
-                    del ids
-            
-        self._is_initialized = True
+                    new_index.add_with_ids(arr, ids_arr)
+                    del arr, ids_arr, arr_vecs, ids
+
+        # Phase 2 (short critical section): atomically swap the live state.
+        with self.lock:
+            self.index = new_index
+            self.id_to_content = new_id_to_content
+            self.id_to_hash = new_id_to_hash
+            self.hash_to_id = new_hash_to_id
+            self.id_to_type = new_id_to_type
+            self._next_id = next_id
+            self._deleted_ids.clear()
+            self._is_initialized = True
+
         self.save_index_to_disk()
         self._sync_fts()
+        self._last_rebuild_seconds = _time.perf_counter() - t0
+        logger.info("FAISS index rebuilt from SQLite in %.2fs (%d vectors)",
+                    self._last_rebuild_seconds, next_id)
+
+    def _cow_rebuild_eligible(self, ntotal: int) -> bool:
+        """R7: should an inline rebuild be DEFERRED (CoW) instead?
+
+        Thresholds from config (measured, not guessed):
+          * ntotal > FAISS_COW_NTOTAL_THRESHOLD (default 50000), or
+          * last rebuild took longer than FAISS_COW_REBUILD_P95 (default 2s).
+        When eligible, tombstones are persisted and the rebuild happens at the
+        next flush/startup — readers never wait for a multi-second rebuild.
+        """
+        from companion.config import (
+            FAISS_COW_NTOTAL_THRESHOLD,
+            FAISS_COW_REBUILD_P95,
+        )
+        return (int(ntotal) > int(FAISS_COW_NTOTAL_THRESHOLD)
+                or float(self._last_rebuild_seconds) > float(FAISS_COW_REBUILD_P95))
 
     def _content_hash(self, text: str) -> str:
         import hashlib
@@ -553,18 +593,28 @@ class VectorIndex:
         hash_to_text = dict(zip(hashes, valid_texts))
         existing_by_hash: dict[str, list[float]] = {}
         
+        # R7: chunk IN clauses — SQLite caps bound variables (32766); a
+        # reindex of a large memory would otherwise raise "too many SQL
+        # variables". 500 per statement is safely under the limit.
+        _IN_CHUNK = 500
         with self._conn() as conn:
             if content_type == "fact":
-                fact_rows = conn.execute(
-                    f"SELECT fact, embedding FROM facts WHERE embedding IS NOT NULL AND fact IN ({','.join(['?'] * len(valid_texts))})",
-                    valid_texts,
-                ).fetchall()
-                for fact, blob in fact_rows:
-                    existing_by_hash[self._content_hash(fact)] = _blob_to_float_list(blob)
-            query = f"SELECT content, content_hash, embedding FROM embeddings WHERE content_hash IN ({','.join(['?'] * len(hashes))})"
-            rows = conn.execute(query, hashes).fetchall()
-            for content, content_hash, blob in rows:
-                existing_by_hash.setdefault(content_hash, _blob_to_float_list(blob))
+                for start in range(0, len(valid_texts), _IN_CHUNK):
+                    chunk = valid_texts[start:start + _IN_CHUNK]
+                    placeholders = ",".join("?" for _ in chunk)
+                    fact_rows = conn.execute(
+                        f"SELECT fact, embedding FROM facts WHERE embedding IS NOT NULL AND fact IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                    for fact, blob in fact_rows:
+                        existing_by_hash[self._content_hash(fact)] = _blob_to_float_list(blob)
+            for start in range(0, len(hashes), _IN_CHUNK):
+                chunk = hashes[start:start + _IN_CHUNK]
+                placeholders = ",".join("?" for _ in chunk)
+                query = f"SELECT content, content_hash, embedding FROM embeddings WHERE content_hash IN ({placeholders})"
+                rows = conn.execute(query, chunk).fetchall()
+                for content, content_hash, blob in rows:
+                    existing_by_hash.setdefault(content_hash, _blob_to_float_list(blob))
             found_hashes = set(existing_by_hash)
             if content_type == "fact":
                 conn.executemany(
@@ -897,7 +947,16 @@ class VectorIndex:
                         self._deleted_ids.add(del_id)
                     total_vectors = getattr(self.index, "ntotal", 0)
                     if len(self._deleted_ids) > 1000 or (total_vectors > 0 and (len(self._deleted_ids) / total_vectors) > 0.10):
-                        self._rebuild_index()
+                        # R7 (CoW gate): for LARGE indices an inline rebuild
+                        # inside this critical section would block readers for
+                        # seconds. Persist the tombstones and defer the rebuild
+                        # to the next flush/startup instead; small indices
+                        # rebuild inline (fast, no observable stall).
+                        if self._cow_rebuild_eligible(total_vectors):
+                            self.save_index_to_disk()
+                            logger.info("FAISS: deferred rebuild (CoW gate, ntotal=%d)", total_vectors)
+                        else:
+                            self._rebuild_index()
                     else:
                         self.save_index_to_disk()
                     return

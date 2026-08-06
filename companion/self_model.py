@@ -33,8 +33,8 @@ class SelfModel:
         self.data = self._load()
 
     def _load(self) -> dict[str, Any]:
-        from companion.storage.sqlite_db import MemoryDatabase
-        db = MemoryDatabase()
+        from companion.storage.sqlite_db import get_shared_db
+        db = get_shared_db()
         loaded = db.get_state_model("self")
         if loaded:
             return loaded
@@ -89,8 +89,8 @@ class SelfModel:
 
     def save(self) -> None:
         self.data["last_updated"] = datetime.now().isoformat()
-        from companion.storage.sqlite_db import MemoryDatabase
-        db = MemoryDatabase()
+        from companion.storage.sqlite_db import get_shared_db
+        db = get_shared_db()
         db.save_state_model("self", self.data)
 
     def log_error(

@@ -60,3 +60,263 @@ NEXT (R2+): counts/provenance hooks in add_relation; genome writers;
 working-memory slot sweep; homeostasis entropy trigger; council persistence.
 
 No git commit performed (per project rule).
+
+R2 UPDATE (2026-08-05) Ч epistemic kernel logic + invariant tests
+==================================================================
+STATUS: R2 completed (counts, provenance, cycle auditor, genome parity).
+
+Committed by user in 44efb96 ("giga"): sqlite_db migration + genome CRUD,
+models.py Fact fields, lifecycle CONTRADICTED, store.py counters+genome hook,
+consolidation audit/parity, vector_index fsync fix.
+
+Uncommitted follow-up (this working tree):
+  bot_core.py       Ч nightly wiring: reconcile_genome_parity, audit_provenance_cycles + quarantine
+  llm/pipeline.py   Ч extract_causal_links sets link.derived_from (shown ids only)
+  reasoning.py      Ч CausalLink gains derived_from/method fields (round-trips)
+  tests/test_cognitive_r2.py Ч 9 invariant tests (all pass)
+
+Full suite: 331 passed / 4 failed (same 4 pre-existing pending_embedding artifacts).
+
+SECURITY FLAG: commit 44efb96 includes api.env (secrets). Working tree now
+shows 'D api.env' (staged deletion) but the secret remains in git history Ч
+rotate the token if the repo is ever shared/pushed.
+
+R4 NEXT: homeostasis entropy computation (table exists, additive only).
+
+R4 UPDATE (2026-08-05) Ч homeostasis entropy (kernel K8)
+==========================================================
+STATUS: R4 metrics part COMPLETED (additive; no behavior mutation).
+
+  consolidation.py:
+    compute_homeostasis(store)  Ч M3 entropy = w1*contra + w2*stale +
+      w3*null_emb + w4*infl + w5*quar; writes homeostasis_metrics row.
+    homeostasis_sleep_due(store, window=3) Ч moving-average > tau (0.35).
+  sqlite_db.py: insert_homeostasis_metrics / list_homeostasis_metrics.
+  bot_core.py: nightly logs entropy + warns on breach (logs only, no auto
+    sleep cycle Ч the force-sleep action is deferred to a human-approved step).
+
+  New tests (12 total in test_cognitive_r2.py, all pass):
+    - homeostasis records metrics row
+    - sleep_due needs 3-sample window (1 sample never triggers)
+    - poisoning mix (5 superseded via contradicts, 2 quarantined, 2 stale)
+      breaches the trigger
+
+  Test discovery during the poisoning test: the lifecycle validator correctly
+  REJECTED superseded->quarantine (invalid transition) Ч the state machine
+  works as designed; test was fixed to quarantine before supersession.
+
+Full suite: 334 passed / 4 failed (same 4 pre-existing artifacts).
+
+FUTURE (deferred, per blueprint order):
+  R5 council on high-stakes mutations; R6 ToM + narrative arcs read-models;
+  R7 capacity (CoW rebuild, IN chunking, mmap). The force-sleep action of R4
+  is intentionally log-only until the Sleep Cycle itself exists.
+
+R3 UPDATE (2026-08-06) Ч Cognitive Working Memory (K5) COMPLETED
+================================================================
+  sqlite_db.py:
+    - cognitive_working_memory gains rchived column (guarded ALTER, R1
+      table retrofitted; Iron Law #5: sweep flips flag, never DELETEs).
+    - upsert_working_memory_slot (idempotent per user/slot_type/ref_id),
+      archive_expired_working_memory, list_live_working_memory_slots,
+      count_live_working_memory_slots, evict_working_memory_slots (cap 50).
+  memory/working_memory.py (NEW): WorkingMemoryService
+    - update_from_turn(user_id, mood_state, needs_clarification,
+      captured_goal, active_goals, top_facts) -> slots:
+      current_goal(24h TTL), active_identity(7d), open_question(4h),
+      salient_fact(24h), affective_state(1h); score-gated (>=0.55);
+      identity-tag gated (anchor/core_identity/pinned/permanent).
+    - snapshot(user_id) for prompt assembly. All writes guarded non-fatal.
+  store.py: MemoryStore.working_memory property (WorkingMemoryService).
+  bot_core.py: build_context refreshes slots per turn in a worker thread
+    (guarded; working memory never blocks/fails the conversation).
+
+  Tests tests/test_cognitive_r3.py (9 tests, all pass): slot derivation,
+  score gating, identity tags, upsert idempotency + freshness refresh,
+  expiry flips archived (not delete), cap 50 with salience-survival,
+  per-user isolation, snapshot stability.
+
+  Full suite: 343 passed / 4 failed (same 4 pre-existing artifacts).
+
+REMAINING ROADMAP: R5 council (high-stakes mutations), R6 ToM/narrative
+read-models, R7 capacity (CoW rebuild, IN chunking, mmap). R4 force-sleep
+action stays log-only until a Sleep Cycle exists.
+
+PHASES A/B/C UPDATE (2026-08-06) Ч cognitive loop closed, production hardening
+===============================================================================
+FULL SUITE: 360 passed / 0 failed (all pre-existing failures fixed).
+
+PHASE A (user-prioritized): Working Memory -> Prompt + Cognitive Gravity
+  models.py: ContextBundle.working_memory_block; to_prompt_block renders it
+    FIRST (<working_memory> desk-first, archive-second).
+  retrieval.py: select() gains working_memory_block/working_memory_ids/
+    genome_scores; _ranked_score now adds gravity terms: support_term
+    (support_count*0.04 cap .20), survival_term ((survival-0.5)*0.2 cap .15),
+    wm_boost (.30 if fact in WM slots), contradiction_penalty (contra*0.10
+    cap .30). No channel dominates; defaults preserve old behavior.
+  bot_core.py: _format_working_memory_block + _load_genome_scores helpers;
+    _generate_and_send_response passes WM block/ids + genome scores to select.
+  sessions.py: fallback path (no precomputed_context) also wires WM + genome.
+  Tests: tests/test_cognitive_a1.py (6) Ч WM-first, gravity boosts support,
+    contradiction penalty, WM topicality tie-break, defaults preserved.
+
+PHASE B: Event Journal + Snapshot system
+  sqlite_db.py: event_journal table (applied flag, index); insert/
+    list_pending/mark_applied. get_shared_db/reset_shared_db (Phase C).
+  events/base.py: event_to_journal/event_from_journal (dataclass registry).
+  events/bus.py: journal_db param; publish journals BEFORE dispatch, marks
+    applied AFTER; replay_pending() re-queues unapplied at startup; shutdown
+    handles (jid,event) tuples; journal=False for replay (no double-append).
+  store.py: MemoryEventBus(journal_db=self.db); replay_event_journal().
+  main.py: replay before embedding test.
+  snapshot.py (NEW): create_snapshot (VACUUM INTO + faiss cache copy +
+    manifest + prune keep=N), list_snapshots, restore_snapshot (offline,
+    marks faiss_index_dirty for rebuild). config.SNAPSHOT_DIR.
+  bot_core.py: nightly snapshot.
+  Tests: tests/test_cognitive_b1.py (7) Ч journal-before-dispatch, replay,
+    unknown-event non-blocking, create/list/prune/restore.
+  NOTE: restore is OFFLINE (Windows locks the live WAL file); test closes the
+    store first Ч real restores happen after process stop.
+
+PHASE C: Single MemoryDatabase + CI cleanup
+  sqlite_db.py: get_shared_db() path-keyed thread-safe singleton +
+    reset_shared_db() for tests. reasoning/user_model/self_model/telemetry
+    now use the shared connection (kills per-call MemoryDatabase churn:
+    user_model._save_model leaked a fresh connection on EVERY save).
+  MemoryStore keeps its own instance (close() owns bus drain + db lifecycle).
+  Tests fixed to intended behavior (CI cleanup):
+    - test_confirmed_bugs: active->pending_embedding expectation
+    - test_crash_consistency (3): pending_embedding, no-inline-retry,
+      dedup test now mocks successful embedding (dedup gate excludes pending)
+    - test_advanced_bugs memory-leak: per-text vectors (constant vector
+      collapsed via content-hash dedup), distinct texts (near-dup gate),
+      exact-content absence check (near-identical neighbors may match query)
+
+REMAINING: R5 council, R6 ToM/narrative, R7 capacity, R4 force-sleep action.
+
+PHASE D UPDATE (2026-08-06) Ч Council, ToM, Narrative, Sleep, Immune
+====================================================================
+FULL SUITE: 386 passed / 0 failed.
+
+R5 Internal Council (council.py, NEW):
+  - 5 deterministic roles (no LLM, 8GB-safe): Explorer (novelty vs facts/
+    beliefs via text_overlap), Critic (contradiction>support quarantine),
+    Historian (churn >5 mutations/24h), Predictor (protected-anchor
+    quarantine), Guardian (injection veto + permanent-promotion guard).
+  - CouncilVerdict: Guardian reject = hard veto; majority accept.
+  - Votes persist to council_votes (auditable); any role error -> abstain.
+  - store.add_belief: high-stakes belief adoption runs the council; a
+    non-approved verdict demotes to pending_review (kept, Iron Law #5).
+  - sqlite_db: insert_council_vote/list_council_votes.
+  - _insert_fact now persists epistemic_class/support_count/contradiction_count
+    (previously dropped on direct inserts Ч council's critic reads them).
+  - Tests: test_cognitive_c1.py (10).
+
+R6 Theory of Mind (tom.py, NEW):
+  - L1 behavior from fact mentions (entity_mentions), L2 values from patterns,
+    L3 meta ONLY from explicit reflected statement (never auto-derived).
+  - refresh() supersedes stale active claims (kept), inserts new; TTL per
+    level (365/180/30d) excludes aged claims from active_for.
+  - sqlite_db: insert_tom_claim/list_tom_claims/update_tom_status.
+  - Tests: test_cognitive_c2.py (9).
+
+R6 Narrative Identity (narrative.py, NEW):
+  - Derived read-model: keyword-clustered arcs (музыка/карьера/психика/
+    отношени€/здоровье/домашние) over episodes+transitions+patterns.
+    No authoritative narrative storage; importance+event_count sort.
+  - Tests: test_cognitive_c2.py (3).
+
+R4 Sleep Cycle (sleep.py, NEW):
+  - run_sleep_cycle: compress_dormant_episodes + apply_importance_decay +
+    genome survival re-evaluation (used thrive / stale fade to 0.2) +
+    ToM/narrative refresh. Idempotent, bounded, never crashes on empty.
+  - Activated in bot_core nightly when homeostasis_sleep_due() == True.
+
+R4 Immune System (immune.py, NEW):
+  - immune_audit: confidence inflation (>=0.95, zero support/usage,
+    non-DIRECT) -> auto-quarantine + mutation log; unseen LLM inferences
+    (never retrieved, >=90d) flagged; protected anchors exempt.
+  - Conservative: quarantine, never delete (Iron Law #5).
+  - Activated in bot_core nightly on homeostasis breach.
+  - Tests: test_cognitive_c3.py (7).
+
+All remaining roadmap items shipped. R7 (capacity: CoW rebuild, IN chunking,
+mmap) deferred to measured thresholds (ntotal > 50k / rebuild p95 > 2s).
+
+R7 + TIMELINE UPDATE (2026-08-06)
+==================================
+FULL SUITE: 397 passed / 0 failed.
+
+R7 Capacity:
+  - IN-chunking: hydrate_fact_metadata + compute_and_cache_batch chunk at 500
+    (SQLite variable limit 32766); _load_genome_scores already chunked at 400.
+  - CoW rebuild: _rebuild_index() now runs the expensive read/build phase
+    OUTSIDE the search lock and swaps index+maps under a short critical
+    section; _cow_rebuild_eligible() defers inline rebuild for large indices
+    (ntotal > FAISS_COW_NTOTAL_THRESHOLD=50000 OR last rebuild >
+    FAISS_COW_REBUILD_P95=2.0s) Ч tombstones persisted, rebuild deferred to
+    next flush/startup so readers never wait seconds.
+  - mmap: REJECTED with engineering rationale Ч faiss IO_FLAG_MMAP is
+    unsupported for HNSW (only Flat/IVF); switching index type would change
+    search semantics. Documented in _load_index; capacity answer = CoW +
+    dirty-flag rebuild from SQLite.
+  - Tests: tests/test_cognitive_d2.py (5) Ч 600-id hydrate, 700-text batch,
+    CoW gate thresholds, rebuild consistency.
+
+Cognitive Timeline (writer connected, gap closed):
+  - memory/timeline.py (NEW): CognitiveTimeline materializes cognitive_timeline
+    from event_journal (watermark meta 'timeline_journal_watermark', idempotent,
+    applied-only rows). Event type -> phase: retrieval=interpretation,
+    mutation=decision, lifecycle=memory_update, unknown=perception.
+  - archive_old(90d) flags old ticks (Iron Law #5); recent() for observability.
+  - sqlite_db: list_journal_after/insert_timeline_tick/archive_timeline_before/
+    list_timeline_ticks.
+  - store.timeline property; main.py materializes at startup.
+  - Tests: tests/test_cognitive_d1.py (6).
+
+DB investigation (user concern Ч validated):
+  - data/companion.db is EMPTY by DEV RESET, not data loss: bot.log shows
+    startup 06.08 with '400 API key not valid' (nothing written); git
+    44efb96->90d7a3e deliberately removed runtime artifacts.
+  - Real history survives in legacy files: data/messages.jsonl (708 msgs,
+    2026-06-08..07-01), audit_archive.db (2954 events, 2712 fact inserts),
+    faiss_mapping.json, world_model.json, shared_lore_candidates.jsonl.
+  - Risk confirmed: new kernel tested on empty memory; restoration of legacy
+    history into the new DB is a SEPARATE task (not urgent, no data lost).
+
+LEGACY IMPORT PIPELINE (2026-08-06)
+====================================
+FULL SUITE: 405 passed / 0 failed.
+
+New module: companion/legacy_import.py (LegacyImportPipeline) + CLI
+  (python -m companion.legacy_import --path ... [--dry-run] [--facts-only]).
+
+Architecture contract honored: NO direct INSERT into facts. Flow:
+  messages.jsonl -> parser (tolerant jsonl) -> store.log_message (sanitize,
+  stable id msg_<sha1(ts|role|text)>, INSERT OR IGNORE) -> extract_fact_candidates
+  (deterministic heuristics: user msgs, >=30 chars, importance>=5, chit-chat
+  filter) -> store.add_fact (dedup -> ADMISSION GATE -> governor -> atomic txn
+  -> FactCreatedEvent -> event journal -> FAISS embedding).
+
+Two architectural holes found & FIXED (benefit all paths, not just import):
+  1) add_fact had NO injection admission gate (only compress pipeline and
+     add_belief checked). Added: injection-marked facts -> pending_review
+     (kept, Iron Law #5, hidden from retrieval). This is the real Admission
+     Controller the blueprint required on the canonical path.
+  2) add_fact did not write memory_mutation_log. Added post-commit log_mutation
+     (action=create) Ч provenance/audit for every creation.
+
+Idempotency: stable fact id legacy_<sha1(text)[:16]> + existence check in
+import_facts (dedup gate only sees active/dormant; a pending_embedding fact
+would otherwise re-import). Re-run -> 'already_imported' (marker
+legacy_import_done_v1 = sha256(file)).
+
+Live import result on data/messages.jsonl (dev DB, invalid API key):
+  708 messages (362 user / 346 assistant), 82 facts (79 pending_embedding Ч
+  API key invalid so embeddings deferred to recovery; 3 pending_review Ч
+  injections caught by admission gate), 0 text dupes, 197 journal events,
+  82 genome rows (1:1), 198 mutation entries.
+
+Tests: tests/test_legacy_import.py (8) Ч tolerant parser, message idempotency,
+candidate filters, live-architecture side effects (genome/journal/embedding/
+mutation), injection quarantine, full-run idempotency, dry-run no-writes.

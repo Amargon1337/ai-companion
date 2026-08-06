@@ -68,6 +68,10 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 
 SQLITE_PATH = os.path.join(DATA_DIR, "companion.db")
 
+# Phase B: consistent memory snapshots (SQLite + FAISS cache). Ops hygiene —
+# snapshot retention pruning is file-level, never touches memory rows.
+SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", os.path.join(DATA_DIR, "snapshots"))
+
 # Logging
 LOG_PATH = os.getenv("LOG_PATH", os.path.join(BASE_DIR, "bot.log"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -105,6 +109,10 @@ LLM_INPUT_TOKEN_BUDGET = int(os.getenv("LLM_INPUT_TOKEN_BUDGET", "24000"))
 LLM_HISTORY_TOKEN_BUDGET = int(os.getenv("LLM_HISTORY_TOKEN_BUDGET", "8000"))
 FAISS_FLUSH_EVERY = int(os.getenv("FAISS_FLUSH_EVERY", "25"))
 FAISS_FLUSH_INTERVAL_SECONDS = int(os.getenv("FAISS_FLUSH_INTERVAL_SECONDS", "30"))
+# R7 capacity thresholds: inline FAISS rebuild is deferred (CoW) when the
+# index is large or the last rebuild was slow — readers never wait seconds.
+FAISS_COW_NTOTAL_THRESHOLD = int(os.getenv("FAISS_COW_NTOTAL_THRESHOLD", "50000"))
+FAISS_COW_REBUILD_P95 = float(os.getenv("FAISS_COW_REBUILD_P95", "2.0"))
 RETRIEVAL_WEIGHTS_PATH = os.getenv("RETRIEVAL_WEIGHTS_PATH", "evaluation/retrieval_weights.json")
 
 # LCE (Life Continuity Engine): извлечение переходов НЕ каждый compress,

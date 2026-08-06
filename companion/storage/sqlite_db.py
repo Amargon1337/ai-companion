@@ -34,6 +34,50 @@ def _configure_conn(conn: sqlite3.Connection) -> None:
   conn.execute("PRAGMA busy_timeout = 5000;")
   conn.execute("PRAGMA journal_mode = WAL;")
   conn.execute("PRAGMA foreign_keys = ON;")
+
+
+# Phase C: one shared MemoryDatabase per SQLite path. The memory organism used
+# to open a fresh connection per component (reasoning_engine singleton,
+# user_model._save_model on EVERY save, self_model, telemetry per call) — each
+# bypassing the RLock/tx-depth model and churning connections. get_shared_db()
+# hands out a single instance per path, so all satellites serialize against
+# the same lock. MemoryStore deliberately keeps its OWN instance (lifecycle
+# ownership: close() drains the bus and closes the db), but everything else
+# shares one connection. Path-keying preserves test isolation (each test
+# monkeypatches SQLITE_PATH -> its own shared instance).
+_shared_db: "MemoryDatabase | None" = None
+_shared_db_lock = None
+
+
+def get_shared_db() -> "MemoryDatabase":
+  global _shared_db, _shared_db_lock
+  import threading
+  if _shared_db_lock is None:
+    _shared_db_lock = threading.Lock()
+  from companion.config import SQLITE_PATH
+  with _shared_db_lock:
+    if (_shared_db is None
+        or _shared_db.path != SQLITE_PATH
+        or _shared_db.conn is None):
+      _shared_db = MemoryDatabase()
+    return _shared_db
+
+
+def reset_shared_db() -> None:
+  """Drop the cached shared instance (tests that swap SQLITE_PATH)."""
+  global _shared_db, _shared_db_lock
+  import threading
+  if _shared_db_lock is None:
+    _shared_db_lock = threading.Lock()
+  with _shared_db_lock:
+    if _shared_db is not None:
+      try:
+        _shared_db.close()
+      except Exception:
+        pass
+      _shared_db = None
+
+
 class MemoryDatabase:
   def __init__(self, path: str | None = None) -> None:
     import threading
@@ -795,6 +839,14 @@ class MemoryDatabase:
     conn.execute(
       "CREATE INDEX IF NOT EXISTS idx_cwm_user_live ON cognitive_working_memory (user_id, expires_at);"
     )
+    # Iron Law #5: working-memory housekeeping FLIPS a flag, it never DELETEs.
+    # Slots that expire or are evicted by the per-user cap move to archived.
+    try:
+      cwm_cols = {r[1] for r in conn.execute("PRAGMA table_info(cognitive_working_memory)").fetchall()}
+      if "archived" not in cwm_cols:
+        conn.execute("ALTER TABLE cognitive_working_memory ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0,1))")
+    except sqlite3.OperationalError as e:
+      logger.error("Cognitive schema: cognitive_working_memory alter failed: %s", e, exc_info=True)
     # -- Theory of Mind (derived): layered social cognition; never DIRECT_FACT --
     conn.execute(
       """
@@ -868,6 +920,25 @@ class MemoryDatabase:
         entropy_score REAL NOT NULL
       );
       """
+    )
+    # -- Event journal (Phase B): durable record of published memory events.
+    #    Crash-consistency bridge between SQLite commit and FAISS drain: an
+    #    event is appended BEFORE the worker applies side effects; replay at
+    #    startup re-applies anything still pending. Never deleted (Iron Law #5).
+    conn.execute(
+      """
+      CREATE TABLE IF NOT EXISTS event_journal (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_type TEXT NOT NULL,
+        payload TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        applied INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0,1)),
+        applied_at TEXT
+      );
+      """
+    )
+    conn.execute(
+      "CREATE INDEX IF NOT EXISTS idx_event_journal_pending ON event_journal (applied, id);"
     )
 
 
@@ -1107,9 +1178,10 @@ class MemoryDatabase:
           schema_version, evidence, facts_sent_count, facts_used_count, embedding,
           category, anchor_flag, manual_lock, archived, updated_at,
           last_accessed, access_count, decay_exempt, domain, meta,
-          last_retrieved_at, last_used_at, superseded_by
+          last_retrieved_at, last_used_at, superseded_by,
+          epistemic_class, support_count, contradiction_count
         ) VALUES
-        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
           fact=excluded.fact,
           date=excluded.date,
@@ -1138,7 +1210,10 @@ class MemoryDatabase:
           meta=excluded.meta,
           last_retrieved_at=COALESCE(excluded.last_retrieved_at, facts.last_retrieved_at),
           last_used_at=COALESCE(excluded.last_used_at, facts.last_used_at),
-          superseded_by=excluded.superseded_by
+          superseded_by=excluded.superseded_by,
+          epistemic_class=COALESCE(excluded.epistemic_class, facts.epistemic_class),
+          support_count=excluded.support_count,
+          contradiction_count=excluded.contradiction_count
         """,
         (
           row["id"], row["fact"], row.get("date"), row.get("created_at"),
@@ -1157,6 +1232,9 @@ class MemoryDatabase:
           json.dumps(row.get("meta") or {}, ensure_ascii=False),
           row.get("last_retrieved_at"), row.get("last_used_at"),
           row.get("superseded_by") or "",
+          row.get("epistemic_class", "DIRECT_FACT"),
+          row.get("support_count", 0),
+          row.get("contradiction_count", 0),
         ),
       )
 
@@ -1365,6 +1443,320 @@ class MemoryDatabase:
         (limit,),
       ).fetchall()
       return [r[0] for r in rows]
+
+  # --- Homeostasis metrics (K8) ------------------------------------------
+
+  def insert_homeostasis_metrics(self, *, contradiction_density: float,
+                                 stale_ratio: float, null_embedding_ratio: float,
+                                 confidence_inflation: float, quarantine_ratio: float,
+                                 entropy_score: float) -> None:
+    from datetime import datetime
+    with self._conn() as conn:
+      conn.execute(
+        """
+        INSERT INTO homeostasis_metrics
+          (measured_at, contradiction_density, stale_ratio, null_embedding_ratio,
+           confidence_inflation, quarantine_ratio, entropy_score)
+        VALUES (?,?,?,?,?,?,?)
+        """,
+        (
+          datetime.now().isoformat(), contradiction_density, stale_ratio,
+          null_embedding_ratio, confidence_inflation, quarantine_ratio, entropy_score,
+        ),
+      )
+
+  def list_homeostasis_metrics(self, limit: int = 10) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      rows = conn.execute(
+        "SELECT * FROM homeostasis_metrics ORDER BY id DESC LIMIT ?",
+        (max(1, int(limit)),),
+      ).fetchall()
+      return [dict(r) for r in rows]
+
+  # --- Cognitive working memory (K5) ---------------------------------------
+
+  def upsert_working_memory_slot(self, *, user_id: int, slot_type: str,
+                                 ref_kind: str, ref_id: str, payload: str,
+                                 salience: float, expires_at: str) -> int:
+    """Upsert one working-memory slot keyed by (user_id, slot_type, ref_id).
+
+    Refreshing an existing slot renews its freshness (entered_at/expires_at)
+    instead of creating a duplicate — the same slot re-mentioning a goal keeps
+    one row. Returns the row id.
+    """
+    from datetime import datetime
+    now = datetime.now().isoformat()
+    with self._conn() as conn:
+      existing = conn.execute(
+        """
+        SELECT id FROM cognitive_working_memory
+        WHERE user_id=? AND slot_type=? AND ref_id=? AND archived=0
+        ORDER BY id DESC LIMIT 1
+        """,
+        (user_id, slot_type, ref_id),
+      ).fetchone()
+      if existing is not None:
+        conn.execute(
+          """
+          UPDATE cognitive_working_memory
+          SET payload=?, salience=?, entered_at=?, expires_at=?
+          WHERE id=?
+          """,
+          (payload, salience, now, expires_at, existing[0]),
+        )
+        return int(existing[0])
+      cur = conn.execute(
+        """
+        INSERT INTO cognitive_working_memory
+          (user_id, slot_type, ref_kind, ref_id, payload, salience, entered_at, expires_at, archived)
+        VALUES (?,?,?,?,?,?,?,?,0)
+        """,
+        (user_id, slot_type, ref_kind, ref_id, payload, salience, now, expires_at),
+      )
+      return int(cur.lastrowid or 0)
+
+  def archive_expired_working_memory(self) -> int:
+    """Flip archived=1 on slots past their expiry. Never deletes (Iron Law #5)."""
+    from datetime import datetime
+    now = datetime.now().isoformat()
+    with self._conn() as conn:
+      cur = conn.execute(
+        "UPDATE cognitive_working_memory SET archived=1 WHERE archived=0 AND expires_at <= ?",
+        (now,),
+      )
+      return cur.rowcount
+
+  def list_live_working_memory_slots(self, user_id: int, limit: int = 50) -> list[dict[str, Any]]:
+    """Live (unexpired, unarchived) slots for a user, highest salience first."""
+    from datetime import datetime
+    now = datetime.now().isoformat()
+    with self._conn() as conn:
+      rows = conn.execute(
+        """
+        SELECT * FROM cognitive_working_memory
+        WHERE user_id=? AND archived=0 AND expires_at > ?
+        ORDER BY salience DESC, id ASC
+        LIMIT ?
+        """,
+        (user_id, now, max(1, int(limit))),
+      ).fetchall()
+      return [dict(r) for r in rows]
+
+  def count_live_working_memory_slots(self, user_id: int) -> int:
+    from datetime import datetime
+    now = datetime.now().isoformat()
+    with self._conn() as conn:
+      row = conn.execute(
+        "SELECT COUNT(*) c FROM cognitive_working_memory WHERE user_id=? AND archived=0 AND expires_at > ?",
+        (user_id, now),
+      ).fetchone()
+      return int(row[0] if row else 0)
+
+  def evict_working_memory_slots(self, user_id: int, keep: int = 50) -> int:
+    """Enforce the per-user live-slot cap: archive the lowest-salience overflow.
+
+    Bounded memory (K5): the working set must stay small under 8GB RAM. Called
+    by the writer after each turn; only the overflow rows are flipped.
+    """
+    from datetime import datetime
+    now = datetime.now().isoformat()
+    with self._conn() as conn:
+      overflow = conn.execute(
+        """
+        SELECT id FROM cognitive_working_memory
+        WHERE user_id=? AND archived=0 AND expires_at > ?
+        ORDER BY salience ASC, id ASC
+        LIMIT -1 OFFSET ?
+        """,
+        (user_id, now, max(0, int(keep))),
+      ).fetchall()
+      if not overflow:
+        return 0
+      conn.executemany(
+        "UPDATE cognitive_working_memory SET archived=1 WHERE id=?",
+        [(r[0],) for r in overflow],
+      )
+      return len(overflow)
+
+  # --- Event journal (Phase B) ---------------------------------------------
+
+  def insert_event_journal(self, event_type: str, payload: str) -> int:
+    """Append an event to the journal BEFORE side effects are applied.
+
+    The journal is the crash-consistency bridge: publish() writes the row
+    first; the bus worker applies the FAISS/SQLite side effects and marks it
+    applied. A crash in between leaves the row pending for replay at startup.
+    """
+    from datetime import datetime
+    with self._conn() as conn:
+      cur = conn.execute(
+        """
+        INSERT INTO event_journal (event_type, payload, created_at, applied)
+        VALUES (?,?,?,0)
+        """,
+        (event_type, payload, datetime.now().isoformat()),
+      )
+      return int(cur.lastrowid or 0)
+
+  def list_pending_event_journal(self, limit: int = 2000) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      rows = conn.execute(
+        "SELECT id, event_type, payload, created_at FROM event_journal "
+        "WHERE applied=0 ORDER BY id ASC LIMIT ?",
+        (max(1, int(limit)),),
+      ).fetchall()
+      return [dict(r) for r in rows]
+
+  def mark_event_journal_applied(self, journal_id: int) -> None:
+    from datetime import datetime
+    with self._conn() as conn:
+      conn.execute(
+        "UPDATE event_journal SET applied=1, applied_at=? WHERE id=? AND applied=0",
+        (datetime.now().isoformat(), int(journal_id)),
+      )
+
+  # --- Council votes (R5: Internal Dialogue consensus) ----------------------
+
+  def insert_council_vote(self, row: dict[str, Any]) -> None:
+    with self._conn() as conn:
+      conn.execute(
+        """
+        INSERT INTO council_votes (vote_id, subject_kind, subject_id, role,
+                                   verdict, rationale, created_at)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(vote_id) DO NOTHING
+        """,
+        (
+          row["vote_id"], row["subject_kind"], row["subject_id"],
+          row["role"], row["verdict"], row.get("rationale", ""),
+          row.get("created_at", datetime.now().isoformat()),
+        ),
+      )
+
+  def list_council_votes(self, subject_kind: str, subject_id: str,
+                         limit: int = 20) -> list[dict[str, Any]]:
+    with self._conn() as conn:
+      rows = conn.execute(
+        "SELECT * FROM council_votes WHERE subject_kind=? AND subject_id=? "
+        "ORDER BY created_at DESC LIMIT ?",
+        (subject_kind, subject_id, max(1, int(limit))),
+      ).fetchall()
+      return [dict(r) for r in rows]
+
+  # --- Theory of Mind (R6: layered social cognition read-model) -------------
+
+  def insert_tom_claim(self, row: dict[str, Any]) -> int:
+    with self._conn() as conn:
+      cur = conn.execute(
+        """
+        INSERT INTO theory_of_mind
+          (subject_entity_id, level, claim, epistemic_class, confidence,
+           basis_ids, status, created_at, superseded_by)
+        VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (
+          row["subject_entity_id"], int(row["level"]), row["claim"],
+          row.get("epistemic_class", "LLM_INFERENCE"),
+          float(row.get("confidence", 0.5)),
+          _json(row.get("basis_ids", [])),
+          row.get("status", "active"),
+          row.get("created_at", datetime.now().isoformat()),
+          row.get("superseded_by"),
+        ),
+      )
+      return int(cur.lastrowid or 0)
+
+  def list_tom_claims(self, subject_entity_id: str | None = None,
+                      level: int | None = None,
+                      status: str = "active",
+                      limit: int = 100) -> list[dict[str, Any]]:
+    query = "SELECT * FROM theory_of_mind"
+    conds: list[str] = []
+    params: list[Any] = []
+    if subject_entity_id:
+      conds.append("subject_entity_id=?")
+      params.append(subject_entity_id)
+    if level is not None:
+      conds.append("level=?")
+      params.append(int(level))
+    if status:
+      conds.append("status=?")
+      params.append(status)
+    if conds:
+      query += " WHERE " + " AND ".join(conds)
+    query += " ORDER BY confidence DESC, id DESC LIMIT ?"
+    params.append(max(1, int(limit)))
+    with self._conn() as conn:
+      rows = conn.execute(query, params).fetchall()
+    res = []
+    for r in rows:
+      d = dict(r)
+      d["basis_ids"] = _loads(d.get("basis_ids"))
+      res.append(d)
+    return res
+
+  def update_tom_status(self, claim_id: int, status: str,
+                        superseded_by: int | None = None) -> None:
+    from datetime import datetime
+    with self._conn() as conn:
+      if superseded_by is not None:
+        conn.execute(
+          "UPDATE theory_of_mind SET status=?, superseded_by=? WHERE id=?",
+          (status, superseded_by, int(claim_id)),
+        )
+      else:
+        conn.execute(
+          "UPDATE theory_of_mind SET status=? WHERE id=?",
+          (status, int(claim_id)),
+        )
+
+  # --- Cognitive timeline (R7: read-model over event_journal) --------------
+
+  def list_journal_after(self, journal_id: int, limit: int = 2000) -> list[dict[str, Any]]:
+    """Journal rows strictly above the watermark (timeline materialization)."""
+    with self._conn() as conn:
+      rows = conn.execute(
+        "SELECT id, event_type, payload, created_at FROM event_journal "
+        "WHERE id > ? AND applied=1 ORDER BY id ASC LIMIT ?",
+        (max(0, int(journal_id)), max(1, int(limit))),
+      ).fetchall()
+      return [dict(r) for r in rows]
+
+  def insert_timeline_tick(self, *, turn_id: str, user_id: int, phase: str,
+                           payload_hash: str, payload: str,
+                           created_at: str) -> int:
+    with self._conn() as conn:
+      cur = conn.execute(
+        """
+        INSERT INTO cognitive_timeline
+          (turn_id, user_id, phase, payload_hash, payload, created_at, archived)
+        VALUES (?,?,?,?,?,?,0)
+        """,
+        (turn_id, int(user_id or 0), phase, payload_hash, payload, created_at),
+      )
+      return int(cur.lastrowid or 0)
+
+  def archive_timeline_before(self, cutoff_iso: str) -> int:
+    """Flag ticks older than cutoff as archived (bounded table, never deletes)."""
+    with self._conn() as conn:
+      cur = conn.execute(
+        "UPDATE cognitive_timeline SET archived=1 WHERE archived=0 AND created_at <= ?",
+        (cutoff_iso,),
+      )
+      return cur.rowcount
+
+  def list_timeline_ticks(self, limit: int = 50,
+                          phase: str | None = None) -> list[dict[str, Any]]:
+    query = "SELECT * FROM cognitive_timeline WHERE archived=0"
+    params: list[Any] = []
+    if phase:
+      query += " AND phase=?"
+      params.append(phase)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, int(limit)))
+    with self._conn() as conn:
+      rows = conn.execute(query, params).fetchall()
+      return [dict(r) for r in rows]
 
 
 
@@ -2075,19 +2467,27 @@ class MemoryDatabase:
     if not fact_ids:
       return {}
     unique_ids = list(dict.fromkeys(fact_ids))
-    placeholders = ",".join("?" for _ in unique_ids)
+    result: dict[str, dict[str, Any]] = {}
+    # R7: chunk the IN clause — SQLite's variable limit (32766) caps how many
+    # ids can ride in a single statement; chunk at 500 for safety.
+    _CHUNK = 500
     with self._conn() as conn:
-      rows = conn.execute(
-        f"""
-        SELECT id, importance, category, anchor_flag, manual_lock, archived,
-               created_at, date, updated_at, last_accessed, access_count, decay_exempt,
-               memory_kind, tags, status, facts_sent_count
-        FROM facts
-        WHERE id IN ({placeholders})
-        """,
-        unique_ids,
-      ).fetchall()
-    return {r["id"]: self._row_fact(r) for r in rows}
+      for start in range(0, len(unique_ids), _CHUNK):
+        chunk = unique_ids[start:start + _CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+          f"""
+          SELECT id, importance, category, anchor_flag, manual_lock, archived,
+                 created_at, date, updated_at, last_accessed, access_count, decay_exempt,
+                 memory_kind, tags, status, facts_sent_count
+          FROM facts
+          WHERE id IN ({placeholders})
+          """,
+          chunk,
+        ).fetchall()
+        for r in rows:
+          result[r["id"]] = self._row_fact(r)
+    return result
 
   def record_fact_access_batch(self, fact_scores: list[tuple[str, float, float]], query_hash: str | None = None, retrieval_reason: str = "semantic") -> None:
     if not fact_scores:

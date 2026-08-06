@@ -10,6 +10,10 @@ def clean_db():
     import companion.config
     old_path = companion.config.SQLITE_PATH
     companion.config.SQLITE_PATH = test_db_path
+    # Phase C: shared-DB cache must be dropped, else the old connection stays
+    # bound to a (possibly deleted) file and test state leaks between tests.
+    from companion.storage.sqlite_db import reset_shared_db
+    reset_shared_db()
     
     if os.path.exists(test_db_path):
         try:
@@ -23,6 +27,7 @@ def clean_db():
     
     db.close()
     companion.config.SQLITE_PATH = old_path
+    reset_shared_db()
     if os.path.exists(test_db_path):
         try:
             os.remove(test_db_path)

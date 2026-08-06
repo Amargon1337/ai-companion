@@ -10,9 +10,7 @@ from typing import Any
 
 from companion.config import DATA_DIR
 from companion.memory.text_sim import text_overlap
-from companion.storage.sqlite_db import MemoryDatabase
 
-from companion.storage.sqlite_db import MemoryDatabase
 class Goal:
     """Долговременная цель пользователя."""
 
@@ -78,6 +76,8 @@ class CausalLink:
         observed_count: int = 1,
         created_at: str | None = None,
         link_id: str | None = None,
+        derived_from: list[str] | None = None,
+        method: str = "llm",
     ):
         self.cause = cause
         self.effect = effect
@@ -87,6 +87,10 @@ class CausalLink:
         self.observed_count = observed_count
         self.created_at = created_at or datetime.now().isoformat()
         self.link_id = link_id or f"link_{os.urandom(4).hex()}"
+        # R2 provenance: fact ids the link was derived from (must be ids the
+        # model was actually shown); method = llm|rule|human|compression.
+        self.derived_from = derived_from or []
+        self.method = method
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -98,6 +102,8 @@ class CausalLink:
             "mechanism": self.mechanism,
             "observed_count": self.observed_count,
             "created_at": self.created_at,
+            "derived_from": self.derived_from,
+            "method": self.method,
         }
 
     @classmethod
@@ -111,7 +117,10 @@ class ReasoningEngine:
     def __init__(self):
         import threading
         self._lock = threading.RLock()
-        self.db = MemoryDatabase()
+        # Phase C: shared connection — the singleton must not open its own
+        # (it would bypass the RLock/tx-depth model of the main MemoryDatabase).
+        from companion.storage.sqlite_db import get_shared_db
+        self.db = get_shared_db()
         self.world_model = self._load_world_model()
         self._last_wm_save = 0.0
 

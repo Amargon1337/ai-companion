@@ -38,8 +38,9 @@ class MemoryStore:
         self.vector = VectorIndex(db=self.db)
         # Async bus: handlers (IndexSyncService) may hit the embedding network;
         # decouple them from the mutating call path so a slow API stalls a
-        # background worker rather than the conversation.
-        self.event_bus = MemoryEventBus(async_mode=True)
+        # background worker rather than the conversation. journal_db makes
+        # publish durable BEFORE side effects (crash-consistency bridge).
+        self.event_bus = MemoryEventBus(async_mode=True, journal_db=self.db)
         self.index_sync = IndexSyncService(self.event_bus, self.vector, self.db)
         self.semantic_ranker = SemanticImportanceRanker(self.db)
         self.identity = IdentityVault(self.db.path, db=self.db)
@@ -55,8 +56,38 @@ class MemoryStore:
         self._reasoning_engine = ReasoningEngineService(db=self.db, store=self)
         from companion.learning_engine import LearningEngineService
         self._learning_engine = LearningEngineService(db=self.db, store=self)
+        from companion.memory.working_memory import WorkingMemoryService
+        self._working_memory = WorkingMemoryService(self.db)
+        from companion.memory.council import CouncilService
+        self._council = CouncilService(self.db)
+        from companion.memory.tom import TheoryOfMindEngine
+        self._tom = TheoryOfMindEngine(self.db, store=self)
+        from companion.memory.narrative import NarrativeEngine
+        self._narrative = NarrativeEngine(self.db, store=self)
+        from companion.memory.timeline import CognitiveTimeline
+        self._timeline = CognitiveTimeline(self.db)
         import threading
         self._cache_lock = threading.Lock()
+
+    @property
+    def working_memory(self) -> Any:
+        return self._working_memory
+
+    @property
+    def council(self) -> Any:
+        return self._council
+
+    @property
+    def tom(self) -> Any:
+        return self._tom
+
+    @property
+    def narrative(self) -> Any:
+        return self._narrative
+
+    @property
+    def timeline(self) -> Any:
+        return self._timeline
 
     def close(self) -> None:
         """Graceful shutdown: drain the async event bus, then close the DB.
@@ -214,6 +245,8 @@ class MemoryStore:
         mode: str = "default",
         signals: list[str] | None = None,
         user_id: int | None = None,
+        msg_id: str = "",
+        ts: str = "",
     ) -> MessageRecord:
         from companion.security.sanitizer import sanitize_markup
         sanitized_text = sanitize_markup(text) or ""
@@ -224,6 +257,8 @@ class MemoryStore:
             mode=mode,
             signals=signals or [],
             user_id=user_id,
+            id=msg_id,
+            ts=ts,
         )
         d = msg.to_dict()
         self.db._insert_message(d)
@@ -243,6 +278,18 @@ class MemoryStore:
         if existing is not None:
             logger.debug("Dedup: skipping fact similar to %s", existing.id)
             return existing
+
+        # Admission gate: injection-marked content never enters ACTIVE memory.
+        # Previously this check existed only in the compress pipeline and
+        # add_belief — add_fact itself trusted the caller, so the Legacy
+        # Import Pipeline (and any future direct caller) would have let a
+        # prompt-injection become a live fact. pending_review keeps it (Iron
+        # Law #5) but hides it from retrieval until reviewed.
+        if fact.status == "active":
+            from companion.security.sanitizer import _looks_like_injection
+            if _looks_like_injection(fact.fact):
+                fact.status = "pending_review"
+                logger.warning("admission_gate: Fact %s demoted to pending_review (injection markers)", fact.id)
 
         if fact.status == "active" and hasattr(self, "governor") and self.governor:
             decision = self.governor.validate_ingestion(fact)
@@ -287,11 +334,36 @@ class MemoryStore:
         if self.event_bus:
             from companion.memory.events.base import FactCreatedEvent
             self.event_bus.publish(FactCreatedEvent(fact_id=fact.id, fact_text=fact.fact, importance=fact.importance, source=fact.source))
+
+        # Mutation log: record the creation for provenance/audit. Logged AFTER
+        # commit (same pattern as persistence.apply_decision) so a failed
+        # insert never leaves a phantom mutation entry.
+        try:
+            self.db.log_mutation(
+                entity_id=fact.id,
+                action="create",
+                reason=f"source:{fact.source}",
+                state_before={},
+                state_after={"fact": fact.fact, "status": fact.status,
+                             "importance": fact.importance},
+                initiator="store.add_fact",
+            )
+        except Exception as exc:
+            logger.debug("mutation log for %s failed (non-fatal): %s", fact.id, exc)
         return fact
 
     def recover_index_consistency(self) -> dict[str, int]:
         from companion.memory.events.sync import recover_index_consistency
         return recover_index_consistency(self)
+
+    def replay_event_journal(self) -> int:
+        """Re-queue journaled events that never reached the FAISS drain.
+
+        Phase B: after a crash between SQLite commit and the event worker, the
+        pending rows in event_journal are replayed at startup. Idempotent
+        handlers (IndexSyncService hash-guards) make replay safe.
+        """
+        return self.event_bus.replay_pending()
 
     def get_fact(self, fact_id: str) -> Fact | None:
         row = self.db.get_fact(fact_id)
@@ -1138,6 +1210,23 @@ class MemoryStore:
             if self._normalize(existing.get("belief", "")) == norm:
                 return
         status = "pending_review" if _looks_like_injection(belief) else "active"
+
+        # R5: belief adoption is a high-stakes personality mutation — run the
+        # internal council. A non-approved verdict demotes to pending_review
+        # (kept, never rejected outright — Iron Law #5).
+        try:
+            from companion.memory.council import CouncilService
+            verdict = CouncilService(self.db).evaluate(
+                subject_kind="belief", subject_id="new",
+                payload={"belief": belief, "importance": importance},
+            )
+            if not verdict.approved:
+                status = "pending_review"
+                logger.info("belief_council: %s demoted to pending_review (votes=%s)",
+                            belief[:60], [v["verdict"] for v in verdict.votes])
+        except Exception as exc:
+            logger.debug("belief council skipped (non-fatal): %s", exc)
+
         d = {
             "id": f"belief_{uuid.uuid4().hex[:10]}",
             "belief": belief,

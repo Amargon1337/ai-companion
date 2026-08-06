@@ -469,3 +469,86 @@ def reconcile_genome_parity(store) -> dict[str, int]:
         })
     return {"backfilled": len(missing)}
 
+
+# ── R4 — Homeostasis entropy (kernel K8) ────────────────────────────────────
+
+# M3 defaults: weights sum to 1.0. tau is the forced-sleep trigger on the
+# 3-sample moving average, so one noisy night never fires it but a monotone
+# drift always does.
+_HOMEOSTASIS_WEIGHTS = {"contra": 0.30, "stale": 0.25, "null_emb": 0.20,
+                        "infl": 0.15, "quar": 0.10}
+_HOMEOSTASIS_TAU = 0.35
+
+
+def compute_homeostasis(store) -> dict[str, Any]:
+    """Compute cognitive-homeostasis entropy and record it to homeostasis_metrics.
+
+    Cognitive function (K8): a single scalar, computed nightly, that measures
+    semantic poisoning pressure. Ratios are derived from aggregate DB state,
+    never mutated here. The trend (3-sample moving average) is the signal the
+    meta-auditor uses to force a Sleep Cycle — see blueprint MATH-3.
+    """
+    from companion.memory.importance import days_since
+    from datetime import timedelta
+
+    def _count(fact_rows, status):
+        return sum(1 for r in fact_rows if str(r.get("status", "")).lower() == status)
+
+    all_facts = store.db.list_facts(status=None)
+    active = [r for r in all_facts if str(r.get("status", "")).lower() == "active"]
+    total = len(all_facts) or 1
+    active_n = len(active) or 1
+
+    contradicted = _count(all_facts, "contradicted") + _count(all_facts, "superseded")
+    dormant = _count(all_facts, "dormant")
+    quarantine = _count(all_facts, "quarantine")
+
+    # Stale = active facts untouched for >= 90 days (last_used/retrieved/date).
+    stale = 0
+    for r in active:
+        last_ts = r.get("last_used_at") or r.get("last_retrieved_at") or r.get("date") or r.get("created_at") or ""
+        try:
+            if days_since(str(last_ts)) >= 90:
+                stale += 1
+        except Exception:
+            pass
+
+    null_emb = sum(1 for r in active if r.get("embedding") is None)
+
+    # Confidence inflation: mean active confidence vs a 0.75 calibration baseline.
+    confs = [float(r.get("confidence", 0.8)) for r in active]
+    mean_conf = (sum(confs) / len(confs)) if confs else 0.0
+    infl = max(0.0, mean_conf - 0.75)
+
+    ratios = {
+        "contra": contradicted / active_n,
+        "stale": stale / active_n,
+        "null_emb": null_emb / active_n,
+        "infl": infl,
+        "quar": quarantine / total,
+    }
+    entropy = sum(_HOMEOSTASIS_WEIGHTS[k] * min(1.0, ratios[k]) for k in _HOMEOSTASIS_WEIGHTS)
+
+    store.db.insert_homeostasis_metrics(
+        contradiction_density=ratios["contra"],
+        stale_ratio=ratios["stale"],
+        null_embedding_ratio=ratios["null_emb"],
+        confidence_inflation=ratios["infl"],
+        quarantine_ratio=ratios["quar"],
+        entropy_score=round(entropy, 6),
+    )
+    return {"entropy": round(entropy, 6), "ratios": ratios, "tau": _HOMEOSTASIS_TAU}
+
+
+def homeostasis_sleep_due(store, window: int = 3) -> bool:
+    """True when the moving average of recent entropy exceeds tau (M3).
+
+    The moving average is what protects against a single noisy night firing
+    a forced Sleep Cycle; monotone drift in memory pollution always triggers.
+    """
+    rows = store.db.list_homeostasis_metrics(limit=window)
+    if len(rows) < window:
+        return False
+    avg = sum(float(r["entropy_score"]) for r in rows) / window
+    return avg > _HOMEOSTASIS_TAU
+

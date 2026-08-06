@@ -99,7 +99,11 @@ async def proactive_ping_loop(bot):
             if 3 <= hour < 5:
                 if (now_dt.timestamp() - last_health_check) > 12 * 3600:
                     from companion.memory.health import memory_health
-                    from companion.memory.consolidation import consolidate_if_due, decay_fact_confidence, promote_patterns_to_insights, revalidate_insight_provenance
+                    from companion.memory.consolidation import (
+                        consolidate_if_due, decay_fact_confidence, promote_patterns_to_insights,
+                        revalidate_insight_provenance, reconcile_genome_parity, audit_provenance_cycles,
+                        compute_homeostasis, homeostasis_sleep_due,
+                    )
                     health = await asyncio.to_thread(memory_health, memory_store)
                     await asyncio.to_thread(consolidate_if_due, memory_store, 7)
                     await asyncio.to_thread(decay_fact_confidence, memory_store)
@@ -117,7 +121,69 @@ async def proactive_ping_loop(bot):
                             logger.info("Provenance revalidation: %s", prov)
                     except Exception as exc:
                         logger.error("Provenance revalidation failed: %s", exc, exc_info=True)
+                    try:
+                        # R2: genome 1:1 invariant backfill for facts created
+                        # before the cognitive schema existed.
+                        parity = await asyncio.to_thread(reconcile_genome_parity, memory_store)
+                        if parity.get("backfilled"):
+                            logger.info("Genome parity backfilled %d fact(s)", parity["backfilled"])
+                    except Exception as exc:
+                        logger.error("Genome parity reconcile failed: %s", exc, exc_info=True)
+                    try:
+                        # R2: circular-provenance detector. A cycle means A justifies
+                        # B and B justifies A — quarantine the members, never delete.
+                        cycles = await asyncio.to_thread(audit_provenance_cycles, memory_store)
+                        if cycles:
+                            logger.warning("Provenance cycles detected: %d", len(cycles))
+                            for cyc in cycles:
+                                for fid in cyc[:-1]:
+                                    try:
+                                        from companion.memory.policies.base import PolicyDecision
+                                        memory_store.persistence.apply_decision(
+                                            fid,
+                                            PolicyDecision(
+                                                approved=True, action="quarantine",
+                                                updates={"status": "quarantine"},
+                                                reason="provenance_cycle",
+                                                policy_name="CycleAuditorPolicy",
+                                            ),
+                                            reason="provenance_cycle", initiator="cycle_auditor",
+                                        )
+                                    except Exception as qexc:
+                                        logger.warning("Cycle quarantine failed for %s: %s", fid, qexc)
+                    except Exception as exc:
+                        logger.error("Provenance cycle audit failed: %s", exc, exc_info=True)
+                    try:
+                        # R4: homeostasis entropy. Pure metric — records the
+                        # semantic-poisoning pressure trend; a 3-sample moving
+                        # average over tau (0.35) flags a forced Sleep Cycle.
+                        ho = await asyncio.to_thread(compute_homeostasis, memory_store)
+                        sleep_due = await asyncio.to_thread(homeostasis_sleep_due, memory_store)
+                        if sleep_due:
+                            logger.warning(
+                                "Homeostasis breach: entropy trend above tau (%.3f > %.2f); "
+                                "running Sleep Cycle", ho["entropy"], ho["tau"])
+                            # R4/R6: forced consolidation + immune scan.
+                            from companion.memory.sleep import run_sleep_cycle
+                            from companion.memory.immune import immune_audit
+                            sleep_stats = await asyncio.to_thread(run_sleep_cycle, memory_store)
+                            logger.info("Sleep Cycle complete: %s", sleep_stats)
+                            immune = await asyncio.to_thread(immune_audit, memory_store)
+                            logger.info("Immune audit: %s", immune)
+                        else:
+                            logger.info("Homeostasis entropy: %.4f (tau %.2f)", ho["entropy"], ho["tau"])
+                    except Exception as exc:
+                        logger.error("Homeostasis metric failed: %s", exc, exc_info=True)
                     logger.info("Nightly memory health: %s", health)
+                    try:
+                        # Phase B: consistent memory snapshot (SQLite + FAISS
+                        # cache) once per health window. VACUUM INTO is
+                        # transactionally consistent; restore = offline op.
+                        from companion.memory.snapshot import create_snapshot
+                        name = await asyncio.to_thread(create_snapshot, memory_store)
+                        logger.info("Nightly snapshot created: %s", name)
+                    except Exception as exc:
+                        logger.error("Nightly snapshot failed: %s", exc, exc_info=True)
                     try:
                         moved = await asyncio.to_thread(memory_store.db.archive_audit_log, 30)
                         logger.info("Nightly audit rotation archived %d row(s)", moved)
@@ -194,6 +260,53 @@ def _query_text(payload: Any) -> str:
         if isinstance(first, str):
             return first
     return ""
+
+
+def _format_working_memory_block(slots: list[dict[str, Any]]) -> str:
+    """R3/A1: format live working-memory slots into a compact prompt block.
+
+    «Стол» перед моделью: текущая цель, активная идентичность, открытые
+    вопросы, salient-факты и аффективное состояние — уже отфильтрованные по
+    TTL и салиентности. Пусто -> пустая строка (блок не вставляется).
+    """
+    if not slots:
+        return ""
+    lines: list[str] = ["[Рабочая память — актуальное состояние диалога]"]
+    for s in slots[:20]:
+        st = str(s.get("slot_type", ""))
+        payload = str(s.get("payload", "")).strip()
+        if not payload:
+            continue
+        label = {
+            "current_goal": "Текущая цель",
+            "active_identity": "Активная идентичность",
+            "open_question": "Открытый вопрос",
+            "salient_fact": "Salient-факт",
+            "affective_state": "Эмоциональный фон",
+        }.get(st, st)
+        lines.append(f"• {label}: {payload[:200]}")
+    return "\n".join(lines)
+
+
+def _load_genome_scores(fact_ids: list[str]) -> dict[str, float]:
+    """Batch-load survival_score from the genome table for gravity scoring."""
+    if not fact_ids:
+        return {}
+    scores: dict[str, float] = {}
+    try:
+        with memory_store.db._conn() as conn:
+            for chunk_start in range(0, len(fact_ids), 400):
+                chunk = fact_ids[chunk_start:chunk_start + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT memory_id, survival_score FROM memory_genome WHERE memory_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for r in rows:
+                    scores[str(r[0])] = float(r[1] or 0.5)
+    except Exception as exc:
+        logger.debug("genome score load failed: %s", exc)
+    return scores
 
 
 async def _persist_session(user_id: int) -> None:
@@ -481,6 +594,26 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
     _is_coding_query = query and any(kw in query.lower() for kw in _coding_keywords)
     if _is_coding_query and intent in ("world", "mixed"):
         state.intent = "memory" if intent == "world" else "chat_casual"
+
+    # R3 (K5): refresh the bounded working-memory slots for this turn. Runs in a
+    # worker thread; guarded — working memory is an optimization, never a
+    # correctness dependency of the conversation path.
+    try:
+        rc = state.reasoning_context or {}
+        facts = ctx_data.get("facts") or []
+        faiss_scores = ctx_data.get("faiss_scores") or {}
+        top_facts = [(f, faiss_scores.get(f.id, 0.0)) for f in facts[:10]]
+        await asyncio.to_thread(
+            memory_store.working_memory.update_from_turn,
+            user_id=uid,
+            mood_state=state.mood_state,
+            needs_clarification=state.needs_clarification or "",
+            captured_goal=rc.get("captured_goal", "") or "",
+            active_goals=rc.get("active_goals", []) or [],
+            top_facts=top_facts,
+        )
+    except Exception as exc:
+        logger.debug("working memory update skipped: %s", exc)
 
     # Фоновый поиск удалён — ручной поиск через /search работает в handlers/chat.py
     if uid not in user_chats:
@@ -913,6 +1046,19 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
     ctx_block = None
     if isinstance(content_payload, str) and query:
         rerank_started = time.perf_counter()
+        # R3/A1: свежие рабочие слоты диалога + genome survival для Cognitive
+        # Gravity. Snapshot уже обновлён в build_context (guarded, не фатален).
+        try:
+            wm_slots = await asyncio.to_thread(memory_store.working_memory.snapshot, uid)
+        except Exception:
+            wm_slots = []
+        wm_block = _format_working_memory_block(wm_slots)
+        wm_ids = {s.get("ref_id") for s in wm_slots if s.get("ref_kind") == "fact" and s.get("ref_id")}
+        try:
+            fact_ids = [f.id for f in ctx_data["facts"]]
+            genome_scores = await asyncio.to_thread(_load_genome_scores, fact_ids)
+        except Exception:
+            genome_scores = {}
         bundle = retrieval_mgr.select(
             query=query, facts=ctx_data["facts"], reflections=ctx_data["reflections"],
             patterns=ctx_data.get("patterns", []),
@@ -934,6 +1080,9 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             store=memory_store,
             timeline_block=ctx_data.get("timeline_block", ""),
             intent=ctx_data.get("intent", ""),
+            working_memory_block=wm_block,
+            working_memory_ids=wm_ids,
+            genome_scores=genome_scores,
         )
         trace = observability.active_trace(uid)
         if trace:

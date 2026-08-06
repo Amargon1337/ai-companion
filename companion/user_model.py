@@ -279,8 +279,8 @@ class UserModel:
             # --- SHARED LORE PHASE 0: Dry-Run Logging ---
             lore_candidates = res.get("shared_lore_candidates", [])
             if lore_candidates:
-                from companion.storage.sqlite_db import MemoryDatabase
-                db = MemoryDatabase()
+                from companion.storage.sqlite_db import get_shared_db
+                db = get_shared_db()
                 for cand in lore_candidates:
                     # Ensure it's not a hallucinated placeholder
                     if cand.get("candidate_phrase") and cand.get("candidate_phrase") != "потенциальный локальный мем/фраза из диалога (если есть)":
@@ -435,14 +435,17 @@ class UserModel:
 
     def _save_model(self) -> None:
         """Сохранить модель в БД."""
-        from companion.storage.sqlite_db import MemoryDatabase
-        db = MemoryDatabase()
+        # Phase C: shared connection — per-call MemoryDatabase() leaked a
+        # fresh connection on EVERY save (and per-message record_emotional_state
+        # calls this), bypassing the shared RLock model.
+        from companion.storage.sqlite_db import get_shared_db
+        db = get_shared_db()
         db.save_state_model("user", self.data)
 
     def _load_model(self) -> None:
         """Загрузить модель из БД."""
-        from companion.storage.sqlite_db import MemoryDatabase
-        db = MemoryDatabase()
+        from companion.storage.sqlite_db import get_shared_db
+        db = get_shared_db()
         loaded_data = db.get_state_model("user")
         if loaded_data:
             try:

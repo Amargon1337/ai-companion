@@ -134,6 +134,9 @@ class RetrievalBudgetManager:
         store: "Any" = None,
         timeline_block: str = "",
         intent: str = "",
+        working_memory_block: str = "",
+        working_memory_ids: set[str] | None = None,
+        genome_scores: dict[str, float] | None = None,
     ) -> ContextBundle:
         summaries = summaries or []
         active_goals = active_goals or []
@@ -147,6 +150,14 @@ class RetrievalBudgetManager:
             f for f in facts
             if f.status == "active" or (include_archived and f.status == "archived")
         ]
+
+        # Cognitive Gravity (M1/M2): a fact is "heavier" when it has genuinely
+        # survived time and confirmations, not just because it embeds similar.
+        # survival_score comes from the genome table (batch-loaded once); a
+        # working-memory slot hit gives a topicality boost.
+        working_memory_ids = working_memory_ids or set()
+        genome_scores = genome_scores or {}
+        wm_ids = working_memory_ids
 
         # БЛОК 2: PINNED FACTS GUARANTEE
         explicit_search = bool(query and _is_explicit_search_query(query))
@@ -189,11 +200,23 @@ class RetrievalBudgetManager:
             kind_boost = {"state": 0.15, "event": 0.1, "belief": 0.0}.get(f.memory_kind, 0.0)
             
             confidence = max(0.2, min(1.0, float(f.confidence)))
-            final_score = (semantic + importance + recency_val) * confidence + mood_boost + kind_boost
+
+            # Cognitive Gravity (M2): epistemic confirmation, survival, and
+            # contradiction, bounded so no single channel dominates retrieval.
+            support = int(getattr(f, "support_count", 0) or 0)
+            contradiction = int(getattr(f, "contradiction_count", 0) or 0)
+            survival = float(genome_scores.get(f.id, 0.5))
+            support_term = min(0.20, support * 0.04)            # 5+ confirms = full
+            survival_term = min(0.15, (survival - 0.5) * 0.2)   # ~1.0 survival = +0.10
+            contradiction_penalty = min(0.30, contradiction * 0.10)
+            wm_boost = 0.30 if f.id in wm_ids else 0.0          # topic of this turn
+
+            gravity = (support_term + survival_term + wm_boost - contradiction_penalty)
+            final_score = (semantic + importance + recency_val) * confidence + mood_boost + kind_boost + gravity
             
             import logging
             logger = logging.getLogger(__name__)
-            logger.debug("Fact %s retrieval: FAISS=%.3f Final=%.3f", f.id, semantic_score, final_score)
+            logger.debug("Fact %s retrieval: FAISS=%.3f gravity=%.3f Final=%.3f", f.id, semantic_score, gravity, final_score)
             return final_score
 
         # Rank regular facts with initial scores
@@ -399,6 +422,7 @@ class RetrievalBudgetManager:
             human_model=human_model,
             life_transitions=life_transitions,
             timeline_block=timeline_block[:800],
+            working_memory_block=working_memory_block,
         )
 
         # Global Overflow Eviction: T5 -> T4 -> T3

@@ -219,6 +219,27 @@ async def run() -> None:
     except Exception as exc:
         logger.warning("Index consistency repair skipped: %s", exc)
 
+    # Phase B: replay any event-journal rows that never reached the FAISS
+    # drain (crash between SQLite commit and the async bus worker). Runs
+    # BEFORE the embedding API test so index work happens even if the API is
+    # temporarily down (handlers are idempotent and will re-apply next boot).
+    try:
+        replayed = memory_store.replay_event_journal()
+        if replayed:
+            logger.info("Event journal replayed %d pending event(s) at startup", replayed)
+    except Exception as exc:
+        logger.warning("Event journal replay skipped: %s", exc)
+
+    # R7: materialize the cognitive timeline read-model from the journal
+    # (watermark-based, idempotent) and sweep the retention window.
+    try:
+        ticks = memory_store.timeline.materialize()
+        if ticks:
+            logger.info("Cognitive timeline materialized %d tick(s) from journal", ticks)
+        memory_store.timeline.archive_old()
+    except Exception as exc:
+        logger.warning("Cognitive timeline materialization skipped: %s", exc)
+
     logger.info("Testing embedding API on startup...")
     if not memory_store.vector.test_embeddings():
         logger.critical("Embedding API test failed on startup. Disabling vector retrieval.")
