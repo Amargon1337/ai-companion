@@ -1,4 +1,7 @@
-"""Unified memory store — facts, messages, relations, reflections, beliefs."""
+"""Unified memory store — facts, messages, relations, reflections, beliefs.
+
+Phase C0: Integrated with Event Sourcing for full audit trail.
+"""
 from __future__ import annotations
 
 import json
@@ -6,7 +9,7 @@ import logging
 import os
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from companion.config import (
@@ -16,6 +19,10 @@ from companion.memory.importance import days_since
 from companion.memory.text_sim import text_overlap
 from companion.memory.vector_index import VectorIndex
 from companion.memory.identity_vault import IdentityVault
+from companion.memory.events import MemoryEvent, MemoryEventType
+from companion.memory.event_store import EventStore
+from companion.memory.controller import MemoryGovernanceController
+from companion.memory.governance import GovernanceContext, MemoryCapability
 from companion.models import Fact, FactRelation, MessageRecord, Reflection
 from companion.storage.sqlite_db import MemoryDatabase
 
@@ -27,6 +34,8 @@ class MemoryStore:
         self.db = MemoryDatabase()
         self.vector = VectorIndex()
         self.identity = IdentityVault(self.db.path)
+        self.events = EventStore(self.db.path)
+        self.governance = MemoryGovernanceController()
         import threading
         self._cache_lock = threading.Lock()
 
@@ -172,10 +181,31 @@ class MemoryStore:
 
     # ── Facts ─────────────────────────────────────────────────────────
 
-    def add_fact(self, fact: Fact) -> Fact:
+    def add_fact(self, fact: Fact, actor: str = "SYSTEM", log_event: bool = True) -> Fact:
+        """Add a fact with event logging (Phase C0).
+        
+        Args:
+            fact: The fact to add.
+            actor: Who initiated this (USER_DIRECT, LLM_EXTRACTOR, etc).
+            log_event: Whether to log to event store (default True for Phase C0).
+        """
         d = fact.to_dict()
         self.db._insert_fact(d)
         self.vector.compute_and_cache(fact.fact, content_type="fact")
+        
+        if log_event:
+            event = MemoryEvent(
+                aggregate_id=fact.id,
+                event_type=MemoryEventType.FACT_CREATED,
+                actor=actor,
+                payload=d,
+                metadata={
+                    "origin": str(getattr(fact, 'origin', 'llm_extraction')),
+                    "source_message_id": getattr(fact, 'source_message_id', None),
+                },
+            )
+            self.events.append(event)
+        
         return fact
 
     def get_fact(self, fact_id: str) -> Fact | None:
@@ -190,12 +220,37 @@ class MemoryStore:
         rows = self.db.list_all_facts()
         return [Fact.from_dict(r) for r in rows]
 
-    def revive_dormant_fact(self, fact_id: str) -> None:
+    def revive_dormant_fact(self, fact_id: str, actor: str = "SYSTEM") -> None:
         """Promote a dormant fact back to active status."""
         fact = self.get_fact(fact_id)
         if not fact or fact.status != "dormant":
             logger.warning("Attempted to revive non-dormant fact %s (status: %s)", fact_id, fact.status if fact else "None")
             return
+
+        ctx = GovernanceContext.create(
+            actor=actor,
+            capabilities={MemoryCapability.CHANGE_STATUS},
+            reason="Reviving dormant fact",
+            identity_layer=getattr(fact, "identity_layer", None),
+        )
+        decision = self.governance.authorize_status_transition("dormant", "active", ctx)
+        if not decision.allowed:
+            logger.warning("Governance denied revive for fact %s: %s", fact_id, decision.reason)
+            return
+
+        event = MemoryEvent(
+            aggregate_id=fact_id,
+            event_type=MemoryEventType.FACT_STATUS_CHANGED,
+            actor=actor,
+            payload={
+                "aggregate_id": fact_id,
+                "old_state": {"status": "dormant", "facts_sent_count": getattr(fact, "facts_sent_count", 0)},
+                "new_state": {"status": "active", "facts_sent_count": 0},
+                "changed_fields": ["status", "facts_sent_count"],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        self.events.append(event)
         with self.db._conn() as conn:
             conn.execute("UPDATE facts SET status='active', facts_sent_count=0 WHERE id=?", (fact_id,))
         logger.info("dormant_auto_revival: Fact %s promoted to active", fact_id)
@@ -256,7 +311,7 @@ class MemoryStore:
         
         return [(f, 0.0) for f in hits_fallback[:limit]]
 
-    def add_relation(self, rel: FactRelation) -> None:
+    def add_relation(self, rel: FactRelation, actor: str = "SYSTEM", log_event: bool = True) -> None:
         from_fact = self.get_fact(rel.from_id)
         to_fact = self.get_fact(rel.to_id)
         if not from_fact or not to_fact:
@@ -270,11 +325,42 @@ class MemoryStore:
 
         d = rel.to_dict()
         self.db._insert_relation(d)
+        
+        if log_event:
+            event = MemoryEvent(
+                aggregate_id=rel.id,
+                event_type=MemoryEventType.FACT_SUPERSEDED if rel.relation == "supersedes" else MemoryEventType.FACT_UPDATED,
+                actor=actor,
+                payload=d,
+                metadata={"relation_type": rel.relation, "superseded_by": rel.from_id},
+            )
+            self.events.append(event)
+        
         if rel.relation == "supersedes":
             self.db.update_fact_status(rel.to_id, "superseded")
             old_fact = self.get_fact(rel.to_id)
             if old_fact and old_fact.fact:
                 self.vector.delete_for_content(old_fact.fact)
+            
+            # Log status change event
+            if log_event:
+                status_event = MemoryEvent(
+                    aggregate_id=rel.to_id,
+                    event_type=MemoryEventType.FACT_STATUS_CHANGED,
+                    actor=actor,
+                    payload={
+                        "aggregate_id": rel.to_id,
+                        "old_state": {"status": "active"},
+                        "new_state": {"status": "superseded", "superseded_by": rel.from_id},
+                        "changed_fields": ["status", "superseded_by"],
+                        "old_status": "active",
+                        "new_status": "superseded",
+                        "superseded_by": rel.from_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                    metadata={"superseded_by": rel.from_id},
+                )
+                self.events.append(status_event)
 
     def get_active_fact_texts(self) -> list[str]:
         return [f.fact for f in self.list_facts("active")]
@@ -298,9 +384,20 @@ class MemoryStore:
 
     # ── Reflections ─────────────────────────────────────────────────
 
-    def add_reflection(self, reflection: Reflection) -> Reflection:
+    def add_reflection(self, reflection: Reflection, actor: str = "SYSTEM", log_event: bool = True) -> Reflection:
         d = reflection.to_dict()
         self.db._insert_reflection(d)
+        
+        if log_event:
+            event = MemoryEvent(
+                aggregate_id=reflection.id,
+                event_type=MemoryEventType.PATTERN_FORMED,
+                actor=actor,
+                payload=d,
+                metadata={"reflection_type": "insight"},
+            )
+            self.events.append(event)
+        
         return reflection
 
     def list_reflections(self, status: str = "active") -> list[Reflection]:
@@ -398,9 +495,9 @@ class MemoryStore:
             if m.ts[:7] == ym
         ]
 
-    def apply_importance_decay(self) -> int:
+    def apply_importance_decay(self, actor: str = "SYSTEM") -> int:
         """Phase 5: Dormant Memory System — never delete, set to dormant."""
-        to_dormant: list[str] = []
+        to_dormant: list[Fact] = []
 
         for f in self.list_facts("active"):
             if f.memory_kind == "permanent" or any(
@@ -410,13 +507,39 @@ class MemoryStore:
             age = days_since(f.date or f.created_at)
             # Both old thresholds now just move to dormant
             if age > 90 and f.importance <= 4 and f.status == "active":
-                to_dormant.append(f.id)
+                to_dormant.append(f)
 
+        decayed_count = 0
         with self.db._conn() as conn:
-            for fid in to_dormant:
-                conn.execute("UPDATE facts SET status='dormant', facts_sent_count=0 WHERE id=?", (fid,))
+            for f in to_dormant:
+                ctx = GovernanceContext.create(
+                    actor=actor,
+                    capabilities={MemoryCapability.RUN_DECAY, MemoryCapability.CHANGE_STATUS},
+                    reason="Automatic importance decay",
+                    identity_layer=getattr(f, "identity_layer", None),
+                )
+                decision = self.governance.authorize_status_transition("active", "dormant", ctx)
+                if not decision.allowed:
+                    logger.warning("Governance denied decay for fact %s: %s", f.id, decision.reason)
+                    continue
 
-        return len(to_dormant)
+                event = MemoryEvent(
+                    aggregate_id=f.id,
+                    event_type=MemoryEventType.FACT_STATUS_CHANGED,
+                    actor="GOVERNANCE",
+                    payload={
+                        "aggregate_id": f.id,
+                        "old_state": {"status": "active"},
+                        "new_state": {"status": "dormant", "facts_sent_count": 0},
+                        "changed_fields": ["status", "facts_sent_count"],
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                self.events.append(event)
+                conn.execute("UPDATE facts SET status='dormant', facts_sent_count=0 WHERE id=?", (f.id,))
+                decayed_count += 1
+
+        return decayed_count
 
     def reindex_all(self) -> dict[str, int]:
         """Reindex all facts, beliefs, reflections, and causal links into vector index."""
@@ -485,12 +608,38 @@ class MemoryStore:
                     if sent > 10 and used == 0:
                         new_imp = max(3, imp - 1)
                         if new_imp != imp:
+                            event = MemoryEvent(
+                                aggregate_id=fid,
+                                event_type=MemoryEventType.FACT_UPDATED,
+                                actor="RETRIEVAL_FEEDBACK",
+                                payload={
+                                    "aggregate_id": fid,
+                                    "old_state": {"importance": imp, "facts_sent_count": sent},
+                                    "new_state": {"importance": new_imp, "facts_sent_count": 0},
+                                    "changed_fields": ["importance", "facts_sent_count"],
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                },
+                            )
+                            self.events.append(event)
                             conn.execute("UPDATE facts SET importance=?, facts_sent_count=0 WHERE id=?", (new_imp, fid))
                             logger.info("memory_feedback_loop_applied: %s lowered from %d to %d", fid, imp, new_imp)
                             adjusted["lowered"] += 1
                     elif sent > 5 and used > 3:
                         new_imp = min(8, imp + 1)
                         if new_imp != imp:
+                            event = MemoryEvent(
+                                aggregate_id=fid,
+                                event_type=MemoryEventType.FACT_UPDATED,
+                                actor="RETRIEVAL_FEEDBACK",
+                                payload={
+                                    "aggregate_id": fid,
+                                    "old_state": {"importance": imp},
+                                    "new_state": {"importance": new_imp},
+                                    "changed_fields": ["importance"],
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                },
+                            )
+                            self.events.append(event)
                             conn.execute("UPDATE facts SET importance=? WHERE id=?", (new_imp, fid))
                             logger.info("memory_feedback_loop_applied: %s boosted from %d to %d", fid, imp, new_imp)
                             adjusted["boosted"] += 1

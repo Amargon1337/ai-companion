@@ -14,12 +14,16 @@ def _configure_conn(conn: sqlite3.Connection) -> None:
   conn.execute("PRAGMA foreign_keys = ON;")
 class MemoryDatabase:
   def __init__(self, path: str | None = None) -> None:
+    import os
     from companion.config import SQLITE_PATH as _SQLITE_PATH
-    self.path = path if path is not None else _SQLITE_PATH
+    self.path = path if path is not None else os.environ.get("SQLITE_PATH", _SQLITE_PATH)
     self._init_schema()
 
   @contextmanager
   def _conn(self) -> Generator[sqlite3.Connection, None, None]:
+    dir_name = os.path.dirname(os.path.abspath(self.path))
+    if dir_name:
+      os.makedirs(dir_name, exist_ok=True)
     conn = sqlite3.connect(self.path)
     _configure_conn(conn)
     conn.row_factory = sqlite3.Row
@@ -48,11 +52,24 @@ class MemoryDatabase:
           valid_from TEXT,
           valid_until TEXT,
           schema_version INTEGER DEFAULT 1,
-          evidence TEXT DEFAULT '[]'
+          evidence TEXT DEFAULT '[]',
+          facts_sent_count INTEGER DEFAULT 0,
+          facts_used_count INTEGER DEFAULT 0,
+          -- Phase C1: Provenance
+          origin TEXT DEFAULT 'llm_extraction',
+          source_message_id INTEGER,
+          identity_layer TEXT DEFAULT 'legacy_unknown',
+          -- Decomposed confidence
+          conf_observed REAL DEFAULT 1.0,
+          conf_inferred REAL DEFAULT 0.8,
+          conf_stability REAL DEFAULT 1.0,
+          conf_verification REAL DEFAULT 1.0
         );
         CREATE INDEX IF NOT EXISTS idx_facts_status ON facts(status);
         CREATE INDEX IF NOT EXISTS idx_facts_importance ON facts(importance);
         CREATE INDEX IF NOT EXISTS idx_facts_date ON facts(date);
+        CREATE INDEX IF NOT EXISTS idx_facts_origin ON facts(origin);
+        CREATE INDEX IF NOT EXISTS idx_facts_identity_layer ON facts(identity_layer);
 
         CREATE TABLE IF NOT EXISTS fact_relations (
           id TEXT PRIMARY KEY,
@@ -197,6 +214,20 @@ class MemoryDatabase:
           conn.execute("ALTER TABLE facts ADD COLUMN facts_sent_count INTEGER DEFAULT 0")
         if "facts_used_count" not in cols:
           conn.execute("ALTER TABLE facts ADD COLUMN facts_used_count INTEGER DEFAULT 0")
+        if "origin" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN origin TEXT DEFAULT 'llm_extraction'")
+        if "source_message_id" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN source_message_id INTEGER")
+        if "identity_layer" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN identity_layer TEXT DEFAULT 'legacy_unknown'")
+        if "conf_observed" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN conf_observed REAL DEFAULT 1.0")
+        if "conf_inferred" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN conf_inferred REAL DEFAULT 0.8")
+        if "conf_stability" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN conf_stability REAL DEFAULT 1.0")
+        if "conf_verification" not in cols:
+          conn.execute("ALTER TABLE facts ADD COLUMN conf_verification REAL DEFAULT 1.0")
       except sqlite3.OperationalError:
         pass
 
@@ -305,7 +336,7 @@ class MemoryDatabase:
       conn.execute(
         """
         INSERT INTO facts VALUES
-        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
           fact=excluded.fact,
           date=excluded.date,
@@ -320,7 +351,14 @@ class MemoryDatabase:
           valid_until=excluded.valid_until,
           evidence=excluded.evidence,
           facts_sent_count=excluded.facts_sent_count,
-          facts_used_count=excluded.facts_used_count
+          facts_used_count=excluded.facts_used_count,
+          origin=excluded.origin,
+          source_message_id=excluded.source_message_id,
+          identity_layer=excluded.identity_layer,
+          conf_observed=excluded.conf_observed,
+          conf_inferred=excluded.conf_inferred,
+          conf_stability=excluded.conf_stability,
+          conf_verification=excluded.conf_verification
         """,
         (
           row["id"], row["fact"], row.get("date"), row.get("created_at"),
@@ -331,6 +369,13 @@ class MemoryDatabase:
           row.get("valid_until"), row.get("schema_version", 1),
           json.dumps(row.get("evidence", []), ensure_ascii=False),
           row.get("facts_sent_count", 0), row.get("facts_used_count", 0),
+          row.get("origin", "llm_extraction"),
+          row.get("source_message_id"),
+          row.get("identity_layer", "legacy_unknown"),
+          row.get("conf_observed", 1.0),
+          row.get("conf_inferred", 0.8),
+          row.get("conf_stability", 1.0),
+          row.get("conf_verification", 1.0),
         ),
       )
 
@@ -436,6 +481,11 @@ class MemoryDatabase:
     d = dict(row)
     d["tags"] = json.loads(d.get("tags") or "[]")
     d["evidence"] = json.loads(d.get("evidence") or "[]")
+    # Phase C1: Parse provenance enums
+    if d.get("origin"):
+      d["origin"] = d["origin"]  # String value, will be converted to Enum in Fact.from_dict
+    if d.get("identity_layer"):
+      d["identity_layer"] = d["identity_layer"]  # String value
     return d
 
   def list_messages(

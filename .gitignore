@@ -1,25 +1,43 @@
-api.env
-api.env.txt
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+
+# Python
 __pycache__/
-*.pyc
-.env
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# IDEs & Editor folders
 .vscode/
 .claude/
-monthbook/
-data/
-bot.log
-*.mp4
-*.webp
-*.ogg
-*.wav
-diary.txt
-summaries.txt
-personality.json
-todo.json
-timeline.jsonl
-crisis.jsonl
-mood.jsonl
-anya_memory.json
-permanent_notes.txt
-master_summary.txt
-yearbook_*.txt
+.idea/
+
+# Runtime data & Vector index
+data/*.json
+data/*.jsonl
+data/*.bin
+data/logs/
+data/companion.db*
+
+# Environment
+.env
+.env.local
+*.env.*
+.venv/
+venv/
+env/
+
+# Logs
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db
