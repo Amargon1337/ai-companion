@@ -582,9 +582,12 @@ async def generate_personality_snapshot(store: MemoryStore, summary: str) -> dic
         result = await llm.oneshot_structured_async(prompt, llm.PersonalityPipelineResult)
         updated = result.model_dump()
 
-        # Phase 1.3: blocking I/O runs in thread, asyncio.Lock held only briefly
-        async with store.lock:
-            merged = await asyncio.to_thread(_personality_critical_section, store, updated)
+        # P0-8 fix: sync_lock (threading.Lock) inside to_thread, NOT asyncio.Lock
+        # around it. asyncio.Lock cannot serialize different OS threads.
+        def _locked_personality_update(store_ref, updated_data):
+            with store_ref.sync_lock:
+                return _personality_critical_section(store_ref, updated_data)
+        merged = await asyncio.to_thread(_locked_personality_update, store, updated)
         return merged
     except Exception as e:
         logger.error(f"Personality pipeline failed: {e}")

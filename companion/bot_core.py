@@ -146,7 +146,16 @@ async def proactive_ping_loop(bot):
         except asyncio.CancelledError:
             break
         except Exception:
-            logger.exception("proactive_ping_loop crashed, restarting...")
+            logger.exception("proactive_ping_loop crashed, backing off...")
+            # Exponential backoff: 10s, 20s, 40s ... capped at 5 minutes.
+            # Without this, a persistent error (DB corrupt, API down) would
+            # produce log spam at loop-iteration speed (~millisecond intervals).
+            backoff = min(300, getattr(proactive_ping_loop, "_backoff", 10))
+            proactive_ping_loop._backoff = backoff * 2  # type: ignore[attr-defined]
+            await asyncio.sleep(backoff)
+        else:
+            # Reset backoff on successful iteration
+            proactive_ping_loop._backoff = 10  # type: ignore[attr-defined]
 
 
 async def send_typing(message: types.Message):
@@ -158,8 +167,21 @@ async def send_typing(message: types.Message):
 
 
 async def send_long_message(message: types.Message, text: str, **kwargs) -> None:
+    """Send a long message, splitting into chunks of max 4000 chars.
+
+    Tries to split at sentence/word boundaries. Falls back to hard split
+    if no boundary found. Safety guard: split is clamped to >=1 to prevent
+    infinite loops in edge cases.
+    """
     max_len = 4000
+    max_chunks = 100  # safety limit to prevent runaway loops
+    chunks_sent = 0
     while len(text) > max_len:
+        chunks_sent += 1
+        if chunks_sent > max_chunks:
+            # Safety valve: send remaining text as-is and stop
+            await message.answer(text, **kwargs)
+            return
         split = max_len
         m = _re.search(r"[.!?]\s", text[max_len - 200:max_len])
         if m:
@@ -168,9 +190,8 @@ async def send_long_message(message: types.Message, text: str, **kwargs) -> None
             m = _re.search(r"\s", text[max_len - 100:max_len])
             if m:
                 split = max_len - 100 + m.start()
-            else:
-                # No split point found — force split at max_len to prevent infinite loop
-                split = max_len
+        # Guarantee forward progress: split must consume at least 1 char
+        split = max(1, min(split, max_len))
         await message.answer(text[:split], **kwargs)
         text = text[split:].lstrip()
     if text:

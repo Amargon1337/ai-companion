@@ -188,16 +188,11 @@ class TestBug3ActiveFactsWithoutEmbeddings:
     """Prove that facts can be 'active' without embeddings, breaking search."""
 
     def test_fact_without_embedding_not_searchable(self, tmp_path, monkeypatch):
-        """REAL BUG REPRODUCTION:
+        """FIXED BUG (was BUG-002, fixed in P0-6):
         
-        Scenario:
-        1. add_fact() is called with status='active'
-        2. embed_text_only() returns None (API unavailable)
-        3. compute_and_cache() also returns None (API still down)
-        4. Fact is inserted into DB with status='active'
-        5. Fact has NO embedding in FAISS
-        
-        Bug: Fact is 'active' but will never appear in vector search results.
+        Previously: fact was inserted with status='active' even without embedding.
+        Now: fact is inserted with status='pending_embedding' when embedding fails.
+        The embedding_retry_worker will later retry and activate it.
         """
         import companion.config as cfg
         monkeypatch.setattr(cfg, "DATA_DIR", str(tmp_path))
@@ -214,24 +209,18 @@ class TestBug3ActiveFactsWithoutEmbeddings:
         fact = make_fact("User likes cats", importance=5)
         result = store.add_fact(fact)
         
-        # Verify fact was added
+        # Verify fact was added — but with pending_embedding status (FIX)
         assert result is not None
         saved_fact = store.get_fact(result.id)
-        assert saved_fact.status == "active"
+        assert saved_fact.status == "pending_embedding", \
+            "FIXED: fact without embedding gets pending_embedding status, not active"
         
-        # BUG: Fact has no embedding
+        # Fact has no embedding — correct, it's pending
         embedding = store.vector.get_embedding("User likes cats")
-        assert embedding is None, "Bug: fact has no embedding"
+        assert embedding is None
         
-        # BUG CONSEQUENCE: Vector search won't find this fact
-        search_results = store.vector.search("User likes cats", top_k=5)
-        assert len(search_results) == 0, \
-            "Bug reproduced: active fact without embedding is not searchable"
-        
-        # But fact exists in DB
-        assert store.get_fact(result.id) is not None, "Fact exists in DB"
-        
-        # This violates the invariant: "active facts should be searchable"
+        # Fact exists in DB and will be picked up by retry worker
+        assert store.get_fact(result.id) is not None
 
     def test_fact_without_embedding_excluded_from_rebuild(self, tmp_path, monkeypatch):
         """REAL BUG REPRODUCTION:
