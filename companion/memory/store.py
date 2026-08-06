@@ -93,21 +93,36 @@ class MemoryStore:
 
     @property
     def lock(self) -> asyncio.Lock:
-        """Lock for critical sections reading and mutating state.
-        
-        Contract:
-        - Ownership: The lock protects read-modify-write operations on shared files 
-          (e.g., personality.json) and multi-step dependent DB transactions.
-        - Acquisition: The CALLER (e.g., pipeline, background task) MUST acquire this 
-          lock BEFORE invoking methods that perform read-modify-write cycles. 
-          MemoryStore does NOT acquire this lock internally to avoid deadlocks.
-        - Blocking I/O: Do NOT hold this lock during long blocking I/O (like LLM calls). 
-          Synchronous file I/O inside the lock should be delegated to threads.
+        """Asyncio lock for critical sections that stay within the event loop.
+
+        For cross-thread protection (when using asyncio.to_thread), use
+        sync_lock instead. asyncio.Lock does NOT protect against concurrent
+        mutations from different OS threads spawned by to_thread().
         """
         import asyncio
         if not hasattr(self, "_lock"):
             self._lock = asyncio.Lock()
         return self._lock
+
+    @property
+    def sync_lock(self) -> Any:
+        """Threading lock for critical sections that run inside asyncio.to_thread().
+
+        Use this when the read-modify-write cycle executes in a worker thread:
+            def _critical(store, ...):
+                with store.sync_lock:
+                    data = store.load_personality()
+                    data.update(...)
+                    store.save_personality(data)
+            await asyncio.to_thread(_critical, store, ...)
+
+        This prevents lost-update race conditions between concurrent to_thread()
+        calls — asyncio.Lock alone cannot serialize threads.
+        """
+        import threading
+        if not hasattr(self, "_sync_lock"):
+            self._sync_lock = threading.Lock()
+        return self._sync_lock
 
     def _assert_locked(self) -> None:
         """Debug assertion to ensure the lock was acquired by the caller."""
@@ -238,6 +253,15 @@ class MemoryStore:
     # ── Facts ─────────────────────────────────────────────────────────
 
     def add_fact(self, fact: Fact) -> Fact:
+        """Insert a fact into memory with embedding, world model, and genome.
+
+        Architecture (P0-6 fix):
+          Phase 1 — prepare: dedup, governor check, compute embedding (may call API)
+          Phase 2 — transaction: SQLite insert + world model + genome
+          Phase 3 — post-commit: FAISS upsert + event publish
+
+        No external API calls happen inside the SQLite transaction.
+        """
         # Dedup gate: block duplicates against already active/dormant facts.
         existing = self.find_similar_fact_any_status(fact.fact)
         if existing is not None:
@@ -252,29 +276,36 @@ class MemoryStore:
 
         d = fact.to_dict()
         vec = None
-        # Generate embedding BEFORE transaction to avoid holding DB lock during API call
+
+        # ── Phase 1: Compute embedding BEFORE transaction ──────────────
+        # Never call embedding API while holding SQLite write lock.
         if fact.status in ("active", "dormant"):
             vec = self.vector.embed_text_only(fact.fact)
-            # BUG-002 FIX: If embedding fails, mark as pending_embedding instead of creating broken active fact
             if vec is None and fact.status == "active":
+                # Embedding API failed → pending_embedding, not broken active fact
                 fact.status = "pending_embedding"
-                d["status"] = "pending_embedding"  # Update dict that will be inserted
-                logger.warning("add_fact: embedding failed for fact %s, marking as pending_embedding", fact.id)
+                d["status"] = "pending_embedding"
+                logger.warning(
+                    "add_fact: embedding failed for fact %s, marking as pending_embedding",
+                    fact.id,
+                )
 
+        # ── Phase 2: SQLite transaction (no API calls inside) ──────────
         with self.db.atomic_memory_transaction():
             self.db._insert_fact(d)
+
+            # World model entity extraction — isolated so failure here
+            # does NOT rollback the fact insert (P0-7 fix).
             if hasattr(self, "world_model") and self.world_model and fact.status in ("active", "dormant"):
-                self.world_model.process_fact(fact, index_entities=False)
-            if fact.status in ("active", "dormant"):
-                if vec is not None:
-                    self.vector.upsert_embedding(fact.fact, vec, content_type="fact", fact_id=fact.id)
-                else:
-                    # This should not happen for active/dormant facts after the fix above
-                    logger.warning("add_fact: attempting to compute embedding inside transaction for fact %s", fact.id)
-                    self.vector.compute_and_cache(fact.fact, content_type="fact", fact_id=fact.id)
-            # K4 genome parity: every fact has exactly one genome row (1:1 invariant).
-            # origin = what brought it into the world; generation increments on
-            # compression. Used by survival scoring + the 10y failure analysis.
+                try:
+                    self.world_model.process_fact(fact, index_entities=False)
+                except Exception as exc:
+                    logger.warning(
+                        "world_model.process_fact() failed for fact %s (fact still saved): %s",
+                        fact.id, exc, exc_info=True,
+                    )
+
+            # K4 genome parity: every fact has exactly one genome row (1:1).
             try:
                 self.db.upsert_memory_genome({
                     "memory_id": fact.id,
@@ -284,9 +315,27 @@ class MemoryStore:
             except Exception as exc:
                 logger.debug("genome insert for %s failed (non-fatal): %s", fact.id, exc)
 
+        # ── Phase 3: Post-commit side effects ──────────────────────────
+        # FAISS upsert is outside the transaction. If it fails, the fact
+        # is still in SQLite and will be recovered by recover_index_consistency()
+        # on next startup. This matches the dual-write principle.
+        if vec is not None and fact.status in ("active", "dormant"):
+            try:
+                self.vector.upsert_embedding(fact.fact, vec, content_type="fact", fact_id=fact.id)
+            except Exception as exc:
+                logger.warning(
+                    "FAISS upsert failed for fact %s (will recover on next rebuild): %s",
+                    fact.id, exc,
+                )
+
         if self.event_bus:
             from companion.memory.events.base import FactCreatedEvent
-            self.event_bus.publish(FactCreatedEvent(fact_id=fact.id, fact_text=fact.fact, importance=fact.importance, source=fact.source))
+            self.event_bus.publish(FactCreatedEvent(
+                fact_id=fact.id,
+                fact_text=fact.fact,
+                importance=fact.importance,
+                source=fact.source,
+            ))
         return fact
 
     def recover_index_consistency(self) -> dict[str, int]:

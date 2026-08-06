@@ -2345,22 +2345,8 @@ class MemoryDatabase:
   async def async_save_state_model(self, model_type: str, data: dict[str, Any]) -> None:
     await asyncio.to_thread(self.save_state_model, model_type, data)
 
-  def get_meta(self, key: str, default: str = "") -> str:
-    with self._conn() as conn:
-      row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
-      if row:
-        return row["value"]
-      return default
-
   async def async_get_meta(self, key: str, default: str = "") -> str:
     return await asyncio.to_thread(self.get_meta, key, default)
-
-  def set_meta(self, key: str, value: str) -> None:
-    with self._conn() as conn:
-      conn.execute(
-        "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (key, value)
-      )
 
   async def async_set_meta(self, key: str, value: str) -> None:
     await asyncio.to_thread(self.set_meta, key, value)

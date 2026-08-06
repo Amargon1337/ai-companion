@@ -165,41 +165,6 @@ for category, default in _SAFETY_DEFAULTS.items():
     SAFETY_SETTINGS_CONFIG[category] = os.getenv(env_key, default)
 
 
-# LCE (Life Continuity Engine): извлечение переходов НЕ каждый compress,
-# а раз в N сжатий — это дорогой отдельный запрос к LLM (как ты и просил).
-LCE_EVERY_N = 8
-# Ниже этого порога уверенности переход уходит в pending_review (карантин).
-LCE_CONFIDENCE_THRESHOLD = 0.65
-
-# ── Memory Reliability Layer (старение выводов, не удаление) ──
-# Полувремени (дни) без подтверждения до перехода active→aging→stale.
-# Выводы о человеке стареют медленнее фактов (это долгосрочные инференсы),
-# но не вечно — именно эту дыру закрывает слой надёжности.
-HM_AGING_DAYS = int(os.getenv("HM_AGING_DAYS", "90"))    # active -> aging
-HM_STALE_DAYS = int(os.getenv("HM_STALE_DAYS", "240"))   # aging -> stale
-PATTERN_AGING_DAYS = int(os.getenv("PATTERN_AGING_DAYS", "120"))
-PATTERN_STALE_DAYS = int(os.getenv("PATTERN_STALE_DAYS", "360"))
-MAX_VIDEO_DOWNLOAD_BYTES = int(os.getenv("MAX_VIDEO_DOWNLOAD_BYTES", str(50 * 1024 * 1024)))
-SPEECH_RECOGNITION_LANGUAGE = os.getenv("SPEECH_RECOGNITION_LANGUAGE", "ru-RU")
-
-# LLM timeouts and retry
-LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "120"))
-LLM_RETRIES = int(os.getenv("LLM_RETRIES", "3"))
-LLM_RETRY_DELAY = int(os.getenv("LLM_RETRY_DELAY", "4"))
-
-# Memory Settings
-REFLECTION_EVERY_N = int(os.getenv("REFLECTION_EVERY_N", "10"))
-DORMANT_REVIVAL_THRESHOLD = float(os.getenv("DORMANT_REVIVAL_THRESHOLD", "0.80"))
-LLM_COMMAND_CONFIDENCE_THRESHOLD = float(os.getenv("LLM_COMMAND_CONFIDENCE_THRESHOLD", "0.92"))
-
-# Cognitive Context Layer v2 feature flags. Defaults keep the approved layer on,
-# while each module can be disabled instantly from api.env for rollback.
-ENABLE_TEMPORAL_CONTEXT = os.getenv("ENABLE_TEMPORAL_CONTEXT", "1").lower() not in {"0", "false", "no", "off"}
-ENABLE_TEMPORAL_DELTAS = os.getenv("ENABLE_TEMPORAL_DELTAS", "1").lower() not in {"0", "false", "no", "off"}
-ENABLE_IMPORTANCE_RANKING = os.getenv("ENABLE_IMPORTANCE_RANKING", "1").lower() not in {"0", "false", "no", "off"}
-ENABLE_ACCESS_TRACKING = os.getenv("ENABLE_ACCESS_TRACKING", "1").lower() not in {"0", "false", "no", "off"}
-LOCAL_TIMEZONE = os.getenv("LOCAL_TIMEZONE", "UTC")
-
 # Activation Score Weights for Memory Ranking (Stage 2)
 ACTIVATION_WEIGHT_IMPORTANCE = float(os.getenv("ACTIVATION_WEIGHT_IMPORTANCE", "0.30"))
 ACTIVATION_WEIGHT_RECENCY = float(os.getenv("ACTIVATION_WEIGHT_RECENCY", "0.25"))
