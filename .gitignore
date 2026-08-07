@@ -58,3 +58,5 @@ git.txt
 # OS
 .DS_Store
 Thumbs.db
+
+.freebuff/
