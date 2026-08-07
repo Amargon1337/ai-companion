@@ -340,7 +340,6 @@ class PredictionFeedbackService:
 
         pending = db.list_predictions(outcome="pending", limit=10)
         q_lower = query.lower()
-        r_lower = response.lower()
 
         for p in pending:
             hypo = str(p.get("hypothesis", "")).lower()
@@ -600,7 +599,6 @@ class ImportanceFeedbackService:
     @classmethod
     def apply_retrieval_feedback(cls, context: MemoryContext, db: Any) -> int:
         count = 0
-        now_iso = datetime.now().isoformat()
 
         # Boost importance of retrieved entities
         for ent in context.entities:

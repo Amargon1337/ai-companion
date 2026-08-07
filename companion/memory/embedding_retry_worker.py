@@ -21,7 +21,6 @@ Architecture note:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -115,8 +114,17 @@ class EmbeddingRetryWorker:
         if not pending_facts:
             return
         logger.debug("Found %d facts with pending_embedding status", len(pending_facts))
+        from companion.memory.vector_index import embedding_cooldown_active
         for fact in pending_facts:
             if not self._running:
+                break
+            # Во время глобального 429 cooldown не трогаем факты:
+            # не тратим попытки и не долбим API каскадом.
+            if embedding_cooldown_active():
+                logger.info(
+                    "Embedding API in 429 cooldown — deferring %d pending facts",
+                    len(pending_facts),
+                )
                 break
             try:
                 await self._retry_fact_embedding(fact)

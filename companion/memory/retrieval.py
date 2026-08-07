@@ -13,7 +13,6 @@ from companion.config import (
     RETRIEVAL_TOKEN_BUDGET,
 )
 from companion.llm.token_budget import estimate_tokens
-from companion.memory.importance import retrieval_score
 from companion.models import ContextBundle, Fact, Reflection
 from companion.memory.reranker import CrossEncoderReranker
 

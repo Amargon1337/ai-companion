@@ -10,7 +10,7 @@ from logging.handlers import RotatingFileHandler
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, types
 
-from companion.config import ADMIN_IDS, API_TOKEN, DATA_DIR, LOG_LEVEL, LOG_PATH
+from companion.config import ADMIN_IDS, API_TOKEN, LOG_LEVEL, LOG_PATH
 from companion.handlers import register_handlers, setup_bot_commands
 
 # Logging: stderr + rotating file

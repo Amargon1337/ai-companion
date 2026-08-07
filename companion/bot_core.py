@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re as _re
 import time
-import uuid
 from datetime import datetime
 from typing import Any
 
@@ -19,7 +19,7 @@ from companion.background_scheduler import (
     run_background_tasks,
     safe_task,
 )
-from companion.config import BASE_DIR, FAISS_FLUSH_INTERVAL_SECONDS, SUMMARY_THRESHOLD
+from companion.config import FAISS_FLUSH_INTERVAL_SECONDS, SUMMARY_THRESHOLD
 from companion.config import LLM_HISTORY_TOKEN_BUDGET, LLM_INPUT_TOKEN_BUDGET
 from companion.context import ContextAggregator
 from companion.critique_manager import apply_critique_to_text, run_self_critique
@@ -33,7 +33,6 @@ from companion.models import Fact
 from companion.llm.token_budget import estimate_tokens, trim_history
 from companion import observability
 from companion.policy_layer import policy_layer
-from companion.policy_layer import UserState as PolicyUserState
 from companion.reasoning import reasoning_engine
 from companion.runtime_state import RuntimeState
 from companion.handlers import commands
@@ -55,6 +54,7 @@ _importance_accumulator: dict[int, float] = {}  # tracks accumulated importance 
 
 # Rate limiter for LLM requests
 _user_request_times: dict[int, list[float]] = {}
+_rate_checked_messages: dict[int, set[int]] = {}  # uid -> message_ids already counted
 _compressing_users: set[int] = set()
 _MAX_REQUESTS_PER_MINUTE = 10
 
@@ -601,7 +601,6 @@ async def build_context(message: types.Message, content_payload: Any) -> dict | 
             await asyncio.to_thread(commands.auto_add_event_from_message, query, analysis["estimated_importance"])
 
     intent = state.intent or "memory"
-    conf = state.intent_confidence or 0.6
     policy_decision = _get_policy_decision(state, query)
     state.policy_constraints = policy_decision.constraints if policy_decision else None
     logger.info(f"[MEMORY] Запуск RAG. Важность: {state.message_importance}. Сборка когнитивного контекста...")
@@ -685,7 +684,6 @@ async def process_multimodal_request(message: types.Message):
 
     await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
     
-    import os
     import tempfile
     import json
     
@@ -938,9 +936,17 @@ async def _extract_prospective_memory(text: str) -> None:
 
 def check_rate_limit(uid: int, message: types.Message) -> bool:
     now = time.time()
+    msg_id = getattr(message, "message_id", None)
     if uid not in _user_request_times:
         _user_request_times[uid] = []
     _user_request_times[uid] = [t for t in _user_request_times[uid] if now - t < 60]
+
+    # Idempotency: the same message (media flows call us from the handler AND
+    # from build_context) must not be counted twice against the per-minute limit.
+    if msg_id is not None:
+        checked = _rate_checked_messages.setdefault(uid, set())
+        if msg_id in checked:
+            return True
 
     if len(_user_request_times[uid]) >= _MAX_REQUESTS_PER_MINUTE:
         safe_task(message.answer(
@@ -949,6 +955,11 @@ def check_rate_limit(uid: int, message: types.Message) -> bool:
         return False
 
     _user_request_times[uid].append(now)
+    if msg_id is not None:
+        _rate_checked_messages.setdefault(uid, set()).add(msg_id)
+        # Bounded memory: drop stale tracking once it grows (10 req/min × 60 min).
+        if len(_rate_checked_messages[uid]) > 600:
+            _rate_checked_messages[uid].clear()
     return True
 
 
@@ -1097,7 +1108,10 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             genome_scores = await asyncio.to_thread(_load_genome_scores, fact_ids)
         except Exception:
             genome_scores = {}
-        bundle = retrieval_mgr.select(
+        # H2: retrieval_mgr.select может делать sync LLM-вызовы (HyDE, LLM-judge
+        # rerank) — не блокируем event loop.
+        bundle = await asyncio.to_thread(
+            retrieval_mgr.select,
             query=query, facts=ctx_data["facts"], reflections=ctx_data["reflections"],
             patterns=ctx_data.get("patterns", []),
             summaries=ctx_data["summaries"], permanent_notes=ctx_data["permanent_notes"],
@@ -1258,7 +1272,8 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             # Фаза 2: Контекст в конце промпта и удаление CoT
             from companion.llm.sessions import build_system_instruction
             
-            system_instruction = build_system_instruction(
+            system_instruction = await asyncio.to_thread(
+                build_system_instruction,
                 memory_store, retrieval_mgr, query, precomputed_context=ctx_block
             )
             reserved_tokens = estimate_tokens(system_instruction) + estimate_tokens(str(content_payload))
@@ -1323,6 +1338,37 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
                 pass
 
         text = _extract_response_text(response)
+        if not text and not force_flash:
+            # Пустой ответ (сandidates=0 без finish_reason) — известный баг
+            # flash-линейки Gemini (issue python-genai #1289, forum #86564):
+            # модель изредка возвращает пустой ответ без ошибки, ретраи той же
+            # моделью не помогают. Один ретрай тем же запросом, затем fallback
+            # на запасную модель (если она отличается от текущей).
+            logger.warning("[ROUTER] Empty response from model; retrying once...")
+            try:
+                response = await execute_final_response(chat, content_payload)
+                text = _extract_response_text(response)
+            except Exception as retry_exc:
+                logger.warning("[ROUTER] Retry after empty response failed: %s", retry_exc)
+            if not text:
+                from companion.config import FALLBACK_RESPONSE_MODEL
+                fallback_model = FALLBACK_RESPONSE_MODEL
+                if fallback_model and fallback_model != desired_model:
+                    logger.warning("[ROUTER] Empty response persists; switching to fallback model %s", fallback_model)
+                    try:
+                        chat = llm.client.chats.create(
+                            model=fallback_model,
+                            history=bounded_history,
+                            config=llm.make_config(
+                                system_instruction=system_instruction,
+                                temperature=0.7,
+                            ),
+                        )
+                        user_chats[uid] = chat
+                        response = await execute_final_response(chat, content_payload)
+                        text = _extract_response_text(response)
+                    except Exception as fb_exc:
+                        logger.warning("[ROUTER] Fallback model failed: %s", fb_exc)
         if not text:
             await message.answer("API вернул пустой ответ без текста.")
             state.llm_response = ""
@@ -1393,13 +1439,11 @@ def _analyze_context_utilization(response_text: str, bundle: Any) -> tuple[int, 
         for f in bundle.facts:
             sent_ids.append(f.id)
             f_text = f.fact.lower()
-            words = [w for w in _re.findall(r'[а-яёа-z0-9]+', f_text) if len(w) > 3]
-            used = False
+            words = [w for w in _re.findall(r'[а-яёa-z0-9]+', f_text) if len(w) > 3]
             if words:
                 matches = sum(1 for w in words if w in resp_lower)
                 if matches / len(words) >= 0.5:
                     facts_used += 1
-                    used = True
                     used_ids.append(f.id)
             
         try:
@@ -1410,7 +1454,7 @@ def _analyze_context_utilization(response_text: str, bundle: Any) -> tuple[int, 
     if bundle.reflections:
         for r in bundle.reflections:
             r_text = r.insight.lower()
-            words = [w for w in _re.findall(r'[а-яёа-z0-9]+', r_text) if len(w) > 3]
+            words = [w for w in _re.findall(r'[а-яёa-z0-9]+', r_text) if len(w) > 3]
             if not words:
                 continue
             matches = sum(1 for w in words if w in resp_lower)
@@ -1420,7 +1464,7 @@ def _analyze_context_utilization(response_text: str, bundle: Any) -> tuple[int, 
     if bundle.active_goals:
         for g in bundle.active_goals:
             g_clean = _re.sub(r'^•\s*\[\d+/\d+\]\s*', '', g).lower()
-            words = [w for w in _re.findall(r'[а-яёа-z0-9]+', g_clean) if len(w) > 3]
+            words = [w for w in _re.findall(r'[а-яёa-z0-9]+', g_clean) if len(w) > 3]
             if not words:
                 continue
             matches = sum(1 for w in words if w in resp_lower)
@@ -1431,12 +1475,68 @@ def _analyze_context_utilization(response_text: str, bundle: Any) -> tuple[int, 
 
 
 def _extract_response_text(response: Any) -> str:
+    """Извлечь текст из ответа Gemini; при пустом — диагностировать причину.
+
+    response.text == None когда модель вернула только thinking-блоки
+    (part.thought=True), function call (AFC) или пустой candidates
+    (safety-блок / обрыв генерации). Тогда собираем текст из parts вручную
+    и логируем finish_reason + safety-рейтинги, чтобы пустой ответ
+    был диагностируемым, а не немой ошибкой.
+    """
+    if response is None:
+        return ""
     try:
         text = getattr(response, "text", None)
     except Exception as e:
         logger.warning("Failed to extract Gemini response text: %s", e)
-        return ""
-    return text if isinstance(text, str) else ""
+        text = None
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+
+    # Диагностика + ручной сбор из candidates[].content.parts
+    part_types: list[str] = []
+    collected_parts: list[str] = []
+    try:
+        for candidate in getattr(response, "candidates", None) or []:
+            for part in getattr(getattr(candidate, "content", None), "parts", None) or []:
+                try:
+                    for field_name, field_value in part.model_dump(
+                        exclude={"text", "thought", "thought_signature"}
+                    ).items():
+                        if field_value is not None:
+                            part_types.append(field_name)
+                except Exception:
+                    pass
+                part_text = getattr(part, "text", None)
+                if isinstance(part_text, str) and not getattr(part, "thought", False):
+                    collected_parts.append(part_text)
+    except Exception as e:
+        logger.warning("Failed to inspect Gemini response parts: %s", e)
+
+    if collected_parts:
+        joined = "".join(collected_parts).strip()
+        if joined:
+            logger.info("Recovered text from response parts: %d chars", len(joined))
+            return joined
+
+    logger.warning(
+        "Gemini empty response: finish_reason=%s candidates=%d safety=%s part_types=%s",
+        getattr(response, "finish_reason", None),
+        len(getattr(response, "candidates", None) or []),
+        getattr(response, "safety_ratings", None),
+        part_types,
+    )
+    # Полный дамп для диагностики: prompt_feedback (block_reason входа),
+    # usage_metadata (дошёл ли запрос до модели), model_version.
+    try:
+        dump = response.model_dump(
+            exclude_none=False,
+            exclude={"candidates"},
+        )
+        logger.warning("Gemini empty response full dump: %s", dump)
+    except Exception as dump_exc:
+        logger.warning("Failed to dump empty response: %s", dump_exc)
+    return ""
 
 
 def _extract_index(text: str) -> int:

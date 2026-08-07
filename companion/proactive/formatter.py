@@ -1,4 +1,3 @@
-import json
 from companion.proactive.collector import ContextPayload
 from companion.llm.client import aio_oneshot
 from companion.config import MODEL_NAME

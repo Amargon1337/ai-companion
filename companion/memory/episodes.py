@@ -6,13 +6,11 @@ Episode = дата + что произошло + кто участвовал + �
 from __future__ import annotations
 
 import logging
-import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, List
 
 from companion.llm.client import aio_oneshot, parse_json_object
-from companion.llm.prompts import SUMMARY_PROMPT
 from companion.models import Episode, Fact, FactRelation
 from companion.config import MODEL_NAME
 

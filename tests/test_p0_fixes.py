@@ -31,7 +31,7 @@ class TestP01EmbeddingRetryWorkerFieldName:
     def test_worker_accesses_meta_field(self):
         """The retry worker must use fact.meta (the actual Fact dataclass field)."""
         from companion.memory.embedding_retry_worker import EmbeddingRetryWorker
-        source = open("companion/memory/embedding_retry_worker.py").read()
+        source = open("companion/memory/embedding_retry_worker.py", encoding="utf-8").read()
         # Should NOT contain fact.metadata (wrong field)
         assert "fact.metadata" not in source, \
             "P0-1 FAIL: embedding_retry_worker still uses fact.metadata"
@@ -48,7 +48,7 @@ class TestP02ApiEnvInGitignore:
     """Verify api.env is in .gitignore to prevent credential leaks."""
 
     def test_api_env_excluded(self):
-        with open(".gitignore") as f:
+        with open(".gitignore", encoding="utf-8") as f:
             content = f.read()
         assert "api.env" in content, "P0-2 FAIL: api.env not in .gitignore"
 
@@ -61,7 +61,7 @@ class TestP03NoDuplicateConfig:
     """Verify config.py has no duplicate variable definitions."""
 
     def test_no_duplicate_variables(self):
-        with open("companion/config.py") as f:
+        with open("companion/config.py", encoding="utf-8") as f:
             tree = ast.parse(f.read())
         names = {}
         for node in ast.iter_child_nodes(tree):
@@ -81,7 +81,7 @@ class TestP04NoDuplicateMetaMethods:
     """Verify MemoryDatabase has only one get_meta and one set_meta."""
 
     def test_no_duplicate_methods(self):
-        with open("companion/storage/sqlite_db.py") as f:
+        with open("companion/storage/sqlite_db.py", encoding="utf-8") as f:
             source = f.read()
         # Count method definitions
         get_meta_count = source.count("def get_meta(")
@@ -98,7 +98,7 @@ class TestP05ModelsImportsJson:
     """Verify models.py has import json at top level."""
 
     def test_json_imported(self):
-        with open("companion/models.py") as f:
+        with open("companion/models.py", encoding="utf-8") as f:
             tree = ast.parse(f.read())
         top_level_imports = set()
         for node in ast.iter_child_nodes(tree):
@@ -246,7 +246,7 @@ class TestP08SyncLock:
 
     def test_pipeline_uses_sync_lock(self):
         """pipeline.py must use sync_lock inside to_thread, not asyncio.Lock around it."""
-        with open("companion/llm/pipeline.py") as f:
+        with open("companion/llm/pipeline.py", encoding="utf-8") as f:
             source = f.read()
         # Should NOT have "async with store.lock" followed by "to_thread"
         assert "async with store.lock" not in source or "sync_lock" in source, \
@@ -254,7 +254,7 @@ class TestP08SyncLock:
 
     def test_scheduler_uses_sync_lock(self):
         """background_scheduler.py must use sync_lock inside to_thread."""
-        with open("companion/background_scheduler.py") as f:
+        with open("companion/background_scheduler.py", encoding="utf-8") as f:
             source = f.read()
         assert "async with store.lock" not in source, \
             "P0-8 FAIL: background_scheduler.py still uses async lock around to_thread"
@@ -268,7 +268,7 @@ class TestCosineSimilarityNoDuplicate:
     """Verify cosine_similarity is defined exactly once in vector_index.py."""
 
     def test_single_definition(self):
-        with open("companion/memory/vector_index.py") as f:
+        with open("companion/memory/vector_index.py", encoding="utf-8") as f:
             source = f.read()
         count = source.count("def cosine_similarity(")
         assert count == 1, f"cosine_similarity defined {count} times (should be 1)"

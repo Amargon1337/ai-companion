@@ -36,7 +36,6 @@ from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from companion.memory.store import MemoryStore
-    from companion.models import Fact
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +220,6 @@ def compute_health(
     score.components["verification"] = verification_score
 
     # ── Component 7: Source Reliability ─────────────────────────────────
-    source = getattr(fact, "source", "") or ""
     source_type = getattr(fact, "source_type", "") or ""
 
     # Reliability hierarchy:

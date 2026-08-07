@@ -31,11 +31,10 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from companion.memory.store import MemoryStore
-    from companion.models import Fact
 
 logger = logging.getLogger(__name__)
 

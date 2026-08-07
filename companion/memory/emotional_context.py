@@ -15,9 +15,8 @@ This costs ZERO LLM calls — it's pure heuristic analysis of existing data.
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from companion.memory.store import MemoryStore
@@ -82,7 +81,6 @@ def detect_emotional_tone(text: str) -> dict[str, float]:
         return {}
     
     text_lower = text.lower()
-    words = set(re.findall(r'\w+', text_lower))
     
     emotions = {}
     for emotion, data in _EMOTION_MARKERS.items():
@@ -147,7 +145,6 @@ def build_emotional_callback(
     callbacks = []
     
     for topic in current_topics:
-        topic_markers = _EMOTIONAL_TOPICS.get(topic, set())
         
         for msg in recent:
             if msg.role != "user":

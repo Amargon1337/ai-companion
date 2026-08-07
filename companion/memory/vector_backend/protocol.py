@@ -15,7 +15,7 @@ namespacing) but these are NOT required by the protocol.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol, Sequence, runtime_checkable
 
 

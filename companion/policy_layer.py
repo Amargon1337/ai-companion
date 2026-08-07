@@ -22,13 +22,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from companion.config import DATA_DIR
 
 logger = logging.getLogger(__name__)
 

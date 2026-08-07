@@ -104,7 +104,6 @@ class RetrievalQualityAnalyzer:
     ) -> RetrievalQualityReport:
         retrieved_set = set(retrieved_ids)
         used_set = set(used_ids)
-        ignored_set = retrieved_set - used_set
 
         penalized: list[str] = []
         if tracker:

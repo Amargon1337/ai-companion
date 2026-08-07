@@ -14,7 +14,6 @@ from companion.memory.events.base import (
 
 if TYPE_CHECKING:
     from companion.memory.events.bus import MemoryEventBus
-    from companion.memory.store import MemoryStore
     from companion.storage.sqlite_db import MemoryDatabase
 
 logger = logging.getLogger(__name__)

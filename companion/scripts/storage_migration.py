@@ -33,11 +33,11 @@ def migrate_data():
             with open(pers_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             db.set_meta("personality", json.dumps(data, ensure_ascii=False))
-            report.append(f"- ✅ Migrated personality.json into system_meta")
+            report.append("- ✅ Migrated personality.json into system_meta")
         except Exception as e:
             report.append(f"- ❌ Error migrating personality.json: {e}")
     else:
-        report.append(f"- ⏭️ Skipped personality.json (not found)")
+        report.append("- ⏭️ Skipped personality.json (not found)")
 
     master_path = os.path.join(BASE_DIR, "master_summary.txt")
     if os.path.exists(master_path):
@@ -45,11 +45,11 @@ def migrate_data():
             with open(master_path, "r", encoding="utf-8") as f:
                 data = f.read().strip()
             db.set_meta("master_summary", data)
-            report.append(f"- ✅ Migrated master_summary.txt into system_meta")
+            report.append("- ✅ Migrated master_summary.txt into system_meta")
         except Exception as e:
             report.append(f"- ❌ Error migrating master_summary.txt: {e}")
     else:
-        report.append(f"- ⏭️ Skipped master_summary.txt (not found)")
+        report.append("- ⏭️ Skipped master_summary.txt (not found)")
 
     # 3. FAISS Mapping
     faiss_path = os.path.join(DATA_DIR, "faiss_mapping.json")
@@ -58,11 +58,11 @@ def migrate_data():
             with open(faiss_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             db.save_state_model("faiss_mapping", data)
-            report.append(f"- ✅ Migrated faiss_mapping.json into state_models ('faiss_mapping')")
+            report.append("- ✅ Migrated faiss_mapping.json into state_models ('faiss_mapping')")
         except Exception as e:
             report.append(f"- ❌ Error migrating faiss_mapping.json: {e}")
     else:
-        report.append(f"- ⏭️ Skipped faiss_mapping.json (not found)")
+        report.append("- ⏭️ Skipped faiss_mapping.json (not found)")
 
     # 4. Shared Lore Candidates
     lore_path = os.path.join(DATA_DIR, "shared_lore_candidates.jsonl")
@@ -85,7 +85,7 @@ def migrate_data():
         except Exception as e:
             report.append(f"- ❌ Error migrating shared_lore_candidates.jsonl: {e}")
     else:
-        report.append(f"- ⏭️ Skipped shared_lore_candidates.jsonl (not found)")
+        report.append("- ⏭️ Skipped shared_lore_candidates.jsonl (not found)")
 
     # 5. Move Logs
     logs_dir = os.path.join(DATA_DIR, "logs")

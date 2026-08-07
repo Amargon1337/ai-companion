@@ -6,6 +6,7 @@ import math
 import re
 import sqlite3
 import struct
+import time
 from contextlib import closing, contextmanager
 from collections.abc import Generator
 from typing import Any
@@ -25,6 +26,55 @@ from companion.config import FAISS_FLUSH_EVERY as _FAISS_FLUSH_EVERY
 EMBEDDING_FAILURES = 0
 ZERO_VECTOR_GENERATIONS = 0
 _GENAI_CLIENT = None
+# Global 429 cooldown: after a quota/rate-limit error, all embedding calls
+# are refused until this monotonic timestamp passes (prevents retry cascades).
+_EMBED_429_COOLDOWN_UNTIL = 0.0
+_EMBED_429_COOLDOWN_SECONDS = 60.0
+# Gemini Embedding 2 limits: 30K tokens per request, 1500 RPM (free tier).
+# Keep chunks safely under the token cap — the API counts tokens, not items.
+_EMBED_MAX_TOKENS_PER_REQUEST = 24_000
+_EMBED_MAX_ITEMS_PER_REQUEST = 90
+# Conservative token estimate: ~2 chars per token for Cyrillic-heavy text.
+_ESTIMATED_CHARS_PER_TOKEN = 2.0
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate to size embedding batches under the API limit."""
+    if not text:
+        return 0
+    return max(1, int(len(text) / _ESTIMATED_CHARS_PER_TOKEN))
+
+
+def _chunk_texts_by_tokens(texts: list[str]) -> list[list[str]]:
+    """Split texts into batches bounded by estimated tokens AND item count."""
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_tokens = 0
+    for text in texts:
+        tokens = _estimate_tokens(text)
+        if current and (
+            current_tokens + tokens > _EMBED_MAX_TOKENS_PER_REQUEST
+            or len(current) >= _EMBED_MAX_ITEMS_PER_REQUEST
+        ):
+            chunks.append(current)
+            current = []
+            current_tokens = 0
+        current.append(text)
+        current_tokens += tokens
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    """True if the exception is a 429 / RESOURCE_EXHAUSTED quota error."""
+    msg = str(exc)
+    return "429" in msg or "RESOURCE_EXHAUSTED" in msg.upper() or "quota" in msg.lower()
+
+
+def embedding_cooldown_active() -> bool:
+    """True while the global 429 cooldown is active (callers should skip API calls)."""
+    return _EMBED_429_COOLDOWN_UNTIL > time.monotonic()
 
 
 def _get_genai_client():
@@ -42,15 +92,16 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
     """Embed a batch of texts via Gemini API."""
     if not texts:
         return []
+    global _EMBED_429_COOLDOWN_UNTIL
+    if _EMBED_429_COOLDOWN_UNTIL > time.monotonic():
+        raise RuntimeError("Embedding API in 429 cooldown")
     try:
         logger.info(f"[VECTOR] Отправка запроса на получение эмбеддингов для {len(texts)} элементов...")
         from google.genai import types
         client = _get_genai_client()
 
-        chunk_size = 90
         all_embeddings = []
-        for i in range(0, len(texts), chunk_size):
-            chunk = texts[i : i + chunk_size]
+        for chunk in _chunk_texts_by_tokens(texts):
             batch_embed = getattr(client.models, "batch_embed_content", None)
             if batch_embed:
                 try:
@@ -84,12 +135,21 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
                     ZERO_VECTOR_GENERATIONS += 1
                     logger.warning("Embedding API returned an all-zero vector")
                 all_embeddings.append(values)
+            # Политичная пауза между чанками — не упираться в RPM лимит
+            time.sleep(0.5)
 
         return all_embeddings
     except Exception as exc:
         global EMBEDDING_FAILURES
         EMBEDDING_FAILURES += 1
-        logger.warning("Embedding API call failed: %s. Total failures: %d", exc, EMBEDDING_FAILURES)
+        if _is_quota_error(exc):
+            _EMBED_429_COOLDOWN_UNTIL = time.monotonic() + _EMBED_429_COOLDOWN_SECONDS
+            logger.warning(
+                "Embedding quota exceeded (429); cooling down for %.0fs. Total failures: %d",
+                _EMBED_429_COOLDOWN_SECONDS, EMBEDDING_FAILURES,
+            )
+        else:
+            logger.warning("Embedding API call failed: %s. Total failures: %d", exc, EMBEDDING_FAILURES)
         raise exc
 
 def get_embedding_stats() -> dict[str, int]:
@@ -252,7 +312,6 @@ class VectorIndex:
 
     def _load_index(self) -> None:
         import os
-        import json
         import faiss
         # R7 note (mmap): faiss.read_index(..., IO_FLAG_MMAP) is NOT supported
         # for HNSW (IndexHNSWFlat) — mmap works only for Flat/IVF layouts.
@@ -296,7 +355,6 @@ class VectorIndex:
 
     def save_index_to_disk(self):
         import faiss
-        import tempfile
         with self._locked():
             if self._is_initialized and hasattr(self, 'index') and self.index is not None:
                 # Atomic write: write to temp file, fsync, then atomic rename
@@ -343,8 +401,9 @@ class VectorIndex:
                         db.close()
 
     def flush_index(self) -> None:
-        if self._dirty_updates:
-            self.save_index_to_disk()
+        with self._locked():
+            if self._dirty_updates:
+                self.save_index_to_disk()
 
     def _mark_dirty(self, conn: sqlite3.Connection) -> None:
         conn.execute(

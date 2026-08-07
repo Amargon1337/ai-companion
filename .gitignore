@@ -24,6 +24,14 @@ data/logs/
 data/audit_archive.db
 data/quarantine_review.log
 data/permanent_notes.pending_review.txt
+# Runtime data — personal messages/state, must NEVER be committed
+data/messages.jsonl
+data/faiss_mapping.json
+data/self_model.json
+data/world_model.json
+data/shared_lore_candidates.jsonl
+data/*.db
+backup_*.json
 
 # Test cache
 .tests/__pycache__/
@@ -38,6 +46,7 @@ report.txt
 tall gitleaks
 hidden.txt
 git.txt
+/d
 
 # IDE / editor
 .idea/
