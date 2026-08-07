@@ -51,6 +51,16 @@ def _parse_admin_ids(raw_admins: str) -> list[int]:
 
 
 ADMIN_IDS: List[int] = _parse_admin_ids(_raw_admins)
+# This companion persists a single, global personal memory graph.  Supporting
+# multiple Telegram administrators without tenant-scoped storage would expose
+# one person's private memory to another, so the runtime has one principal.
+PRIMARY_USER_ID: int = ADMIN_IDS[0]
+SINGLE_OWNER_MODE = os.getenv("SINGLE_OWNER_MODE", "1").lower() not in {"0", "false", "no", "off"}
+if SINGLE_OWNER_MODE and len(ADMIN_IDS) != 1:
+    raise ValueError(
+        "SINGLE_OWNER_MODE requires exactly one ADMIN_IDS value because storage is not tenant-scoped. "
+        "Do not configure multiple administrators until a full owner_id migration is complete."
+    )
 
 EMPTY_PERSONALITY: dict = {
     "interests": {}, "beliefs": [], "values": [], "fears": [],

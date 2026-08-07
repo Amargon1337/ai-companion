@@ -95,7 +95,7 @@ class EpisodicMemoryCompressor:
             tags=["episodic_summary", period],
             status="active",
         )
-        self.store.add_fact(summary_fact)
+        summary_fact = self.store.add_fact(summary_fact)
 
         for f in facts:
             rel1 = FactRelation(

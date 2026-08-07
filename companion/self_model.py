@@ -28,13 +28,18 @@ ERROR_LOG_PATH = os.path.join(LOGS_DIR, "errors.jsonl")
 class SelfModel:
     """Модель самосознания бота."""
 
-    def __init__(self) -> None:
+    def __init__(self, db: Any | None = None) -> None:
+        self._db = db
         self.data = self._load()
 
+    def _database(self):
+        if self._db is None:
+            from companion.container import get_container
+            self._db = get_container().db
+        return self._db
+
     def _load(self) -> dict[str, Any]:
-        from companion.storage.sqlite_db import get_shared_db
-        db = get_shared_db()
-        loaded = db.get_state_model("self")
+        loaded = self._database().get_state_model("self")
         if loaded:
             return loaded
         return self._default_model()
@@ -88,9 +93,7 @@ class SelfModel:
 
     def save(self) -> None:
         self.data["last_updated"] = datetime.now().isoformat()
-        from companion.storage.sqlite_db import get_shared_db
-        db = get_shared_db()
-        db.save_state_model("self", self.data)
+        self._database().save_state_model("self", self.data)
 
     def log_error(
         self,

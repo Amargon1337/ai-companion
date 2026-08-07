@@ -96,7 +96,12 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
     if _EMBED_429_COOLDOWN_UNTIL > time.monotonic():
         raise RuntimeError("Embedding API in 429 cooldown")
     try:
-        logger.info(f"[VECTOR] Отправка запроса на получение эмбеддингов для {len(texts)} элементов...")
+        from companion.security.egress import prepare_external_payload
+        governed = [prepare_external_payload(text, purpose="embedding", model=_EMBEDDING_MODEL) for text in texts]
+        if any(result.decision.value == "denied" for result in governed):
+            raise PermissionError("embedding payload denied by egress policy")
+        texts = [result.payload for result in governed]
+        logger.info("[VECTOR] Requesting embeddings for %d records", len(texts))
         from google.genai import types
         client = _get_genai_client()
 

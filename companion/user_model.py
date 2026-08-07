@@ -92,9 +92,10 @@ class UserModel:
     """Целостная модель пользователя как системы."""
     CORE_STATES = {"neutral", "depressed", "anxious", "energized", "angry"}
 
-    def __init__(self):
+    def __init__(self, db: Any | None = None):
         import threading
         self._lock = threading.RLock()
+        self._db = db
         self.data: dict[str, Any] = {
             "identity": {
                 "who_they_are": "",
@@ -279,8 +280,7 @@ class UserModel:
             # --- SHARED LORE PHASE 0: Dry-Run Logging ---
             lore_candidates = res.get("shared_lore_candidates", [])
             if lore_candidates:
-                from companion.storage.sqlite_db import get_shared_db
-                db = get_shared_db()
+                db = self._database()
                 for cand in lore_candidates:
                     # Ensure it's not a hallucinated placeholder
                     if cand.get("candidate_phrase") and cand.get("candidate_phrase") != "потенциальный локальный мем/фраза из диалога (если есть)":
@@ -413,17 +413,17 @@ class UserModel:
             # Sync to IdentityVault
             from companion.bot_core import memory_store
             if snapshot.get("who_they_are"):
-                memory_store.identity.update_identity("core_identity", snapshot["who_they_are"], confidence=0.85, source="user_model_reflection", explicit_overwrite=True)
+                memory_store.identity.update_identity("core_identity", snapshot["who_they_are"], confidence=0.85, source="low_reliability", reason="automated user-model reflection")
             if snapshot.get("who_they_want_to_be"):
-                memory_store.identity.update_identity("ambitions", snapshot["who_they_want_to_be"], confidence=0.85, source="user_model_reflection", explicit_overwrite=True)
+                memory_store.identity.update_identity("ambitions", snapshot["who_they_want_to_be"], confidence=0.85, source="low_reliability", reason="automated user-model reflection")
             if snapshot.get("who_they_fear_becoming"):
-                memory_store.identity.update_identity("fears", snapshot["who_they_fear_becoming"], confidence=0.85, source="user_model_reflection", explicit_overwrite=True)
+                memory_store.identity.update_identity("fears", snapshot["who_they_fear_becoming"], confidence=0.85, source="low_reliability", reason="automated user-model reflection")
             if snapshot.get("core_traits"):
-                memory_store.identity.update_identity("core_traits", ", ".join(snapshot["core_traits"]), confidence=0.85, source="user_model_reflection", explicit_overwrite=True)
+                memory_store.identity.update_identity("core_traits", ", ".join(snapshot["core_traits"]), confidence=0.85, source="low_reliability", reason="automated user-model reflection")
             if snapshot.get("values"):
-                memory_store.identity.update_identity("values", ", ".join(snapshot["values"]), confidence=0.85, source="user_model_reflection", explicit_overwrite=True)
+                memory_store.identity.update_identity("values", ", ".join(snapshot["values"]), confidence=0.85, source="low_reliability", reason="automated user-model reflection")
             if snapshot.get("roles"):
-                memory_store.identity.update_identity("roles", ", ".join(snapshot["roles"]), confidence=0.85, source="user_model_reflection", explicit_overwrite=True)
+                memory_store.identity.update_identity("roles", ", ".join(snapshot["roles"]), confidence=0.85, source="low_reliability", reason="automated user-model reflection")
 
         try:
             loop = asyncio.get_running_loop()
@@ -433,19 +433,19 @@ class UserModel:
             _sync_io(ident_snapshot, reflection)
         return reflection
 
+    def _database(self):
+        if self._db is None:
+            from companion.container import get_container
+            self._db = get_container().db
+        return self._db
+
     def _save_model(self) -> None:
-        """Сохранить модель в БД."""
-        # Phase C: shared connection — per-call MemoryDatabase() leaked a
-        # fresh connection on EVERY save (and per-message record_emotional_state
-        # calls this), bypassing the shared RLock model.
-        from companion.storage.sqlite_db import get_shared_db
-        db = get_shared_db()
-        db.save_state_model("user", self.data)
+        """Persist through the composition-root database."""
+        self._database().save_state_model("user", self.data)
 
     def _load_model(self) -> None:
-        """Загрузить модель из БД."""
-        from companion.storage.sqlite_db import get_shared_db
-        db = get_shared_db()
+        """Load through the composition-root database."""
+        db = self._database()
         loaded_data = db.get_state_model("user")
         if loaded_data:
             try:

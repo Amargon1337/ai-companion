@@ -36,6 +36,7 @@ def extract_facts(
 ) -> list[Fact]:
     known = store.get_active_fact_texts()[:40]
     msgs = store.recent_messages(min_importance=3, limit=80)
+    visible_message_ids = {m.id for m in msgs}
     msg_text = "\n".join(f"- [{m.id}] [{m.role.upper()}] [{m.importance}/10] {m.text[:300]}" for m in msgs)
 
     prompt = FACT_EXTRACTION_PROMPT.format(
@@ -79,8 +80,16 @@ def extract_facts(
             if "core_identity" not in tags:
                 tags.append("core_identity")
 
-        evidence_list = [str(e) for e in item.get("evidence_messages", [])]
+        # Keep only IDs from source messages actually shown to the model. An
+        # invented source ID is worse than no provenance because it creates a
+        # false audit chain.
+        evidence_list = [str(e) for e in item.get("evidence_messages", []) if str(e) in visible_message_ids]
         status = "pending_review" if _looks_like_injection(text) else "active"
+        epistemic_class = "DIRECT_FACT" if evidence_list else "LLM_INFERENCE"
+        # Ungrounded model claims are retained for review, never silently
+        # promoted into the active factual corpus.
+        if not evidence_list and status == "active":
+            status = "pending_review"
 
         # World Model: слой знания (user|world|system), по умолчанию — user.
         domain = str(item.get("domain", "user") or "user").lower()
@@ -99,9 +108,14 @@ def extract_facts(
             evidence=evidence_list,
             status=status,
             domain=domain,
+            epistemic_class=epistemic_class,
         )
-        store.add_fact(fact)
-        created.append(fact)
+        # `add_fact` may deduplicate and return an existing persisted fact.
+        # Downstream consolidation must use that canonical identity, never the
+        # transient UUID that was not inserted.
+        persisted = store.add_fact(fact)
+        if persisted.id == fact.id:
+            created.append(persisted)
     return created
 
 

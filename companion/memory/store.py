@@ -29,17 +29,34 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryStore:
-    def __init__(self) -> None:
-        self.db = MemoryDatabase()
-        self.vector = VectorIndex(db=self.db)
+    def __init__(
+        self,
+        *,
+        db: MemoryDatabase | None = None,
+        vector: VectorIndex | None = None,
+        event_bus: MemoryEventBus | None = None,
+        governor: MemoryGovernor | None = None,
+        owner_id: int | None = None,
+    ) -> None:
+        # Dependencies are injectable so the application container owns one
+        # coherent DB/vector/event graph rather than constructing split-brain
+        # singletons over the same SQLite file.
+        self.db = db or MemoryDatabase()
+        # Legacy callers remain single-owner compatible while new composition
+        # roots may inject an explicit tenant principal.
+        if owner_id is None:
+            from companion.config import PRIMARY_USER_ID
+            owner_id = PRIMARY_USER_ID
+        self.owner_id = int(owner_id)
+        self.vector = vector or VectorIndex(db=self.db)
         # Async bus: handlers (IndexSyncService) may hit the embedding network;
         # decouple them from the mutating call path so a slow API stalls a
         # background worker rather than the conversation.
-        self.event_bus = MemoryEventBus(async_mode=True)
+        self.event_bus = event_bus or MemoryEventBus(async_mode=True)
         self.index_sync = IndexSyncService(self.event_bus, self.vector, self.db)
         self.semantic_ranker = SemanticImportanceRanker(self.db)
         self.identity = IdentityVault(self.db.path, db=self.db)
-        self.governor = MemoryGovernor(self.db)
+        self.governor = governor or MemoryGovernor(self.db)
         self.persistence = MemoryPersistenceLayer(self.db, self.governor, event_bus=self.event_bus)
         self.feedback_loop = MemoryFeedbackLoop(self.db, self.governor)
         self.hygiene_service = MemoryHygieneService(self.db, self.governor, vector_index=self.vector)
@@ -289,6 +306,22 @@ class MemoryStore:
         # ── Phase 2: SQLite transaction (no API calls inside) ──────────
         with self.db.atomic_memory_transaction():
             self.db._insert_fact(d)
+            # The legacy insert shape predates epistemic columns. Persist the
+            # model fields explicitly so LLM-derived claims are not silently
+            # reclassified as DIRECT_FACT by the SQLite default.
+            if (
+                fact.epistemic_class != "DIRECT_FACT"
+                or fact.support_count
+                or fact.contradiction_count
+            ):
+                self.db.update_fact_fields(
+                    fact.id,
+                    {
+                        "epistemic_class": fact.epistemic_class,
+                        "support_count": fact.support_count,
+                        "contradiction_count": fact.contradiction_count,
+                    },
+                )
 
             # World model entity extraction — isolated so failure here
             # does NOT rollback the fact insert (P0-7 fix).
@@ -324,6 +357,18 @@ class MemoryStore:
                     fact.id, exc,
                 )
 
+        # Persist a reconciliation job even when the eager in-process upsert
+        # succeeds. It is idempotent by fact/version and survives a crash
+        # between SQLite commit and FAISS mutation.
+        try:
+            self.db.enqueue_job(
+                owner_id=self.owner_id,
+                job_type="vector_sync",
+                payload={"fact_id": fact.id},
+                idempotency_key=f"vector_sync:{self.owner_id}:{fact.id}:{fact.version}",
+            )
+        except Exception as exc:
+            logger.warning("Unable to enqueue vector sync for %s: %s", fact.id, exc)
         if self.event_bus:
             from companion.memory.events.base import FactCreatedEvent
             self.event_bus.publish(FactCreatedEvent(
@@ -383,6 +428,8 @@ class MemoryStore:
             fields["memory_kind"] = memory_kind
         if date is not None:
             fields["date"] = date
+        if status is not None:
+            fields["status"] = status
         new_text_changed = fact is not None and fact.strip() and fact.strip() != old_text.strip()
         vec_new = None
         if new_text_changed and fact is not None:
@@ -449,6 +496,14 @@ class MemoryStore:
                     exclude_fact_id=fact_id,
                     prior_embedding=bytes(prior_blob) if isinstance(prior_blob, (bytes, bytearray, memoryview)) else None,
                 )
+        # Source invalidation must propagate to derived claims after the
+        # lifecycle commit.  The cascade only mutates dependent inference
+        # state; it never performs external work inside this transaction.
+        try:
+            from companion.memory.epistemic_layers import cascade_invalidation
+            cascade_invalidation(self, fact_id, reason=reason)
+        except Exception as exc:
+            logger.warning("Cascade invalidation failed for archived fact %s: %s", fact_id, exc)
         if self.event_bus:
             from companion.memory.events.base import FactArchivedEvent, FactUpdatedEvent
             self.event_bus.publish(
@@ -814,7 +869,15 @@ class MemoryStore:
         query_words = set(re.findall(r"\w+", norm))
         query_neg = bool(query_words & negations)
         for f in candidates:
-            cand_words = set(re.findall(r"\w+", self._normalize(f.fact)))
+            cand_norm = self._normalize(f.fact)
+            cand_words = set(re.findall(r"\w+", cand_norm))
+            # Character n-grams make templated facts differing only by an ID
+            # appear almost identical. Distinct numeric identifiers are data,
+            # not a paraphrase, and must never be collapsed by deduplication.
+            candidate_numbers = set(re.findall(r"\d+", cand_norm))
+            query_numbers = set(re.findall(r"\d+", norm))
+            if query_numbers != candidate_numbers:
+                continue
             cand_neg = bool(cand_words & negations)
             if query_neg != cand_neg:
                 continue

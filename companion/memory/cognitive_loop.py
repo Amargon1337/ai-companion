@@ -531,8 +531,8 @@ class MemoryWriteExecutor:
                     confidence=0.8,
                     source="cognitive_loop",
                 )
-                store.add_fact(f)
-                results.append({"action": "save_fact", "id": fid})
+                persisted = store.add_fact(f)
+                results.append({"action": "save_fact", "id": persisted.id, "created": persisted.id == fid})
             elif item.action == "save_entity":
                 if world_model:
                     matches = world_model.search(item.payload.get("name", ""))
@@ -575,16 +575,16 @@ class MemoryWriteExecutor:
                 )
                 results.append({"action": "save_prediction", "id": pid})
             elif item.action == "save_episode":
-                # Save into timeline events
-                events = db.load_events()
-                events.append(
-                    {
-                        "date": item.payload.get("date", datetime.now().isoformat()[:10]),
-                        "event": item.payload.get("event", ""),
-                    }
+                # Persist a timeline event through the authoritative database
+                # API.  There is intentionally no bulk `save_events` rewrite:
+                # append-only IDs preserve existing historical entries.
+                import uuid
+                event_date = item.payload.get("date", datetime.now().isoformat()[:10])
+                event_text = item.payload.get("event", "")
+                db.save_event(
+                    f"evt_{uuid.uuid4().hex}", event_date, event_text, 5, event_text
                 )
-                db.save_events(events[-50:])
-                results.append({"action": "save_episode", "event": item.payload.get("event")})
+                results.append({"action": "save_episode", "event": event_text})
 
         return results
 

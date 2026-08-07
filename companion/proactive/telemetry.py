@@ -1,13 +1,12 @@
+"""Proactive telemetry through the production composition-root database."""
+from __future__ import annotations
+
+import logging
 import uuid
 from datetime import datetime
-from companion.storage.sqlite_db import get_shared_db
-
-
 def _db():
-    # Phase C: one shared connection — per-call MemoryDatabase() opened (and
-    # closed) a fresh connection per telemetry write, bypassing the shared
-    # RLock model. The shared instance lives for the process lifetime.
-    return get_shared_db()
+    from companion.container import get_container
+    return get_container().db
 
 
 def record_ping_sent(
@@ -24,7 +23,7 @@ def record_ping_sent(
     with db._conn() as conn:
         conn.execute(
             """
-            INSERT INTO proactive_events 
+            INSERT INTO proactive_events
             (id, timestamp, reason, baseline_state, urgency, message, sent, user_replied)
             VALUES (?, ?, ?, ?, ?, ?, 1, 0)
             """,
@@ -40,68 +39,52 @@ def record_ping_reply(
     Помечает последний отправленный пинг как отвеченный.
     Ищет последний пинг, который еще не отвечен.
     """
-    db = _db()
-    with db._conn() as conn:
-        # Находим последний отправленный пинг
+    with _db()._conn() as conn:
         row = conn.execute(
-            "SELECT id FROM proactive_events ORDER BY timestamp DESC LIMIT 1"
+            "SELECT id FROM proactive_events WHERE sent=1 AND user_replied=0 ORDER BY timestamp DESC LIMIT 1"
         ).fetchone()
 
         if row:
-            event_id = row["id"]
             conn.execute(
                 """
-                UPDATE proactive_events 
-                SET user_replied = 1, reply_delay_hours = ? 
+                UPDATE proactive_events
+                SET user_replied = 1, reply_delay_hours = ?
                 WHERE id = ?
                 """,
-                (reply_delay_hours, event_id)
+                (reply_delay_hours, row["id"])
             )
 
 
 def get_recent_pings(limit: int = 3) -> list[str]:
     """Возвращает тексты последних отправленных проактивных сообщений."""
-    db = _db()
     try:
-        with db._conn() as conn:
+        with _db()._conn() as conn:
             rows = conn.execute(
-                "SELECT message FROM proactive_events WHERE sent = 1 ORDER BY timestamp DESC LIMIT ?",
+                "SELECT message FROM proactive_events WHERE sent=1 ORDER BY timestamp DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-            return [row["message"] for row in rows if row["message"]]
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning("Failed to fetch recent pings: %s", e)
+        return [str(row["message"]) for row in rows if row["message"]]
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Failed to fetch proactive telemetry: %s", exc)
         return []
 
 
 def get_proactive_stats() -> dict:
     """Возвращает базовую аналитику по пингам для отладки."""
-    db = _db()
     try:
-        stats = {}
-        with db._conn() as conn:
-            total = conn.execute("SELECT COUNT(*) as c FROM proactive_events").fetchone()["c"]
-            replied = conn.execute("SELECT COUNT(*) as c FROM proactive_events WHERE user_replied = 1").fetchone()["c"]
-
-            stats["total_sent"] = total
-            stats["replied"] = replied
-            stats["reply_rate"] = (replied / total) if total > 0 else 0.0
-
+        with _db()._conn() as conn:
+            total = int(conn.execute("SELECT COUNT(*) FROM proactive_events").fetchone()[0])
+            replied = int(conn.execute("SELECT COUNT(*) FROM proactive_events WHERE user_replied=1").fetchone()[0])
             reasons = conn.execute(
-                """
-                SELECT reason, COUNT(*) as sent, SUM(user_replied) as replies 
-                FROM proactive_events 
-                GROUP BY reason
-                """
+                "SELECT reason, COUNT(*) as sent, SUM(user_replied) as replies FROM proactive_events GROUP BY reason"
             ).fetchall()
 
-            stats["by_reason"] = {
-                r["reason"]: {"sent": r["sent"], "replies": r["replies"]} 
-                for r in reasons
-            }
-
-        return stats
+        return {
+            "total_sent": total,
+            "replied": replied,
+            "reply_rate": (replied / total) if total > 0 else 0.0,
+            "by_reason": {r["reason"]: {"sent": r["sent"], "replies": r["replies"]} for r in reasons},
+        }
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning("Failed to fetch proactive stats: %s", e)

@@ -21,6 +21,9 @@ class FactStatus(str, Enum):
     ARCHIVED = "archived"
     SUPERSEDED = "superseded"
     CONTRADICTED = "contradicted"
+    # Terminal retry failure is retained for diagnostics rather than silently
+    # looping forever in pending_embedding.
+    FAILED_EMBEDDING = "failed_embedding"
     PURGED = "purged"
 
     @classmethod
@@ -45,6 +48,7 @@ VALID_TRANSITIONS: dict[FactStatus, set[FactStatus]] = {
     },
     FactStatus.PENDING_EMBEDDING: {
         FactStatus.ACTIVE,
+        FactStatus.FAILED_EMBEDDING,
         FactStatus.QUARANTINE,
         FactStatus.PENDING_REVIEW,
         FactStatus.ARCHIVED,
@@ -91,6 +95,7 @@ VALID_TRANSITIONS: dict[FactStatus, set[FactStatus]] = {
         FactStatus.ARCHIVED,
         FactStatus.PURGED,
     },
+    FactStatus.FAILED_EMBEDDING: {FactStatus.PENDING_EMBEDDING, FactStatus.PURGED},
     FactStatus.PURGED: set(),  # Terminal state
 }
 
