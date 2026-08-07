@@ -277,10 +277,21 @@ class EmbeddingRetryWorker:
         new_meta["embedding_attempts"] = MAX_RETRIES
         new_meta["last_embedding_error"] = error_msg
         new_meta["embedding_failed_permanently"] = True
-        self.memory_store.db.update_fact_fields(
-            fact_id,
-            {"status": FAILED_EMBEDDING_STATUS, "meta": new_meta},
-        )
+        try:
+            self.memory_store.db.update_fact_fields(
+                fact_id,
+                {"status": FAILED_EMBEDDING_STATUS, "meta": new_meta},
+            )
+        except Exception as exc:
+            # Legacy databases may still have the pre-status-enum CHECK
+            # constraint. Pending-review is a supported terminal review state
+            # and prevents a permanent 60-second retry loop until migration.
+            logger.warning("Unable to persist failed_embedding for %s; moving to pending_review: %s", fact_id, exc)
+            new_meta["embedding_failed_permanently"] = True
+            self.memory_store.db.update_fact_fields(
+                fact_id,
+                {"status": "pending_review", "meta": new_meta},
+            )
 
     def get_stats(self) -> dict[str, int]:
         """Return worker statistics."""

@@ -10,7 +10,7 @@ from logging.handlers import RotatingFileHandler
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, types
 
-from companion.config import ADMIN_IDS, API_TOKEN, DATA_DIR, LOG_LEVEL, LOG_PATH
+from companion.config import PRIMARY_USER_ID, API_TOKEN, DATA_DIR, LOG_LEVEL, LOG_PATH
 from companion.handlers import register_handlers, setup_bot_commands
 
 # Logging: stderr + rotating file
@@ -26,15 +26,22 @@ logger = logging.getLogger(__name__)
 
 
 class AuthMiddleware(BaseMiddleware):
+    """Authorize the one owner of the global personal-memory database.
+
+    The storage model is intentionally single-tenant until every memory table
+    carries a tenant key.  Group delivery is rejected as well: a valid owner in
+    a group must not cause private recalled memory to be posted to its members.
+    """
     async def __call__(self, handler, event, data):
         if isinstance(event, types.Message):
             user = event.from_user
-            if not user or user.id not in ADMIN_IDS:
-                await event.answer("Доступ ограничен, ты не Иван. Отказано в доступе.")
+            if not user or user.id != PRIMARY_USER_ID or event.chat.type != "private":
+                await event.answer("Доступ ограничен.")
                 return
         elif isinstance(event, types.CallbackQuery):
             user = event.from_user
-            if not user or user.id not in ADMIN_IDS:
+            chat = event.message.chat if event.message else None
+            if not user or user.id != PRIMARY_USER_ID or not chat or chat.type != "private":
                 await event.answer("Доступ закрыт.", show_alert=True)
                 return
         return await handler(event, data)
@@ -43,14 +50,14 @@ def sanitize_and_scan_legacy_files() -> None:
     from companion.config import BASE_DIR, DATA_DIR
     from companion.security.sanitizer import sanitize_markup, _looks_like_injection
     from datetime import datetime
-    from companion.storage.sqlite_db import MemoryDatabase
     import hashlib
     from companion.models import Fact
+    from companion.container import get_container
 
     quarantine_log_path = os.path.join(DATA_DIR, "quarantine_review.log")
     notes_path = os.path.join(BASE_DIR, "permanent_notes.txt")
     os.makedirs(DATA_DIR, exist_ok=True)
-    db = MemoryDatabase()
+    db = get_container().db
 
     # 1. Sanitize permanent_notes.txt
     if os.path.exists(notes_path):
@@ -248,8 +255,31 @@ async def run() -> None:
         except NotImplementedError:
             pass
 
-    # Start proactive ping loop (background)
+    # Start durable critical-work processing before optional proactive work.
+    from companion.background_jobs import DurableJobWorker
     from companion.bot_core import proactive_ping_loop
+    durable_worker = DurableJobWorker(memory_store.db, "bot-main")
+
+    async def _vector_sync_job(job):
+        # Jobs are tenant-bound even in strict single-owner mode.  A malformed
+        # or replayed row must never cause this process to mutate another
+        # owner's vector state.
+        if int(job.get("owner_id", -1)) != memory_store.owner_id:
+            raise ValueError("job owner does not match runtime owner")
+        fact_id = str(job.get("payload", {}).get("fact_id", ""))
+        fact = await asyncio.to_thread(memory_store.get_fact, fact_id)
+        if fact is None or fact.status not in {"active", "dormant"}:
+            return
+        vector = await asyncio.to_thread(memory_store.vector.embed_text_only, fact.fact)
+        if vector is None:
+            raise RuntimeError("embedding unavailable")
+        await asyncio.to_thread(
+            memory_store.vector.upsert_embedding, fact.fact, vector,
+            content_type="fact", fact_id=fact.id,
+        )
+
+    durable_worker.register("vector_sync", _vector_sync_job)
+    await durable_worker.start()
     ping_task = asyncio.create_task(proactive_ping_loop(bot))
 
     try:
@@ -267,6 +297,7 @@ async def run() -> None:
                 logger.error("Failed to stop embedding retry worker: %s", exc, exc_info=True)
         
         try:
+            await durable_worker.stop()
             memory_store.vector.flush_index()
             memory_store.close()
         except Exception as exc:

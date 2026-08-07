@@ -29,5 +29,7 @@ Reply with exactly valid JSON: {{"is_valid": true}} or {{"is_valid": false, "rea
             logger.warning(f"ShadowEvaluator rejected identity drift for {category}. Reason: {res.get('reason')}")
         return is_valid
     except Exception as e:
+        # A failed second opinion must never authorize an irreversible identity
+        # mutation. The candidate remains available to the caller's review path.
         logger.error(f"ShadowEvaluator failed: {e}")
-        return True
+        return False
