@@ -53,6 +53,8 @@ def history_item(role: str, text: str) -> dict:
 def oneshot(prompt: str, model: str = MODEL_NAME, **kwargs: Any) -> str:
     import time
     from companion.config import LLM_RETRIES, LLM_RETRY_DELAY
+    from companion.security.egress import prepare_external_payload
+    prompt = prepare_external_payload(prompt, purpose="oneshot", model=model).payload
     last_exc = None
     for attempt in range(LLM_RETRIES):
         try:
@@ -179,6 +181,8 @@ def _get_aio_client():
 
 
 async def aio_oneshot(prompt: str, model: str = MODEL_NAME, timeout: float = 25.0, **kwargs: Any) -> str:
+    from companion.security.egress import prepare_external_payload
+    prompt = prepare_external_payload(prompt, purpose="aio_oneshot", model=model).payload
     c = _get_aio_client()
     async def _call():
         temp = c.aio.chats.create(model=model, config=make_config(**kwargs))
@@ -194,6 +198,15 @@ async def aio_oneshot(prompt: str, model: str = MODEL_NAME, timeout: float = 25.
 
 
 async def aio_oneshot_multimodal(contents: list[Any], model: str = MODEL_NAME, timeout: float = 25.0, **kwargs: Any) -> str:
+    from companion.security.egress import prepare_external_payload
+    # Only textual parts are inspectable/redactable here. Binary media is
+    # governed by upload policy and is never logged as an egress payload.
+    sanitized_contents = [
+        prepare_external_payload(item, purpose="multimodal_text", model=model).payload
+        if isinstance(item, str) else item
+        for item in contents
+    ]
+    contents = sanitized_contents
     c = _get_aio_client()
     async def _call():
         r = await c.aio.models.generate_content(model=model, contents=contents, config=make_config(**kwargs))
@@ -305,6 +318,9 @@ class MessageAnalysis(BaseModel):
 class FactItem(BaseModel):
     fact: str
     memory_kind: Literal["permanent", "state", "event"]
+    # IDs must refer to source messages supplied to the extraction prompt.
+    # They are mandatory provenance for a claim to be promoted above inference.
+    evidence_messages: List[str] = Field(default_factory=list)
     importance: int = Field(default=5, ge=1, le=10)
     confidence: float = Field(default=0.75, ge=0.0, le=1.0)
     tags: List[str] = Field(default_factory=list)
@@ -425,8 +441,10 @@ class KnowledgeDomainsExtractionResult(BaseModel):
 
 
 def oneshot_structured(prompt: str, response_schema: type[BaseModel], model: str = MODEL_NAME) -> Any:
-    """Run generate_content with structured JSON output and exponential backoff retries."""
+    """Run structured output through the same external-data boundary."""
     import time
+    from companion.security.egress import prepare_external_payload
+    prompt = prepare_external_payload(prompt, purpose="structured", model=model).payload
     import json
     from companion.config import LLM_RETRIES, LLM_RETRY_DELAY
     last_exc = None
@@ -454,10 +472,10 @@ def oneshot_structured(prompt: str, response_schema: type[BaseModel], model: str
                 data = json.loads(text)
                 return response_schema.model_validate(data)
             except json.JSONDecodeError as jde:
-                logger.error("JSON decode failed on attempt %d: %s. Raw text: %r", attempt + 1, jde, text)
+                logger.error("JSON decode failed on attempt %d: %s (response length=%d)", attempt + 1, jde, len(text))
                 raise
             except Exception as ve:
-                logger.error("Pydantic validation failed on attempt %d: %s. Raw text: %r", attempt + 1, ve, text)
+                logger.error("Pydantic validation failed on attempt %d: %s (response length=%d)", attempt + 1, ve, len(text))
                 raise
         except Exception as e:
             logger.error("oneshot_structured call failed (attempt %d/%d): %s", attempt + 1, LLM_RETRIES, e)

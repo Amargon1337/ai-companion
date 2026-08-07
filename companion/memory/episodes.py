@@ -120,7 +120,11 @@ class EpisodeEngine:
             tags=["episode", day],
             status="active",
         )
-        self.store.add_fact(ep_fact)
+        persisted_episode_fact = self.store.add_fact(ep_fact)
+
+        # A deduplicated episode must reference the canonical persisted fact.
+        # Otherwise the Episode row and its graph edges point at a transient ID.
+        ep_fact = persisted_episode_fact
 
         # Episode запись
         episode = Episode(

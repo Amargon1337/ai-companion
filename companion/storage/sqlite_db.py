@@ -58,6 +58,9 @@ class MemoryDatabase:
       except Exception:
         pass
     self._path = value
+    parent = os.path.dirname(os.path.abspath(value))
+    if parent:
+      os.makedirs(parent, exist_ok=True)
     self.conn = sqlite3.connect(value, check_same_thread=False)
     _configure_conn(self.conn)
     self.conn.row_factory = sqlite3.Row
@@ -159,7 +162,7 @@ class MemoryDatabase:
           source TEXT,
           source_type TEXT,
           tags TEXT DEFAULT '[]',
-          status TEXT DEFAULT 'active' CHECK(status IN ('quarantine', 'pending_embedding', 'active', 'dormant', 'pending_review', 'archived', 'superseded', 'purged')),
+          status TEXT DEFAULT 'active' CHECK(status IN ('quarantine', 'pending_embedding', 'failed_embedding', 'active', 'dormant', 'pending_review', 'archived', 'superseded', 'contradicted', 'purged')),
           valid_from TEXT,
           valid_until TEXT,
           schema_version INTEGER DEFAULT 1,
@@ -314,7 +317,8 @@ class MemoryDatabase:
           fact_id TEXT DEFAULT '',
           importance INTEGER DEFAULT 7,
           confidence REAL DEFAULT 0.8,
-          created_at TEXT
+          created_at TEXT,
+          version INTEGER DEFAULT 1
         );
         CREATE INDEX IF NOT EXISTS idx_episodes_date ON episodes(date);
 
@@ -558,6 +562,57 @@ class MemoryDatabase:
           faiss_id INTEGER PRIMARY KEY,
           fact_id TEXT UNIQUE NOT NULL
         );
+
+        -- Durable async work.  Payloads contain IDs/metadata, not raw user
+        -- text; source records remain authoritative in their domain tables.
+        CREATE TABLE IF NOT EXISTS durable_jobs (
+          job_id TEXT PRIMARY KEY,
+          owner_id INTEGER NOT NULL,
+          job_type TEXT NOT NULL,
+          payload_json TEXT NOT NULL DEFAULT '{}',
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending','running','succeeded','failed','cancelled')),
+          priority INTEGER NOT NULL DEFAULT 0,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 5,
+          next_attempt_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          locked_at TEXT,
+          locked_by TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          last_error TEXT,
+          correlation_id TEXT NOT NULL DEFAULT '',
+          idempotency_key TEXT NOT NULL UNIQUE
+        );
+        CREATE INDEX IF NOT EXISTS idx_durable_jobs_claim
+          ON durable_jobs(status, next_attempt_at, priority DESC, created_at);
+        CREATE INDEX IF NOT EXISTS idx_durable_jobs_owner ON durable_jobs(owner_id, status);
+        CREATE TABLE IF NOT EXISTS job_attempts (
+          attempt_id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES durable_jobs(job_id) ON DELETE CASCADE,
+          attempt_no INTEGER NOT NULL,
+          started_at TEXT NOT NULL,
+          finished_at TEXT,
+          outcome TEXT,
+          error_class TEXT,
+          error_message TEXT
+        );
+        CREATE TABLE IF NOT EXISTS llm_egress_log (
+          event_id TEXT PRIMARY KEY,
+          owner_id INTEGER,
+          request_id TEXT,
+          purpose TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          model TEXT,
+          data_classes TEXT NOT NULL,
+          decision TEXT NOT NULL,
+          redactions INTEGER NOT NULL DEFAULT 0,
+          payload_size INTEGER NOT NULL,
+          payload_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_llm_egress_owner_time
+          ON llm_egress_log(owner_id, created_at DESC);
         """
       )
       
@@ -692,7 +747,7 @@ class MemoryDatabase:
             conn.execute("ALTER TABLE memory_access_log ADD COLUMN retrieval_reason TEXT DEFAULT 'semantic'")
         except sqlite3.OperationalError:
           pass
-        for table_name in ("beliefs", "goals", "reflections"):
+        for table_name in ("beliefs", "goals", "reflections", "episodes"):
           try:
             t_cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table_name})").fetchall()]
             if "version" not in t_cols:
@@ -722,6 +777,12 @@ class MemoryDatabase:
         logger.error(
           "Schema incomplete, user_version left unchanged. Missing: %s", sorted(required - cols)
         )
+
+      # Versioned migrations are authoritative for upgrades.  Bootstrap still
+      # creates a fresh schema, then migrations record/perform compatible
+      # upgrades so fresh and upgraded databases converge.
+      from companion.migrations.runner import run_migrations
+      run_migrations(self)
 
 
   def _migrate_cognitive_schema(self, conn: sqlite3.Connection) -> None:
@@ -2726,6 +2787,102 @@ class MemoryDatabase:
     with self._conn() as conn:
       rows = conn.execute("SELECT * FROM entity_mentions WHERE entity_id=? ORDER BY id DESC", (entity_id,)).fetchall()
     return [dict(r) for r in rows]
+
+  # --- Durable work / external-model governance -----------------------
+
+  def enqueue_job(
+      self, *, owner_id: int, job_type: str, payload: dict[str, Any],
+      idempotency_key: str, priority: int = 0, max_attempts: int = 5,
+      next_attempt_at: str | None = None, correlation_id: str = "",
+  ) -> str:
+    """Persist work atomically before a worker observes it."""
+    job_id = f"job_{uuid.uuid4().hex}"
+    with self._conn() as conn:
+      row = conn.execute(
+        "SELECT job_id FROM durable_jobs WHERE idempotency_key=?", (idempotency_key,)
+      ).fetchone()
+      if row:
+        return str(row["job_id"])
+      conn.execute(
+        """INSERT INTO durable_jobs(job_id,owner_id,job_type,payload_json,priority,
+           max_attempts,next_attempt_at,correlation_id,idempotency_key)
+           VALUES(?,?,?,?,?,?,COALESCE(?,CURRENT_TIMESTAMP),?,?)""",
+        (job_id, owner_id, job_type, _json(payload), priority, max_attempts,
+         next_attempt_at, correlation_id, idempotency_key),
+      )
+    return job_id
+
+  def claim_due_job(self, worker_id: str, now: str | None = None) -> dict[str, Any] | None:
+    """Atomically claim exactly one due job using the writer transaction."""
+    now = now or datetime.now().isoformat()
+    with self.atomic_memory_transaction() as conn:
+      row = conn.execute(
+        """SELECT * FROM durable_jobs WHERE status='pending' AND next_attempt_at<=?
+           ORDER BY priority DESC, created_at ASC LIMIT 1""", (now,)
+      ).fetchone()
+      if not row:
+        return None
+      changed = conn.execute(
+        """UPDATE durable_jobs SET status='running', locked_at=?, locked_by=?,
+           attempt_count=attempt_count+1, updated_at=?
+           WHERE job_id=? AND status='pending'""",
+        (now, worker_id, now, row["job_id"]),
+      ).rowcount
+      if not changed:
+        return None
+      attempt_id = f"attempt_{uuid.uuid4().hex}"
+      conn.execute(
+        "INSERT INTO job_attempts(attempt_id,job_id,attempt_no,started_at) VALUES(?,?,?,?)",
+        (attempt_id, row["job_id"], int(row["attempt_count"]) + 1, now),
+      )
+      result = dict(row)
+      result["attempt_id"] = attempt_id
+      result["attempt_count"] = int(row["attempt_count"]) + 1
+      result["payload"] = _loads(result.pop("payload_json"), {})
+      return result
+
+  def complete_job(self, job_id: str, attempt_id: str, *, error: str | None = None,
+                   retry_at: str | None = None, permanent: bool = False) -> None:
+    now = datetime.now().isoformat()
+    with self.atomic_memory_transaction() as conn:
+      if error is None:
+        conn.execute("UPDATE durable_jobs SET status='succeeded', locked_at=NULL, locked_by=NULL, updated_at=? WHERE job_id=?", (now, job_id))
+        conn.execute("UPDATE job_attempts SET finished_at=?, outcome='succeeded' WHERE attempt_id=?", (now, attempt_id))
+        return
+      job = conn.execute("SELECT attempt_count,max_attempts FROM durable_jobs WHERE job_id=?", (job_id,)).fetchone()
+      exhausted = not job or int(job["attempt_count"]) >= int(job["max_attempts"])
+      status = "failed" if permanent or exhausted else "pending"
+      conn.execute(
+        """UPDATE durable_jobs SET status=?, next_attempt_at=COALESCE(?,next_attempt_at),
+           locked_at=NULL, locked_by=NULL, last_error=?, updated_at=? WHERE job_id=?""",
+        (status, retry_at, error[:2000], now, job_id),
+      )
+      conn.execute(
+        "UPDATE job_attempts SET finished_at=?, outcome=?, error_message=? WHERE attempt_id=?",
+        (now, status, error[:2000], attempt_id),
+      )
+
+  def recover_stale_jobs(self, stale_before: str) -> int:
+    with self._conn() as conn:
+      cur = conn.execute(
+        """UPDATE durable_jobs SET status='pending', locked_at=NULL, locked_by=NULL,
+           updated_at=CURRENT_TIMESTAMP WHERE status='running' AND locked_at<?""",
+        (stale_before,),
+      )
+      return cur.rowcount
+
+  def record_llm_egress(self, *, owner_id: int | None, request_id: str, purpose: str,
+                        provider: str, model: str, data_classes: list[str],
+                        decision: str, redactions: int, payload_size: int,
+                        payload_hash: str) -> None:
+    with self._conn() as conn:
+      conn.execute(
+        """INSERT INTO llm_egress_log(event_id,owner_id,request_id,purpose,provider,
+           model,data_classes,decision,redactions,payload_size,payload_hash)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        (f"egress_{uuid.uuid4().hex}", owner_id, request_id, purpose, provider,
+         model, _json(data_classes), decision, redactions, payload_size, payload_hash),
+      )
 
 
 

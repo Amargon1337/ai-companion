@@ -3,6 +3,7 @@ import logging
 import json
 from datetime import datetime, timedelta
 import time
+import uuid
 from typing import Any
 
 from companion.memory.store import MemoryStore
@@ -105,15 +106,14 @@ async def run_subconscious_consolidation(bot, store: MemoryStore):
                 trigger_ts = morning_time.timestamp()
                 
                 task_doc = {
+                    "task_id": f"morning_insight_{uuid.uuid4().hex}",
                     "text": insight,
-                    "target_user_id": target_user_id,
-                    "type": "morning_insight"
+                    "due_ts": trigger_ts,
+                    "status": "pending",
+                    "created_at": datetime.now().isoformat(),
+                    "metadata": {"target_user_id": target_user_id, "type": "morning_insight"},
                 }
-                
-                await store.db.async_insert_prospective_task(
-                    trigger_time=trigger_ts,
-                    task_data=task_doc
-                )
+                await store.db.async_upsert_prospective_task(task_doc)
                 logger.info(f"Subconscious scheduled morning insight for {morning_time}")
                 
         logger.info("Night subconscious consolidation completed.")

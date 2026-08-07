@@ -85,17 +85,21 @@ async def process_document(
         tg_file = await bot.get_file(doc.file_id)
         await bot.download_file(tg_file.file_path, file_path)
         text, gemini_file = await extract_content(file_path, file_name, doc.mime_type)
+        from companion.llm.prompt_segments import PromptSegment, PromptTrust, render_segments
         ctx = store.build_canonical_profile_text()
-        user_prompt = message.caption or "Проанализируй с учётом личности пользователя."
+        user_prompt = message.caption or "Проанализируй документ."
+        profile_data = render_segments([PromptSegment(PromptTrust.RETRIEVED_MEMORY, ctx)])
+        caption_data = render_segments([PromptSegment(PromptTrust.USER_MESSAGE, user_prompt)])
         if gemini_file:
             from companion.bot_core import wait_gemini_file_ready
 
             gemini_file = await wait_gemini_file_ready(gemini_file)
-            payload = [f"{ctx}\n\n{user_prompt}", gemini_file]
+            payload = [f"{profile_data}\n\n{caption_data}", gemini_file]
         elif text and text.strip():
             if len(text) > MAX_DOCUMENT_CHARS:
                 text = text[:MAX_DOCUMENT_CHARS] + "\n[обрезано]"
-            payload = f"{ctx}\n\n[Файл: {file_name}]\n{text}\n\n[Запрос]\n{user_prompt}"
+            document_data = render_segments([PromptSegment(PromptTrust.DOCUMENT_CONTENT, text, file_name)])
+            payload = f"{profile_data}\n\n{document_data}\n\n{caption_data}"
         else:
             await message.answer("Не смог прочитать файл.")
             return
