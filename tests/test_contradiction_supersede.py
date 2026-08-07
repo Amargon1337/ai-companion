@@ -44,10 +44,13 @@ def _fake_embed(texts):
 
 
 @pytest.fixture
-def store():
+def store(monkeypatch):
     vi._embed_texts = _fake_embed
     work = tempfile.mkdtemp(prefix="hermes-sup-")
-    cfg.SQLITE_PATH = os.path.join(work, "sup.db")
+    # Use monkeypatch so the global cfg.SQLITE_PATH is restored after the
+    # test — mutating it in place leaked into every later test in the run
+    # (order-dependent flakiness: 6 tests broke whenever this file ran first).
+    monkeypatch.setattr(cfg, "SQLITE_PATH", os.path.join(work, "sup.db"))
     s = MemoryStore()
     yield s
     shutil.rmtree(work, ignore_errors=True)

@@ -208,9 +208,25 @@ def test_pending_review_revival_guard(memory_store):
 
 
 @patch("companion.llm.client.oneshot_structured")
-def test_consolidation_pending_review_ignored(mock_oneshot, memory_store):
+def test_consolidation_pending_review_ignored(mock_oneshot, memory_store, monkeypatch):
     from companion.models import Fact
     from companion.llm.pipeline import consolidate_facts
+
+    # Embeddings must be stubbed: this test asserts status transitions, not
+    # real API behavior. Without the stub, add_fact hits the real embedding
+    # API, fails with the test key, and marks facts pending_embedding.
+    import companion.memory.vector_index as vi
+
+    def _fake_embed(texts):
+        import hashlib
+        from companion.config import EMBEDDING_DIM
+        out = []
+        for t in texts:
+            h = hashlib.sha256(t.encode("utf-8")).digest()
+            out.append([((h[i % len(h)] % 200) - 100) / 100.0 for i in range(EMBEDDING_DIM)])
+        return out
+
+    monkeypatch.setattr(vi, "_embed_texts", _fake_embed)
     
     # 1. Create active fact A
     fact_a = Fact(

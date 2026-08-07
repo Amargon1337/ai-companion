@@ -8,7 +8,6 @@ from datetime import datetime
 from typing import Any
 
 from companion.config import DATA_DIR
-from companion.config import DATA_DIR
 
 LOGS_DIR = os.path.join(DATA_DIR, "logs")
 os.makedirs(LOGS_DIR, exist_ok=True)

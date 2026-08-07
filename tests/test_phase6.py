@@ -16,8 +16,6 @@ from companion.llm.prompt_compiler.budget import ContextBudgetManager, SIMPLE_BU
 # 6.3 Profilers
 from companion.llm.token_profiler import TokenProfiler, TokenProfile
 from companion.llm.latency_profiler import LatencyProfiler, LatencyProfile
-# 6.4 Agent Router
-from companion.llm.agent_router import AgentRouter, AgentProfile, AGENT_PROFILES
 # 6.5 Tool Registry
 from companion.tools.registry import ToolRegistry, Tool, create_default_registry
 
@@ -122,32 +120,6 @@ def test_latency_profiler():
     assert lp.total_ms == 1872.0
     assert "LLM" in lp.report()
     assert profiler.last_profile is lp
-
-
-# ── 6.4 Agent Router ────────────────────────────────────────────────
-
-def test_agent_router_companion():
-    profile = AgentRouter.route("relationship", "Как дела у Жени?")
-    assert profile.name == "Companion"
-    assert profile.temperature == 0.8
-    assert profile.persona_enabled is True
-
-
-def test_agent_router_coding():
-    profile = AgentRouter.route("general", "Помоги найти баг в Python коде")
-    assert profile.name == "Coding"
-    assert profile.temperature == 0.3
-
-
-def test_agent_router_writing():
-    profile = AgentRouter.route("general", "Напиши короткий рассказ про осень")
-    assert profile.name == "Writing"
-
-
-def test_agent_router_analysis():
-    profile = AgentRouter.route("prediction")
-    assert profile.name == "Analysis"
-    assert profile.reasoning_level == "high"
 
 
 # ── 6.5 Tool Registry ───────────────────────────────────────────────

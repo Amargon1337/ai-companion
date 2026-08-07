@@ -64,10 +64,7 @@ def retrieval_score(
     w_relevance: float = 0.35,
     faiss_score: float | None = None,
 ) -> float:
-    importance = int(fact.get("importance", 5)) / 10.0
     kind = fact.get("memory_kind", "event")
-    age = days_since(fact.get("date") or fact.get("created_at", ""))
-    recency = decay_factor(age, kind)
 
     relevance = 0.3
     if faiss_score is not None and faiss_score > 0:

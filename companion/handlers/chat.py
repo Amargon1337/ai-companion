@@ -56,8 +56,6 @@ def get_main_keyboard():
 
 
 def register(dp, bot) -> None:
-    store = core.memory_store
-
     @dp.message(Command("start"))
     async def cmd_start(message: types.Message):
         await message.answer(

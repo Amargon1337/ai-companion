@@ -16,10 +16,10 @@ import sqlite3
 from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
-from companion.storage.repositories.base import BaseRepository, _json, _loads
+from companion.storage.repositories.base import BaseRepository, _loads
 
 if TYPE_CHECKING:
-    from companion.storage.sqlite_db import MemoryDatabase
+    pass
 
 logger = logging.getLogger(__name__)
 

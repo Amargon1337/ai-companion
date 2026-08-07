@@ -8,7 +8,6 @@ from companion.llm import client as llm
 from companion.llm.prompts import PERSONALITY_REPORT_PROMPT, RETROSPECTIVE_PROMPT
 import asyncio
 import re
-import uuid
 from datetime import datetime, timedelta
 import json
 from companion.models import Fact
@@ -100,7 +99,7 @@ async def show_facts(message: types.Message, query: str = "") -> None:
     store = core.memory_store
     args = query.strip()
     if args:
-        results = store.search_facts(args, limit=15)
+        results = await asyncio.to_thread(store.search_facts, args, limit=15)
         hits = [f for f, _ in results]
         if not hits:
             await message.answer(f"Фактов по '{args}' нет.")

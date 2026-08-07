@@ -3,14 +3,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from companion.config import MODEL_NAME, FINAL_RESPONSE_MODEL
+from companion.config import FINAL_RESPONSE_MODEL
 from companion.llm import client as llm
 from companion.llm.prompts import CORE_PERSONALITY, TONE_PROFILES, STRATEGY_PROFILES
 from companion.memory.retrieval import RetrievalBudgetManager
 from companion.memory.store import MemoryStore
-from companion.reasoning import reasoning_engine
 from companion.user_model import user_model
-import hashlib
+# Imported for test mocking: tests patch "companion.llm.sessions.reasoning_engine"
+# (dynamic attribute access invisible to static linters).
+from companion.reasoning import reasoning_engine  # noqa: F401
 from companion.config import LLM_HISTORY_TOKEN_BUDGET
 from companion.llm.token_budget import trim_history
 
@@ -22,10 +23,8 @@ def build_system_instruction(
     query: str = "",
     precomputed_context: str | None = None,
 ) -> str:
-    from companion.user_model import user_model
     effective_state, momentum_metrics = user_model.get_effective_emotional_state()
     baseline_state = effective_state
-    PROMPT_VERSION = f"v7_static_{baseline_state}"
     ivan = store.db.get_meta("legacy_profile", "")
     
     strategy = STRATEGY_PROFILES.get(baseline_state, STRATEGY_PROFILES.get("neutral"))

@@ -1,18 +1,15 @@
 """Reasoning Engine — активная модель мира, цели, причинно-следственные связи."""
 from __future__ import annotations
 
-import json
 import os
 import re
 import time
 from datetime import datetime
 from typing import Any
 
-from companion.config import DATA_DIR
 from companion.memory.text_sim import text_overlap
 from companion.storage.sqlite_db import MemoryDatabase
 
-from companion.storage.sqlite_db import MemoryDatabase
 class Goal:
     """Долговременная цель пользователя."""
 
@@ -62,7 +59,11 @@ class Goal:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Goal:
-        return cls(**data)
+        """Create Goal from dict, ignoring unknown keys (e.g. DB-only columns)."""
+        import inspect
+        params = set(inspect.signature(cls.__init__).parameters)
+        params.discard("self")
+        return cls(**{k: v for k, v in data.items() if k in params})
 
 
 class CausalLink:
@@ -78,6 +79,8 @@ class CausalLink:
         observed_count: int = 1,
         created_at: str | None = None,
         link_id: str | None = None,
+        derived_from: list[str] | None = None,
+        method: str = "llm",
     ):
         self.cause = cause
         self.effect = effect
@@ -87,6 +90,8 @@ class CausalLink:
         self.observed_count = observed_count
         self.created_at = created_at or datetime.now().isoformat()
         self.link_id = link_id or f"link_{os.urandom(4).hex()}"
+        self.derived_from = derived_from or []
+        self.method = method
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -98,11 +103,25 @@ class CausalLink:
             "mechanism": self.mechanism,
             "observed_count": self.observed_count,
             "created_at": self.created_at,
+            "derived_from": self.derived_from,
+            "method": self.method,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CausalLink:
-        return cls(**data)
+        """Create CausalLink from dict, ignoring unknown keys."""
+        import json as _json
+        d = dict(data)
+        for key in ("evidence", "derived_from"):
+            if key in d and isinstance(d[key], str):
+                try:
+                    d[key] = _json.loads(d[key])
+                except (TypeError, ValueError):
+                    d[key] = []
+        known_params = {"cause", "effect", "confidence", "evidence", "mechanism",
+                       "observed_count", "created_at", "link_id", "derived_from", "method"}
+        filtered = {k: v for k, v in d.items() if k in known_params}
+        return cls(**filtered)
 
 
 class ReasoningEngine:

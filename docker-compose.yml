@@ -1,3 +1,6 @@
+# Local dev observability stack (Langfuse). NOT used in production — the bot
+# runs as a native Windows service (no Docker on this machine).
+# Secrets are placeholders; override via environment variables if ever used.
 version: '3.8'
 services:
   langfuse-server:
@@ -7,17 +10,17 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/postgres
-      - NEXTAUTH_SECRET=mysecret
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-postgres}
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:-please-change-me}
       - NEXTAUTH_URL=http://localhost:3000
-      - SALT=mysalt
+      - SALT=${LANGFUSE_SALT:-please-change-me}
       - TELEMETRY_ENABLED=false
   db:
     image: postgres:15
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=postgres
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-postgres}
     ports:
       - "5432:5432"
     volumes:

@@ -8,8 +8,6 @@ from typing import Any
 
 from companion.models import (
     Entity,
-    EntityAttribute,
-    EntityMention,
     EntityRelation,
     Fact,
     _new_id,

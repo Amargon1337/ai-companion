@@ -1,9 +1,5 @@
-import asyncio
 import logging
-import json
 from datetime import datetime, timedelta
-import time
-from typing import Any
 
 from companion.memory.store import MemoryStore
 from companion.llm.client import aio_oneshot, parse_json_object
@@ -75,7 +71,6 @@ async def run_subconscious_consolidation(bot, store: MemoryStore):
                 
         # 4.5. Process predictions
         import uuid
-        import json as json_mod
         predictions = res.get("predictions", [])
         for p in predictions:
             if isinstance(p, dict) and p.get("hypothesis"):

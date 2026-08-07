@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import uuid
 from datetime import datetime
@@ -13,9 +12,6 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from companion.models import CommPref, HumanModel, LifeTransition
 
-from companion.config import (
-    DATA_DIR,
-)
 from companion.memory.importance import days_since
 from companion.memory.semantic_ranker import SemanticImportanceRanker
 

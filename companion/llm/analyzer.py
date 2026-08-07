@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
 
 from companion.llm.client import oneshot_structured, MessageAnalysis
 from companion.config import MODEL_NAME

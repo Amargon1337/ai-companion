@@ -9,7 +9,7 @@ from typing import Any
 from google import genai
 from google.genai import types as google_types
 
-from companion.config import GOOGLE_API_KEY, MODEL_NAME, SAFETY_SETTINGS_CONFIG, SEARCH_MODEL, LLM_TIMEOUT
+from companion.config import GOOGLE_API_KEY, MODEL_NAME, SAFETY_SETTINGS_CONFIG, LLM_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,8 @@ SAFETY_SETTINGS = _build_safety_settings()
 def make_config(**kwargs: Any) -> google_types.GenerateContentConfig:
     # Устанавливаем max_output_tokens по умолчанию, если не передан
     if 'max_output_tokens' not in kwargs:
-        kwargs['max_output_tokens'] = 8192
+        from companion.config import LLM_MAX_OUTPUT_TOKENS
+        kwargs['max_output_tokens'] = LLM_MAX_OUTPUT_TOKENS
     return google_types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS, **kwargs)
 
 
@@ -285,7 +286,7 @@ async def run_llm(
 # ── Structured Outputs with Pydantic ──────────────────────────────────
 
 from pydantic import BaseModel, Field
-from typing import Literal, Dict, List, Optional
+from typing import Literal, Dict, List
 
 class UserMood(BaseModel):
     anxiety: float = Field(default=0.0, ge=0.0, le=1.0)

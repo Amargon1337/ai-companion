@@ -252,18 +252,35 @@ class TestFAISSMemoryLeak:
         
         store = MemoryStore()
         
-        # Mock embeddings
+        # Mock embeddings — each text gets a HASH-BASED vector. A constant
+        # vector makes every fact look identical to the dedup gate (cosine
+        # similarity 1.0), so 100 facts collapse into one. Hash-derived
+        # vectors keep facts distinct and let the test verify rebuild/cleanup.
         from companion.config import EMBEDDING_DIM
-        test_vec = np.zeros(EMBEDDING_DIM, dtype=np.float32)
-        test_vec[0] = 1.0
-        monkeypatch.setattr(store.vector, 'embed_text_only', lambda text: test_vec.tolist())
-        monkeypatch.setattr(store.vector, 'compute_and_cache', 
-                         lambda text, *args, **kwargs: (store.vector.upsert_embedding(text, test_vec.tolist(), *args, **kwargs), test_vec.tolist())[1])
-        
-        # Add facts
+
+        def _hash_vec(text: str) -> list[float]:
+            import hashlib
+            h = hashlib.sha256(text.encode("utf-8")).digest()
+            return [((h[i % len(h)] % 200) - 100) / 100.0 for i in range(EMBEDDING_DIM)]
+
+        monkeypatch.setattr(store.vector, 'embed_text_only', _hash_vec)
+        monkeypatch.setattr(
+            store.vector, 'compute_and_cache',
+            lambda text, *args, **kwargs: (
+                store.vector.upsert_embedding(text, _hash_vec(text), *args, **kwargs),
+                _hash_vec(text),
+            )[1],
+        )
+
+        # Add facts — DISTINCT texts. The dedup gate (text_overlap n-grams >= 0.88)
+        # collapses near-identical strings like "Memory leak test fact N" or
+        # any shared-phrasing variants into a single fact, so the test must use
+        # fully unique strings to verify rebuild/cleanup behavior rather than
+        # tripping over dedup.
+        import uuid
         added_facts = []
         for i in range(100):
-            fact = make_fact(f"Memory leak test fact {i}", importance=5)
+            fact = make_fact(f"memoryleaktestfact-{uuid.uuid4().hex}", importance=5)
             result = store.add_fact(fact)
             added_facts.append(result)
 
@@ -281,10 +298,19 @@ class TestFAISSMemoryLeak:
                 with store.db._conn() as c:
                     print("NON NULL AFTER DELETING 1 FACT:", c.execute("SELECT count(*) FROM facts WHERE embedding IS NOT NULL").fetchone()[0])
         
-        # Verify deletion worked
+        # Verify deletion worked — check the index structures directly.
+        # NOTE: with mocked hash-vectors, approximate HNSW search can return a
+        # NEIGHBOR vector (random cosine > 0.3) for a deleted fact, so we must
+        # assert on the exact content_hash instead of search-result emptiness.
         for fact in added_facts[:50]:
-            results = store.vector.search(fact.fact, top_k=1)
-            assert len(results) == 0, f"Fact {fact.id} should not be searchable after deletion"
+            h = store.vector._content_hash(fact.fact)
+            assert h not in store.vector.hash_to_id, \
+                f"Fact {fact.id} still mapped in index after deletion"
+            assert fact.fact not in store.vector.id_to_content.values(), \
+                f"Fact {fact.id} content still present after deletion"
+            for r in store.vector.search(fact.fact, top_k=3):
+                assert r["content_hash"] != h, \
+                    f"Fact {fact.id} still returned by search after deletion"
         
         with store.db._conn() as conn:
             non_null_before = conn.execute("SELECT count(*) FROM facts WHERE embedding IS NOT NULL").fetchone()[0]
@@ -302,10 +328,13 @@ class TestFAISSMemoryLeak:
         assert len(store.vector._deleted_ids) == 0, \
             "Bug: _deleted_ids not cleared after rebuild"
         
-        # Verify all remaining facts are searchable
+        # Verify all remaining facts are still mapped in the index
         for fact in added_facts[50:]:
-            results = store.vector.search(fact.fact, top_k=1)
-            assert len(results) > 0, f"Fact {fact.id} should be searchable"
+            h = store.vector._content_hash(fact.fact)
+            assert h in store.vector.hash_to_id, \
+                f"Fact {fact.id} lost from index after rebuild"
+            assert any(r["content_hash"] == h for r in store.vector.search(fact.fact, top_k=3)), \
+                f"Fact {fact.id} should be searchable"
 
 
 # ============================================================================

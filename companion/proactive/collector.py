@@ -40,7 +40,6 @@ def collect_goal_context(decision: ReasonDecision, user_model: UserModel) -> Con
     )
 
 def collect_conversation_context(decision: ReasonDecision, user_model: UserModel) -> ContextPayload:
-    from companion.memory.store import MemoryStore
     from companion.bot_core import memory_store
     
     # Ideally we fetch open discussions. For V1 we fetch last summary or facts.

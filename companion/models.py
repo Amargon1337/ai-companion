@@ -605,7 +605,6 @@ class HumanModel:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "HumanModel":
-        known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
         def _as_list(v):
             return [HumanModelInsight.from_dict(x) if isinstance(x, dict) else
                     HumanModelInsight(text=str(x)) for x in (v or [])]

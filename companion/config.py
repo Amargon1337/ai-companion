@@ -89,6 +89,8 @@ def _bootstrap_log(msg: str) -> None:
 
 MODEL_NAME = os.getenv("MODEL_NAME", "gemini-3.5-flash-lite")
 FINAL_RESPONSE_MODEL = os.getenv("FINAL_RESPONSE_MODEL", "gemini-3.5-flash-lite")
+# Запасная модель для пустых ответов основной (см. bot_core retry-логику).
+FALLBACK_RESPONSE_MODEL = os.getenv("FALLBACK_RESPONSE_MODEL", "gemini-3.5-flash")
 # Для поиска с Google Search grounding используем Gemini Flash Lite
 SEARCH_MODEL = os.getenv("SEARCH_MODEL", "gemini-3.5-flash-lite")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
@@ -128,6 +130,9 @@ SPEECH_RECOGNITION_LANGUAGE = os.getenv("SPEECH_RECOGNITION_LANGUAGE", "ru-RU")
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "120"))
 LLM_RETRIES = int(os.getenv("LLM_RETRIES", "3"))
 LLM_RETRY_DELAY = int(os.getenv("LLM_RETRY_DELAY", "4"))
+# Default max output tokens for every LLM call. 8192 is generous for most
+# responses; override via MAX_OUTPUT_TOKENS to reduce cost/latency.
+LLM_MAX_OUTPUT_TOKENS = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "8192"))
 
 # Memory Settings
 REFLECTION_EVERY_N = int(os.getenv("REFLECTION_EVERY_N", "10"))

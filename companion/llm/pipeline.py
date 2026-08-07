@@ -254,7 +254,7 @@ def generate_reflections(
             status=status,
         )
         try:
-            stored = store.add_reflection(refl)
+            store.add_reflection(refl)
             logger.info(f"[DIAG] add_reflection success. status: {status}, content: {new_insight[:30]}...")
             created.append(refl)
         except Exception as e:
@@ -429,7 +429,6 @@ def extract_life_transitions(
     facts = store.facts_for_period(datetime.now().strftime("%Y-%m"), min_importance=4)
     fact_text = "\n".join(f"- {f.fact}" for f in facts[:100])
     hm = store.get_human_model()
-    from companion.models import HumanModel
     hm_text = "\n".join(
         f"[{dim}] " + "; ".join(i.text for i in getattr(hm, dim))
         for dim in ("goals", "fears", "strengths", "recurring_mistakes", "long_term_trends")

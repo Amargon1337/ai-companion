@@ -59,13 +59,43 @@ class ToolRegistry:
 
 # ── Built-in tool executors ──────────────────────────────────────────
 
+def _safe_arith_eval(expr: str) -> Any:
+    """Evaluate a restricted arithmetic expression via AST.
+
+    Only numeric literals and +,-,*,/,**,%, unary +/-, parentheses are
+    allowed. No names, attributes, calls, comprehensions — no RCE surface.
+    """
+    import ast
+
+    tree = ast.parse(expr, mode="eval")
+    allowed_nodes = (
+        ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
+        ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.FloorDiv,
+        ast.UAdd, ast.USub,
+    )
+    for node in ast.walk(tree):
+        if not isinstance(node, allowed_nodes):
+            raise ValueError(f"Выражение содержит недопустимую конструкцию: {type(node).__name__}")
+        if isinstance(node, ast.Constant) and not isinstance(node.value, (int, float)):
+            raise ValueError("Допустимы только числовые литералы")
+    return eval(compile(tree, "<safe_arith>", "eval"), {"__builtins__": {}}, {})
+
+
 def _filesystem_read(params: dict[str, Any]) -> Any:
-    """Reads a file from the filesystem."""
+    """Reads a file from the filesystem (restricted to the project directory)."""
+    import os
+
     path = params.get("path", "")
     if not path:
         return {"error": "Missing 'path' parameter."}
+    from companion.config import BASE_DIR
+
+    root = os.path.realpath(BASE_DIR)
+    target = os.path.realpath(os.path.join(root, path))
+    if target != root and not target.startswith(root + os.sep):
+        return {"error": "Доступ запрещён: чтение разрешено только внутри проекта."}
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(target, "r", encoding="utf-8") as f:
             return {"content": f.read()[:5000]}
     except Exception as e:
         return {"error": str(e)}
@@ -93,12 +123,12 @@ def _search_stub(params: dict[str, Any]) -> Any:
 
 
 def _python_run(params: dict[str, Any]) -> Any:
-    """Evaluates a simple Python expression (sandboxed)."""
+    """Evaluates a simple numeric expression (AST-restricted, no code execution)."""
     expr = params.get("expression", "")
     if not expr:
         return {"error": "Missing 'expression' parameter."}
     try:
-        result = eval(expr, {"__builtins__": {}}, {})
+        result = _safe_arith_eval(expr)
         return {"result": str(result)}
     except Exception as e:
         return {"error": str(e)}
