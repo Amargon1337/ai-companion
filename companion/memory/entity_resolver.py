@@ -92,20 +92,20 @@ class EntityResolverService:
         # 4. Vector Embedding Similarity Match (similarity >= 0.82)
         if self.vector is not None:
             try:
-                results = self.vector.search(
-                    text,
-                    top_k=3,
-                    min_score=0.82,
-                    content_type="entity",
-                )
+                # VectorIndex.search has no `min_score` argument; filter its
+                # normalized result explicitly.  Entity vectors are content
+                # strings, so resolve the returned content against the entity
+                # representation rather than expecting a nonexistent entity_id.
+                results = self.vector.search(text, top_k=3, content_type="entity")
                 for res in results:
-                    ent_id = res.get("entity_id") or res.get("id")
-                    if ent_id:
-                        for ent in all_entities:
-                            if ent.entity_id == ent_id:
-                                if expected_type and ent.type.lower() != expected_type.lower():
-                                    continue
-                                return ent
+                    if float(res.get("score", 0.0)) < 0.82:
+                        continue
+                    content = str(res.get("content", ""))
+                    for ent in all_entities:
+                        if content == f"{ent.name} ({ent.type})":
+                            if expected_type and ent.type.lower() != expected_type.lower():
+                                continue
+                            return ent
             except Exception as e:
                 logger.warning("Vector search in EntityResolverService failed: %s", e)
 

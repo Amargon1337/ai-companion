@@ -40,9 +40,13 @@ from companion.handlers import commands
 
 logger = logging.getLogger(__name__)
 
-# Global singletons
-memory_store = MemoryStore()
-retrieval_mgr = RetrievalBudgetManager(store=memory_store)
+# Compatibility module exports backed by the one production composition root.
+# Do not construct infrastructure here: imports from handlers historically use
+# these names, while AppContainer owns the actual DB/vector/event instances.
+from companion.container import get_container
+_runtime_container = get_container()
+memory_store = _runtime_container.memory_store
+retrieval_mgr = _runtime_container.retrieval
 context_aggregator = ContextAggregator(memory_store.db)
 
 # Embedding retry worker (initialized after memory_store)
@@ -370,6 +374,19 @@ async def show_timeline(message: types.Message) -> None:
 
 
 _compression_locks: dict[int, asyncio.Lock] = {}
+# A Telegram user may send a second update before the first LLM request has
+# completed.  Chat sessions, counters and traces are stateful, so processing
+# the same user's turns concurrently corrupts ordering.  Locks are retained
+# only for the configured owner in this single-user runtime; the helper still
+# supports a future tenant-scoped implementation.
+_request_locks: dict[int, asyncio.Lock] = {}
+
+def _get_request_lock(user_id: int) -> asyncio.Lock:
+    lock = _request_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _request_locks[user_id] = lock
+    return lock
 
 def _get_compression_lock(user_id: int) -> asyncio.Lock:
     if user_id not in _compression_locks:
@@ -721,8 +738,7 @@ def _strip_prefix(text: str, prefixes: list[str]) -> str:
 
 from companion.llm.telemetry import observe
 
-@observe(name="process_llm_request")
-async def process_llm_request(message: types.Message, content_payload: Any) -> None:
+async def _process_llm_request_serial(message: types.Message, content_payload: Any) -> None:
     cleanup_pending_commands()
     uid = message.from_user.id
     last_activity[uid] = time.time()
@@ -791,6 +807,25 @@ async def process_llm_request(message: types.Message, content_payload: Any) -> N
     trace = observability.finish_trace(uid)
     if trace:
         await asyncio.to_thread(observability.save_replay, trace, memory_store)
+
+
+@observe(name="process_llm_request")
+async def process_llm_request(message: types.Message, content_payload: Any) -> None:
+    """Process one user's turns strictly in arrival order.
+
+    Session/history replacement, compression counters and observability traces
+    are all per-user mutable state.  Serializing the full turn prevents one
+    concurrent update from finishing or persisting a replay for another.
+    """
+    uid = message.from_user.id
+    async with _get_request_lock(uid):
+        from companion.security.egress import bind_egress_context, reset_egress_context
+        request_id = uuid.uuid4().hex
+        token = bind_egress_context(uid, request_id=request_id, db=memory_store.db)
+        try:
+            await _process_llm_request_serial(message, content_payload)
+        finally:
+            reset_egress_context(token)
 
 
 async def _extract_prospective_memory(text: str) -> None:
@@ -1112,6 +1147,16 @@ async def _generate_and_send_response(message, chat, state, content_payload, que
             system_instruction = build_system_instruction(
                 memory_store, retrieval_mgr, query, precomputed_context=ctx_block
             )
+            # Final chat creation bypasses the helper one-shot APIs, therefore
+            # both system context and user payload must cross the same egress
+            # boundary explicitly before reaching the provider SDK.
+            from companion.security.egress import prepare_external_payload
+            system_instruction = prepare_external_payload(
+                system_instruction, purpose="foreground_system_context", model=desired_model
+            ).payload
+            content_payload = prepare_external_payload(
+                str(content_payload), purpose="foreground_user_payload", model=desired_model
+            ).payload
             reserved_tokens = estimate_tokens(system_instruction) + estimate_tokens(str(content_payload))
             history_budget = min(
                 LLM_HISTORY_TOKEN_BUDGET,
@@ -1323,9 +1368,12 @@ def fact_from_permanent_note(note: str) -> Fact:
 
 
 def _build_user_prompt_block(content_payload: str, reasoning_context: dict[str, Any]) -> str:
+    from companion.llm.prompt_segments import PromptSegment, PromptTrust, render_segments
     now = datetime.now()
     parts = [f"[Системное время: {now.strftime('%Y-%m-%d %H:%M')}]"]
-    parts.append(f"[Сообщение пользователя]\n{content_payload}")
+    # User content is rendered as typed data, never interpolated as an
+    # application instruction regardless of words contained in the message.
+    parts.append(render_segments([PromptSegment(PromptTrust.USER_MESSAGE, content_payload)]))
     if reasoning_context.get("causal_trigger"):
         parts.append("[Режим reasoning]\nПользователь спрашивает о причинах. Используй причинно-следственный анализ, если контекст это поддерживает.")
     if reasoning_context.get("future_trigger"):

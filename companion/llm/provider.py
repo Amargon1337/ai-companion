@@ -198,7 +198,9 @@ class GeminiProvider:
         timeout: int | None = None,
     ) -> str:
         import time
+        from companion.security.egress import prepare_external_payload
         model = model or self._config.model
+        prompt = prepare_external_payload(prompt, purpose="provider_complete", model=model).payload
         temp = temperature if temperature is not None else self._config.temperature
         last_exc = None
 
@@ -227,7 +229,9 @@ class GeminiProvider:
     ) -> Any:
         import json
         import time
+        from companion.security.egress import prepare_external_payload
         model = model or self._config.model
+        prompt = prepare_external_payload(prompt, purpose="provider_structured", model=model).payload
         last_exc = None
 
         config = self._make_config(
@@ -266,7 +270,10 @@ class GeminiProvider:
         model: str | None = None,
         temperature: float | None = None,
     ) -> str:
+        from companion.security.egress import prepare_external_payload
         model = model or self._config.model
+        system_instruction = prepare_external_payload(system_instruction, purpose="provider_chat_system", model=model).payload
+        message = prepare_external_payload(message, purpose="provider_chat_message", model=model).payload
         temp = temperature if temperature is not None else self._config.temperature
         chat = self._client.chats.create(
             model=model,
@@ -283,6 +290,11 @@ class GeminiProvider:
         """Generate embeddings via Gemini API."""
         if not texts:
             return []
+        from companion.security.egress import prepare_external_payload
+        texts = [
+            prepare_external_payload(text, purpose="provider_embedding", model=self._embedding_config.model).payload
+            for text in texts
+        ]
         from google.genai import types
         chunk_size = 90
         all_embeddings = []

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from companion.memory.importance import days_since
+from companion.memory.governor import ArchiveRecommendation
 from companion.storage.sqlite_db import MemoryDatabase
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ def collect_garbage(store: Any, apply: bool = False) -> list[GCCandidate]:
     report = store.hygiene_service.audit()
     candidates: list[GCCandidate] = []
     for rec in report.recommendations:
-        if getattr(rec, "action", "") == "archive":
+        if isinstance(rec, ArchiveRecommendation):
             fact_id = getattr(rec, "fact_id", "")
             fact = store.db.get_fact(fact_id)
             if fact:
@@ -72,15 +73,25 @@ def memory_health(store: Any) -> dict[str, Any]:
 
     quality_score = max(0, 100 - min(100, gc_candidates * 5 + duplicate_candidates * 10))
 
+    index_stats = memory_index_health(store)
+    contradiction_total = sum(int(f.get("contradiction_count") or 0) for f in all_facts)
+    orphan_active = sum(
+        1 for f in all_facts
+        if f.get("status") == "active" and not store.db.get_fact_relations(str(f.get("id")))
+    )
+    stale_predictions = sum(
+        1 for prediction in db.list_predictions(outcome="pending", limit=10000)
+        if prediction.get("created_at") and days_since(str(prediction["created_at"])) >= 90
+    )
     metrics.update(
         {
             "facts": metrics["total_facts"],
             "duplicate_candidates": duplicate_candidates,
             "duplicate_groups": duplicate_candidates,
-            "contradictions": 0,
-            "orphan_active_facts": 0,
-            "unused_embeddings": 0,
-            "stale_predictions": 0,
+            "contradictions": contradiction_total,
+            "orphan_active_facts": orphan_active,
+            "unused_embeddings": index_stats["orphan_vectors"],
+            "stale_predictions": stale_predictions,
             "gc_candidates": gc_candidates,
             "dormant_facts": dormant_facts,
             "superseded_facts": superseded_facts,
@@ -114,15 +125,18 @@ def memory_index_health(store: Any) -> dict[str, int]:
         if txt and hasattr(vector, "_content_hash"):
             valid_hashes.add(vector._content_hash(txt))
 
+    # Fact vectors live in facts.embedding and the authoritative searchable
+    # mapping is VectorIndex's loaded FAISS map; querying `embeddings` misses
+    # almost every fact and makes the health endpoint report false failures.
     indexed_hashes: set[str] = set()
     try:
-        with vector._conn() as conn:
-            rows = conn.execute(
-                "SELECT content_hash FROM embeddings WHERE content_type='fact'"
-            ).fetchall()
-        indexed_hashes = {str(row["content_hash"]) for row in rows}
+        indexed_hashes = {
+            str(content_hash)
+            for vector_id, content_hash in getattr(vector, "id_to_hash", {}).items()
+            if getattr(vector, "id_to_type", {}).get(vector_id) == "fact"
+        }
     except Exception as exc:
-        logger.error("Failed to query indexed vector hashes: %s", exc)
+        logger.error("Failed to inspect loaded vector mapping: %s", exc)
 
     orphan_vectors = len(indexed_hashes - valid_hashes)
     missing_vectors = len(active_hashes - indexed_hashes)

@@ -222,7 +222,12 @@ class AppContainer:
         """
         if self._memory_store is None:
             from companion.memory.store import MemoryStore
-            self._memory_store = MemoryStore()
+            self._memory_store = MemoryStore(
+                db=self.db,
+                vector=self.vector,
+                event_bus=self.event_bus,
+                governor=self.governor,
+            )
         return self._memory_store
 
     @property

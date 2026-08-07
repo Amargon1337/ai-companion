@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 MemoryKind = Literal["permanent", "state", "event"]
-FactStatus = Literal["active", "superseded", "quarantine", "archived", "dormant", "pending_review", "pending_embedding", "contradicted"]
+FactStatus = Literal["active", "superseded", "quarantine", "archived", "dormant", "pending_review", "pending_embedding", "failed_embedding", "contradicted", "purged"]
 RelationType = Literal[
     "supersedes",
     "contradicts",
@@ -860,6 +860,12 @@ class ContextBundle:
             memory_parts.append("[Контекст саммари]\n" + "\n".join(sanitized_sum))
             
         if memory_parts:
-            parts.append("<conversational_memory>\n" + "\n\n".join(memory_parts) + "\n</conversational_memory>")
+            # Memory is reference data.  A typed segment prevents it from
+            # being serialized in the same authority channel as application
+            # policy, even when its text contains imperative language.
+            from companion.llm.prompt_segments import PromptSegment, PromptTrust, render_segment
+            parts.append(render_segment(PromptSegment(
+                PromptTrust.RETRIEVED_MEMORY, "\n\n".join(memory_parts)
+            )))
             
         return "\n\n".join(parts)

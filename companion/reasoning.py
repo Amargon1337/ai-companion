@@ -108,10 +108,14 @@ class CausalLink:
 class ReasoningEngine:
     """Движок разума — модель мира, цели, причинность, прогнозы."""
 
-    def __init__(self):
+    def __init__(self, db: MemoryDatabase | None = None):
         import threading
         self._lock = threading.RLock()
-        self.db = MemoryDatabase()
+        if db is None:
+            # Compatibility fallback for standalone tooling; production passes
+            # the composition-root database explicitly below.
+            db = MemoryDatabase()
+        self.db = db
         self.world_model = self._load_world_model()
         self._last_wm_save = 0.0
 
@@ -371,5 +375,6 @@ class ReasoningEngine:
 
         return "\n".join(lines)
 
-# Global singleton
-reasoning_engine = ReasoningEngine()
+# Compatibility export backed by the production composition root.
+from companion.container import get_container
+reasoning_engine = ReasoningEngine(db=get_container().db)
